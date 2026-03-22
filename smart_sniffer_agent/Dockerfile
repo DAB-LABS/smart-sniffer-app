@@ -58,5 +58,6 @@ RUN if head -1 /opt/web/alpine.min.js | grep -q "PLACEHOLDER"; then \
 COPY run.sh /
 RUN chmod +x /run.sh
 
-# No CMD needed — the HA base image entrypoint (/init, s6-overlay)
-# automatically discovers and runs /run.sh
+# The HA base image provides ENTRYPOINT ["/init"] (s6-overlay).
+# CMD tells s6-overlay what to run as the main service.
+CMD [ "/run.sh" ]
