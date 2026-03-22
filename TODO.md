@@ -12,11 +12,15 @@
 ## App Store Submission
 - [ ] Create `apparmor.txt` — custom AppArmor profile (required for official store)
 - [ ] Test on aarch64 (Raspberry Pi) — currently only tested on amd64
-- [ ] Set up CI/CD pipeline (GitHub Actions) for automated Docker builds
+- [x] Set up CI/CD pipeline (GitHub Actions) for automated Docker builds
 - [ ] Publish container images to `ghcr.io/dab-labs/` (uncomment `image:` in config.yaml)
 - [ ] Move from `stage: experimental` to `stage: stable`
 - [ ] Add proper semantic versioning workflow
 - [ ] Review HA add-on store submission requirements and guidelines
+
+## Networking / Multi-Instance
+- [ ] **mDNS name collision** — multiple HA instances on the same network advertise the same service name (`smartha-{slug}`). Each instance needs a unique mDNS name (e.g. include HA hostname or UUID) so zeroconf discovery works correctly on multi-HA networks
+- [ ] Investigate whether the agent should use the HA instance's hostname (available via Supervisor API) in the mDNS advertisement
 
 ## Integration-Side Changes (see also smart-sniffer/TODO-integration.md)
 - [ ] Mask mDNS hostname in discovery dialog with friendly name ("Found HAOS Drive")
