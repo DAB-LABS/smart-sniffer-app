@@ -1,4 +1,4 @@
-# SMART Sniffer App
+![SMART Sniffer](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/SMARTsniffer.png)
 
 ## Monitor Your Home Assistant Drive
 
