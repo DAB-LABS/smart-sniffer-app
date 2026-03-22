@@ -53,6 +53,17 @@ profile smart_sniffer_agent flags=(attach_disconnected,mediate_deleted) {
   # udev metadata for device identification
   /run/udev/** r,
 
+  # s6-overlay init system and startup script
+  /init rix,
+  /run.sh rix,
+  /package/** rix,
+  /command/** rix,
+  /etc/s6-overlay/** rix,
+  /etc/s6/** rix,
+  /etc/services.d/** rix,
+  /etc/cont-init.d/** rix,
+  /etc/cont-finish.d/** rix,
+
   # Shell and standard utilities used by run.sh
   /bin/** rix,
   /usr/bin/** rix,
