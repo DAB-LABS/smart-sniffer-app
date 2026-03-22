@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local dev
+temp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar

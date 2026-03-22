@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SMART Sniffer — Agent Control Center</title>
+<script src="tailwind.min.js"></script>
+<script src="alpine.min.js" defer></script>
+<style>
+  /* ── Base Theme ─────────────────────────────────────────────────── */
+  :root {
+    --bg-primary: #0f0f1a;
+    --bg-card: #161625;
+    --bg-card-hover: #1c1c30;
+    --border: #2a2a40;
+    --border-accent: #3a3a55;
+    --text: #e4e4ef;
+    --text-muted: #8888a0;
+    --accent: #03A9F4;
+    --accent-dim: rgba(3,169,244,0.15);
+    --critical: #EF4444;
+    --critical-dim: rgba(239,68,68,0.12);
+    --warning: #F59E0B;
+    --warning-dim: rgba(245,158,11,0.12);
+    --healthy: #10B981;
+    --healthy-dim: rgba(16,185,129,0.12);
+    --unsupported: #6B7280;
+    --unsupported-dim: rgba(107,114,128,0.12);
+    --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-size: 15px; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg-primary);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* Subtle grid background */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(42,42,64,0.3) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(42,42,64,0.3) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .app-container {
+    position: relative;
+    z-index: 1;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px 24px 40px;
+  }
+
+  /* ── Typography ─────────────────────────────────────────────────── */
+  .mono { font-family: var(--mono); }
+  .text-muted { color: var(--text-muted); }
+
+  /* ── Status Dot ─────────────────────────────────────────────────── */
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block; margin-right: 6px;
+    flex-shrink: 0;
+  }
+  .dot-green { background: var(--healthy); box-shadow: 0 0 6px var(--healthy); }
+  .dot-red { background: var(--critical); box-shadow: 0 0 6px var(--critical); }
+  .dot-amber { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+  .dot-gray { background: var(--unsupported); }
+  .dot-blue { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+
+  /* ── Cards ──────────────────────────────────────────────────────── */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    transition: border-color 0.2s;
+  }
+  .card:hover { border-color: var(--border-accent); }
+
+  /* ── Drive Cards — Attention border ─────────────────────────────── */
+  .drive-card { border-left: 3px solid var(--border); }
+  .drive-card.att-no { border-left-color: var(--healthy); }
+  .drive-card.att-maybe {
+    border-left-color: var(--warning);
+    animation: pulse-warn 3s ease-in-out infinite;
+  }
+  .drive-card.att-yes {
+    border-left-color: var(--critical);
+    animation: pulse-crit 2s ease-in-out infinite;
+  }
+  .drive-card.att-unsupported { border-left-color: var(--unsupported); }
+
+  @keyframes pulse-warn {
+    0%, 100% { box-shadow: inset 0 0 0 0 transparent; }
+    50% { box-shadow: inset 0 0 20px var(--warning-dim); }
+  }
+  @keyframes pulse-crit {
+    0%, 100% { box-shadow: inset 0 0 0 0 transparent; }
+    50% { box-shadow: inset 0 0 20px var(--critical-dim); }
+  }
+
+  /* ── Protocol Badges ────────────────────────────────────────────── */
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-ata { background: #1e3a5f; color: #60a5fa; }
+  .badge-nvme { background: #1e3a2a; color: #4ade80; }
+  .badge-scsi { background: #3a2a1e; color: #fb923c; }
+
+  /* ── Attention State Badges ─────────────────────────────────────── */
+  .att-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 10px; border-radius: 12px;
+    font-size: 0.75rem; font-weight: 700;
+  }
+  .att-no-badge { background: #14532d; color: #4ade80; }
+  .att-maybe-badge { background: #422006; color: #fbbf24; }
+  .att-yes-badge { background: #450a0a; color: #f87171; }
+  .att-unsupported-badge { background: #1f2937; color: #9ca3af; }
+
+  /* ── Mock Card Distinction ──────────────────────────────────────── */
+  .mock-card {
+    border-style: dashed !important;
+    background: repeating-linear-gradient(
+      -45deg,
+      var(--bg-card),
+      var(--bg-card) 20px,
+      rgba(22,22,37,0.7) 20px,
+      rgba(22,22,37,0.7) 21px
+    );
+  }
+  .mock-watermark {
+    position: absolute; top: 8px; right: 12px;
+    font-size: 0.6rem; font-weight: 800;
+    text-transform: uppercase; letter-spacing: 2px;
+    color: rgba(245,158,11,0.25);
+  }
+
+  /* ── Test Lab Header ────────────────────────────────────────────── */
+  .testlab-header {
+    position: relative;
+    border: 1px dashed var(--warning);
+    border-radius: 10px;
+    padding: 14px 20px;
+    margin-bottom: 16px;
+    background: var(--warning-dim);
+  }
+  .classified-stamp {
+    position: absolute; top: 50%; right: 20px;
+    transform: translateY(-50%) rotate(-8deg);
+    font-size: 1.4rem; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 3px;
+    color: rgba(245,158,11,0.15);
+    pointer-events: none;
+  }
+
+  /* ── Log Viewer ─────────────────────────────────────────────────── */
+  .log-viewer {
+    background: #0a0a12;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: #4ade80;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.5;
+  }
+  .log-viewer .log-error { color: #f87171; }
+  .log-viewer .log-warn { color: #fbbf24; }
+
+  /* ── Attribute Input Grid ───────────────────────────────────────── */
+  .attr-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 8px;
+  }
+  .attr-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; border-radius: 6px;
+  }
+  .attr-row:hover { background: rgba(255,255,255,0.03); }
+  .attr-label { font-size: 0.78rem; color: var(--text-muted); min-width: 140px; flex-shrink: 0; }
+  .attr-input {
+    width: 80px; text-align: right;
+    background: var(--bg-primary); color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 4px 8px; font-family: var(--mono); font-size: 0.8rem;
+  }
+  .attr-input:focus { outline: none; border-color: var(--accent); }
+  .attr-hint { font-size: 0.62rem; color: #555570; white-space: nowrap; }
+  .attr-row.is-critical .attr-label { color: var(--critical); font-weight: 600; }
+  .attr-row.is-warning .attr-label { color: var(--warning); font-weight: 600; }
+
+  /* ── Section Headers ────────────────────────────────────────────── */
+  .section-title {
+    font-size: 0.85rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section-title .line {
+    flex: 1; height: 1px; background: var(--border);
+  }
+
+  /* ── Grid Layouts ───────────────────────────────────────────────── */
+  .status-grid {
+    display: grid; gap: 16px;
+    grid-template-columns: 1fr 1fr;
+  }
+  .fleet-grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+
+  @media (max-width: 768px) {
+    .status-grid { grid-template-columns: 1fr; }
+    .fleet-grid { grid-template-columns: 1fr; }
+    .attr-grid { grid-template-columns: 1fr; }
+    .app-container { padding: 12px 14px 30px; }
+  }
+
+  /* ── Select / Button Styles ─────────────────────────────────────── */
+  .select-dark {
+    background: var(--bg-primary); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 12px; font-size: 0.82rem;
+    cursor: pointer;
+  }
+  .select-dark:focus { outline: none; border-color: var(--accent); }
+
+  .btn {
+    cursor: pointer; border: none; border-radius: 6px;
+    padding: 6px 14px; font-size: 0.8rem; font-weight: 600;
+    transition: all 0.15s;
+  }
+  .btn-accent { background: var(--accent); color: #fff; }
+  .btn-accent:hover { background: #029ae0; }
+  .btn-danger-outline {
+    background: transparent; color: var(--critical);
+    border: 1px solid var(--critical);
+  }
+  .btn-danger-outline:hover { background: var(--critical); color: #fff; }
+  .btn-ghost {
+    background: transparent; color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover { border-color: var(--text-muted); color: var(--text); }
+
+  .btn-sm { padding: 3px 10px; font-size: 0.72rem; }
+
+  /* ── Collapsible ────────────────────────────────────────────────── */
+  .collapsible-header {
+    cursor: pointer;
+    user-select: none;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .chevron { transition: transform 0.2s; }
+  .chevron.open { transform: rotate(180deg); }
+
+  /* ── Smart Status Toggle ────────────────────────────────────────── */
+  .toggle-select {
+    background: var(--bg-primary); color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 3px 8px; font-size: 0.78rem;
+  }
+</style>
+</head>
+<body>
+
+<div class="app-container" x-data="controlCenter()" x-init="init()">
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       HEADER
+       ══════════════════════════════════════════════════════════════════ -->
+  <header style="display:flex; align-items:center; justify-content:space-between; margin-bottom:24px;">
+    <div style="display:flex; align-items:center; gap:14px;">
+      <div>
+        <div style="display:flex; align-items:baseline; gap:10px;">
+          <h1 class="mono" style="font-size:1.3rem; font-weight:700; letter-spacing:0.5px;">
+            SMART Sniffer
+          </h1>
+          <span class="mono" style="font-size:0.72rem; color:var(--text-muted);">AGENT CONTROL CENTER</span>
+        </div>
+        <div class="mono" style="font-size:0.65rem; color:var(--text-muted); margin-top:2px;">
+          v0.1.0
+        </div>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <span class="mono" style="font-size:0.7rem; color:var(--text-muted);"
+            x-text="currentTime"></span>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECTION 1: OPERATIONS STATUS
+       ══════════════════════════════════════════════════════════════════ -->
+  <div class="section-title">
+    <span>Operations Status</span><span class="line"></span>
+  </div>
+
+  <div class="status-grid" style="margin-bottom:28px;">
+
+    <!-- Real Agent Status -->
+    <div class="card">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+        <div style="display:flex; align-items:center; gap:6px; font-weight:600; font-size:0.9rem;">
+          <span class="dot" :class="agent.online ? 'dot-amber' : 'dot-gray'"></span>
+          HAOS Drive Agent
+        </div>
+        <span class="mono" style="font-size:0.7rem; padding:2px 8px; border-radius:4px;"
+              :style="agent.online ? 'background:var(--warning-dim);color:var(--warning)' : 'color:var(--text-muted)'"
+              x-text="agent.online ? 'ACTIVE' : 'INACTIVE'"></span>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px 20px; font-size:0.8rem;">
+        <div class="text-muted">Port</div>
+        <div class="mono">9099</div>
+        <div class="text-muted">Drives</div>
+        <div class="mono" x-text="agent.driveCount ?? '—'"></div>
+      </div>
+    </div>
+
+    <!-- Mock Agent Status -->
+    <div class="card" style="border:1px dashed var(--border);">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+        <div style="display:flex; align-items:center; gap:6px; font-weight:600; font-size:0.9rem;">
+          <span class="dot" :class="mock.online ? 'dot-amber' : 'dot-gray'"></span>
+          Test Lab Agent
+        </div>
+        <span class="mono" style="font-size:0.7rem; padding:2px 8px; border-radius:4px;"
+              :style="mock.online ? 'background:var(--warning-dim);color:var(--warning)' : 'color:var(--text-muted)'"
+              x-text="mock.online ? 'ACTIVE' : 'INACTIVE'"></span>
+      </div>
+      <template x-if="mock.online">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px 20px; font-size:0.8rem;">
+          <div class="text-muted">IP</div>
+          <div class="mono">172.30.33.1</div>
+          <div class="text-muted">Port</div>
+          <div class="mono">9100</div>
+          <div class="text-muted">Mock Drives</div>
+          <div class="mono" x-text="mock.driveCount ?? '—'"></div>
+        </div>
+      </template>
+      <template x-if="!mock.online">
+        <div style="font-size:0.8rem; color:var(--text-muted); padding:8px 0;">
+          Mock mode is disabled. Enable it in the app configuration to launch test drives.
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECTION 3: MOCK TEST LAB
+       ══════════════════════════════════════════════════════════════════ -->
+  <template x-if="mock.online">
+    <div>
+      <div class="testlab-header">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:1.2rem;">&#x1F9EA;</span>
+          <div>
+            <div style="font-weight:700; font-size:0.95rem; color:var(--warning);">Test Lab</div>
+            <div style="font-size:0.72rem; color:var(--text-muted);">Simulated drives for testing the SMART Sniffer integration</div>
+          </div>
+        </div>
+        <div class="classified-stamp">CLASSIFIED</div>
+      </div>
+
+      <!-- Setup Instructions -->
+      <div style="margin-bottom:16px; padding:10px 14px; border-radius:6px; background:rgba(255,193,7,0.08); border:1px solid rgba(255,193,7,0.2); font-size:0.78rem; line-height:1.6;">
+        <div style="font-weight:600; color:var(--warning); margin-bottom:4px;">Connect mock drives to Home Assistant:</div>
+        <div style="color:var(--text-muted);">
+          1. Go to <span class="mono" style="color:var(--text);">Settings &rarr; Devices &amp; Services &rarr; SMART Sniffer</span><br>
+          2. Click <span class="mono" style="color:var(--text);">Add Device</span><br>
+          3. Enter host <span class="mono" style="color:var(--text);">172.30.33.1</span> and port <span class="mono" style="color:var(--text);">9100</span><br>
+          4. Mock drives will appear as real HA entities you can use for testing
+        </div>
+      </div>
+
+      <!-- Mock Drive Cards -->
+      <template x-if="mockDrives.length === 0">
+        <div class="card" style="border-style:dashed; text-align:center; padding:30px; margin-bottom:28px;">
+          <div style="font-size:0.85rem; color:var(--text-muted);">
+            No test drives. Add one above to get started.
+          </div>
+        </div>
+      </template>
+
+      <div class="fleet-grid" style="margin-bottom:28px;">
+        <template x-for="drive in mockDrives" :key="drive.id">
+          <div class="card drive-card mock-card"
+               :class="'att-' + predictMockState(drive).toLowerCase()"
+               style="position:relative;">
+            <div class="mock-watermark">SIMULATED</div>
+
+            <!-- Drive Header -->
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
+              <div>
+                <div style="font-weight:600; font-size:0.92rem;" x-text="drive.model"></div>
+                <div class="mono" style="font-size:0.72rem; color:var(--text-muted);" x-text="drive.serial"></div>
+              </div>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span class="badge"
+                      :class="'badge-' + (drive.protocol||'').toLowerCase()"
+                      x-text="drive.protocol"></span>
+                <span class="att-badge"
+                      :class="'att-' + predictMockState(drive).toLowerCase() + '-badge'"
+                      x-text="predictMockState(drive)"></span>
+              </div>
+            </div>
+
+            <!-- SMART Status Toggle -->
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+              <span style="font-size:0.78rem; color:var(--text-muted);">SMART Status:</span>
+              <select class="toggle-select"
+                      :value="getMockSmartPassed(drive) ? 'PASSED' : 'FAILED'"
+                      @change="updateMockSmart(drive.id, 'smart_passed', $event.target.value === 'PASSED')">
+                <option value="PASSED">PASSED</option>
+                <option value="FAILED">FAILED</option>
+              </select>
+            </div>
+
+            <!-- Editable Attributes -->
+            <div class="attr-grid">
+              <template x-for="attr in getMockAttrs(drive)" :key="attr.name">
+                <div class="attr-row"
+                     :class="{'is-critical': attr.level === 'critical', 'is-warning': attr.level === 'warning'}">
+                  <span class="attr-label" x-text="attr.label"></span>
+                  <input type="number" class="attr-input mono"
+                         :value="attr.value"
+                         @change="updateMockSmart(drive.id, attr.name, parseInt($event.target.value) || 0)">
+                  <span class="attr-hint" x-text="attr.hint"></span>
+                </div>
+              </template>
+            </div>
+
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECTION 4: AGENT LOG
+       ══════════════════════════════════════════════════════════════════ -->
+  <div class="card" style="margin-bottom:20px;">
+    <div class="collapsible-header" @click="logOpen = !logOpen">
+      <div class="section-title" style="margin-bottom:0;">
+        <span>&#x1F4E1; Mission Log</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <button class="btn btn-ghost btn-sm" @click.stop="logLines = []"
+                x-show="logOpen">Clear</button>
+        <span class="chevron" :class="logOpen && 'open'" style="font-size:0.8rem; color:var(--text-muted);">&#x25BC;</span>
+      </div>
+    </div>
+    <div x-show="logOpen" x-transition style="margin-top:12px;">
+      <div class="log-viewer" x-ref="logViewer">
+        <template x-if="logLines.length === 0">
+          <span style="color:var(--text-muted);">Awaiting transmission...</span>
+        </template>
+        <template x-for="(line, i) in logLines" :key="i">
+          <div :class="{
+            'log-error': line.includes('ERROR') || line.includes('FATAL'),
+            'log-warn': line.includes('WARNING') || line.includes('WARN')
+          }" x-text="line"></div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     ALPINE.JS APPLICATION
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+function controlCenter() {
+  return {
+    // ── State ──────────────────────────────────────────────────────
+    currentTime: '',
+    logOpen: false,
+    logLines: [],
+
+    agent: {
+      online: false,
+      port: null,
+      uptime: null,
+      lastScan: null,
+      driveCount: null,
+      auth: false,
+    },
+
+    mock: {
+      online: false,
+      port: null,
+      driveCount: null,
+      pollCount: 0,
+      lastPoll: null,
+    },
+
+    realDrives: [],
+    mockDrives: [],
+
+    newMockPreset: 'sata_hdd',
+
+    mockPresets: [
+      ['sata_hdd',       'SATA HDD (Seagate Barracuda 2TB)'],
+      ['sata_ssd',       'SATA SSD (Samsung 870 EVO 500GB)'],
+      ['nvme',           'NVMe SSD (Samsung 980 PRO 1TB)'],
+      ['nvme_usb',       'NVMe USB-C Enclosure (Sabrent)'],
+      ['usb_blocked',    'USB External — SMART Blocked (WD Elements)'],
+      ['virtual_disk',   'Virtual Disk (QEMU VirtIO)'],
+      ['sas_enterprise', 'Enterprise SAS (Seagate Exos 10E2400)'],
+    ],
+
+    // ── Attention Classification Constants ─────────────────────────
+    ATA_CRITICAL: new Set([
+      'Reallocated_Sector_Ct', 'Current_Pending_Sector',
+      'Current_Pending_Sector_Ct', 'Total_Pending_Sectors',
+      'Offline_Uncorrectable', 'Reported_Uncorrect',
+      'Uncorrectable_Error_Cnt', 'Total_Offl_Uncorrectabl',
+    ]),
+
+    ATA_WARNING: new Set([
+      'Reallocated_Event_Count', 'Spin_Retry_Count', 'Command_Timeout',
+    ]),
+
+    // ── Init ───────────────────────────────────────────────────────
+    init() {
+      this.updateClock();
+      setInterval(() => this.updateClock(), 1000);
+
+      // Poll agent health & drives
+      this.pollAgent();
+      setInterval(() => this.pollAgent(), 8000);
+
+      // Poll mock agent
+      this.pollMock();
+      setInterval(() => this.pollMock(), 6000);
+    },
+
+    updateClock() {
+      this.currentTime = new Date().toLocaleTimeString('en-US', { hour12: false });
+    },
+
+    // ── Ingress Base URL ────────────────────────────────────────────
+    // HA ingress serves at /api/hassio_ingress/<token>/
+    // We need to resolve API paths relative to that base.
+    get baseUrl() {
+      const path = window.location.pathname;
+      // Strip trailing filename or slash to get the directory
+      return path.endsWith('/') ? path : path.substring(0, path.lastIndexOf('/') + 1);
+    },
+
+    // ── API Helpers ────────────────────────────────────────────────
+    async fetchJSON(url) {
+      try {
+        const fullUrl = this.baseUrl + url;
+        const resp = await fetch(fullUrl);
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch {
+        return null;
+      }
+    },
+
+    async fetchRaw(url, options) {
+      const fullUrl = this.baseUrl + url;
+      return fetch(fullUrl, options);
+    },
+
+    // ── Real Agent Polling ─────────────────────────────────────────
+    async pollAgent() {
+      const health = await this.fetchJSON('api/health');
+      if (health) {
+        this.agent.online = true;
+        this.agent.port = health.port || null;
+        this.agent.auth = !!health.auth_enabled;
+        // Only update driveCount from health if present to avoid flash
+        if (health.drive_count != null) {
+          this.agent.driveCount = health.drive_count;
+        }
+
+        // Uptime
+        if (health.uptime_seconds != null) {
+          this.agent.uptime = this.formatUptime(health.uptime_seconds);
+        } else if (health.started_at) {
+          const started = new Date(health.started_at);
+          const seconds = Math.floor((Date.now() - started.getTime()) / 1000);
+          this.agent.uptime = this.formatUptime(seconds);
+        }
+
+        // Last scan
+        if (health.last_scan) {
+          this.agent.lastScan = this.formatTimestamp(health.last_scan);
+        }
+
+        // Fetch real drives
+        const drivesData = await this.fetchJSON('api/drives');
+        if (drivesData && Array.isArray(drivesData)) {
+          // Fetch full detail for each drive
+          const detailed = [];
+          for (const d of drivesData) {
+            const full = await this.fetchJSON(`api/drives/${d.id}`);
+            if (full) detailed.push(full);
+            else detailed.push(d);
+          }
+          this.realDrives = detailed;
+          this.agent.driveCount = detailed.length;
+        }
+      } else {
+        this.agent.online = false;
+      }
+    },
+
+    // ── Mock Agent Polling ─────────────────────────────────────────
+    async pollMock() {
+      const health = await this.fetchJSON('mock/health');
+      if (health) {
+        this.mock.online = true;
+        this.mock.port = health.port || null;
+        // Only update driveCount from health if the field is present;
+        // otherwise wait for the drives list below to avoid a flash.
+        if (health.drive_count != null) {
+          this.mock.driveCount = health.drive_count;
+        }
+
+        // Fetch mock drives with full detail
+        const drivesData = await this.fetchJSON('mock/drives');
+        if (drivesData && Array.isArray(drivesData)) {
+          const detailed = [];
+          for (const d of drivesData) {
+            const full = await this.fetchJSON(`mock/drives/${d.id}`);
+            if (full) detailed.push(full);
+            else detailed.push(d);
+          }
+          this.mockDrives = detailed;
+          this.mock.driveCount = detailed.length;
+        }
+      } else {
+        this.mock.online = false;
+        this.mockDrives = [];
+      }
+    },
+
+    // ── Mock Drive Management ──────────────────────────────────────
+    async addMockDrive() {
+      try {
+        const resp = await this.fetchRaw('mock/drives', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preset: this.newMockPreset }),
+        });
+        if (resp.ok) {
+          await this.pollMock();
+        }
+      } catch (e) {
+        console.error('Failed to add mock drive:', e);
+      }
+    },
+
+    confirmRemoveMock(driveId, model) {
+      if (confirm(`Remove simulated drive "${model}"?`)) {
+        this.removeMockDrive(driveId);
+      }
+    },
+
+    async removeMockDrive(driveId) {
+      try {
+        await this.fetchRaw(`mock/drives/${driveId}`, { method: 'DELETE' });
+        await this.pollMock();
+      } catch (e) {
+        console.error('Failed to remove mock drive:', e);
+      }
+    },
+
+    async updateMockSmart(driveId, key, value) {
+      try {
+        const resp = await this.fetchRaw(`mock/drives/${driveId}/smart`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [key]: value }),
+        });
+        if (resp.ok) {
+          await this.pollMock();
+        }
+      } catch (e) {
+        console.error('Failed to update mock smart data:', e);
+      }
+    },
+
+    // ── Attention State Classification ─────────────────────────────
+    classifyDrive(drive) {
+      return this._classify(drive.smart_data || drive);
+    },
+
+    predictMockState(drive) {
+      return this._classify(drive.smart_data || drive);
+    },
+
+    _classify(sd) {
+      if (!sd) return 'UNSUPPORTED';
+
+      const hasSmartStatus = sd.smart_status != null;
+      const hasATA = sd.ata_smart_attributes && sd.ata_smart_attributes.table && sd.ata_smart_attributes.table.length > 0;
+      const hasNVMe = sd.nvme_smart_health_information_log != null;
+
+      if (!hasSmartStatus && !hasATA && !hasNVMe) return 'UNSUPPORTED';
+
+      // NVMe classification
+      if (hasNVMe) {
+        const nvme = sd.nvme_smart_health_information_log;
+        if ((nvme.critical_warning || 0) !== 0) return 'YES';
+        if ((nvme.media_errors || 0) > 0) return 'YES';
+        const spare = nvme.available_spare;
+        const thresh = nvme.available_spare_threshold;
+        if (spare != null && thresh != null && spare <= thresh) return 'YES';
+        if (spare != null && spare < 20) return 'MAYBE';
+        if ((nvme.percentage_used || 0) >= 90) return 'MAYBE';
+        return 'NO';
+      }
+
+      // ATA classification
+      const table = (sd.ata_smart_attributes || {}).table || [];
+      let hasCrit = false, hasWarn = false;
+      for (const attr of table) {
+        const raw = (attr.raw || {}).value || 0;
+        if (raw <= 0) continue;
+        if (this.ATA_CRITICAL.has(attr.name)) hasCrit = true;
+        if (this.ATA_WARNING.has(attr.name)) hasWarn = true;
+      }
+      if (hasCrit) return 'YES';
+      if (hasWarn) return 'MAYBE';
+      return 'NO';
+    },
+
+    // ── Drive Data Extractors ──────────────────────────────────────
+    getDriveTemp(drive) {
+      const sd = drive.smart_data || drive;
+      const nvme = sd.nvme_smart_health_information_log;
+      if (nvme && nvme.temperature != null) return nvme.temperature + '°C';
+      const table = (sd.ata_smart_attributes || {}).table || [];
+      const tempNames = ['Temperature_Celsius', 'Temperature_Internal', 'Airflow_Temperature_Cel', 'HDA_Temperature'];
+      for (const attr of table) {
+        if (tempNames.includes(attr.name)) return (attr.raw?.value ?? '?') + '°C';
+      }
+      return '—';
+    },
+
+    getDrivePOH(drive) {
+      const sd = drive.smart_data || drive;
+      const nvme = sd.nvme_smart_health_information_log;
+      if (nvme && nvme.power_on_hours != null) return nvme.power_on_hours.toLocaleString() + 'h';
+      const table = (sd.ata_smart_attributes || {}).table || [];
+      const pohNames = ['Power_On_Hours', 'Power_On_Hours_and_Msec', 'Power_On_Time'];
+      for (const attr of table) {
+        if (pohNames.includes(attr.name)) return (attr.raw?.value ?? '?').toLocaleString() + 'h';
+      }
+      return '—';
+    },
+
+    getDriveSmartPassed(drive) {
+      const sd = drive.smart_data || drive;
+      if (sd.smart_status && sd.smart_status.passed != null) {
+        return sd.smart_status.passed ? 'PASSED' : 'FAILED';
+      }
+      return '—';
+    },
+
+    getMockSmartPassed(drive) {
+      const sd = drive.smart_data || drive;
+      return sd.smart_status?.passed ?? true;
+    },
+
+    // ── Mock Attribute Helpers ─────────────────────────────────────
+    getMockAttrs(drive) {
+      const sd = drive.smart_data || drive;
+      const attrs = [];
+
+      const nvme = sd.nvme_smart_health_information_log;
+      if (nvme) {
+        const nvmeFields = [
+          { name: 'critical_warning',          label: 'Critical Warning',     hint: '≠0 → YES',              level: 'critical' },
+          { name: 'media_errors',              label: 'Media Errors',         hint: '≥1 → YES',              level: 'critical' },
+          { name: 'available_spare',           label: 'Available Spare %',    hint: '≤thresh → YES, <20 → MAYBE', level: 'warning' },
+          { name: 'available_spare_threshold', label: 'Spare Threshold %',    hint: "drive's min",            level: '' },
+          { name: 'percentage_used',           label: 'Percentage Used %',    hint: '≥90 → MAYBE',           level: 'warning' },
+          { name: 'temperature',               label: 'Temperature (°C)',     hint: '',                       level: '' },
+          { name: 'power_on_hours',            label: 'Power-On Hours',       hint: '',                       level: '' },
+          { name: 'power_cycles',              label: 'Power Cycles',         hint: '',                       level: '' },
+        ];
+        for (const f of nvmeFields) {
+          if (nvme[f.name] != null) {
+            // Dynamically determine level for spare
+            let lvl = f.level;
+            if (f.name === 'critical_warning' && nvme.critical_warning !== 0) lvl = 'critical';
+            if (f.name === 'media_errors' && nvme.media_errors > 0) lvl = 'critical';
+            if (f.name === 'available_spare') {
+              if (nvme.available_spare <= (nvme.available_spare_threshold || 10)) lvl = 'critical';
+              else if (nvme.available_spare < 20) lvl = 'warning';
+              else lvl = '';
+            }
+            if (f.name === 'percentage_used' && nvme.percentage_used >= 90) lvl = 'warning';
+
+            attrs.push({ name: f.name, label: f.label, hint: f.hint, value: nvme[f.name], level: lvl });
+          }
+        }
+        return attrs;
+      }
+
+      const table = (sd.ata_smart_attributes || {}).table || [];
+      for (const attr of table) {
+        let level = '';
+        let hint = '';
+        if (this.ATA_CRITICAL.has(attr.name)) {
+          level = (attr.raw?.value || 0) > 0 ? 'critical' : '';
+          hint = '≥1 → YES';
+        } else if (this.ATA_WARNING.has(attr.name)) {
+          level = (attr.raw?.value || 0) > 0 ? 'warning' : '';
+          hint = '≥1 → MAYBE';
+        }
+        attrs.push({
+          name: attr.name,
+          label: attr.name.replace(/_/g, ' '),
+          hint: hint,
+          value: attr.raw?.value ?? 0,
+          level: level,
+        });
+      }
+      return attrs;
+    },
+
+    // ── Formatting Helpers ─────────────────────────────────────────
+    formatUptime(seconds) {
+      if (seconds < 60) return seconds + 's';
+      if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (h < 24) return h + 'h ' + m + 'm';
+      const d = Math.floor(h / 24);
+      return d + 'd ' + (h % 24) + 'h';
+    },
+
+    formatTimestamp(isoString) {
+      try {
+        const d = new Date(isoString);
+        return d.toLocaleTimeString('en-US', { hour12: false });
+      } catch {
+        return isoString || '—';
+      }
+    },
+  };
+}
+</script>
+
+</body>
+</html>

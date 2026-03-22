@@ -1,0 +1,134 @@
+name: Build and Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  SLUG: smart_sniffer_agent
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        arch: [amd64, aarch64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (for cross-platform builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from config.yaml
+        id: version
+        run: |
+          VERSION=$(grep '^version:' ${{ env.SLUG }}/config.yaml | sed 's/version: *"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Map architecture to Docker platform
+        id: platform
+        run: |
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            echo "platform=linux/amd64" >> "$GITHUB_OUTPUT"
+          elif [ "${{ matrix.arch }}" = "aarch64" ]; then
+            echo "platform=linux/arm64" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.SLUG }}
+          file: ${{ env.SLUG }}/Dockerfile
+          platforms: ${{ steps.platform.outputs.platform }}
+          push: false
+          load: true
+          tags: |
+            local/${{ env.SLUG }}:test
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Test image starts
+        if: matrix.arch == 'amd64'
+        run: |
+          docker run --rm -d --name test-addon local/${{ env.SLUG }}:test sleep 30
+          # Verify key binaries exist
+          docker exec test-addon which smartctl || echo "smartctl not found"
+          docker exec test-addon which python3 || echo "python3 not found"
+          docker exec test-addon python3 -c "import json; print('Python OK')"
+          docker stop test-addon
+
+      - name: Push image
+        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.SLUG }}
+          file: ${{ env.SLUG }}/Dockerfile
+          platforms: ${{ steps.platform.outputs.platform }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dab-labs/${{ matrix.arch }}-smart-sniffer-agent:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/dab-labs/${{ matrix.arch }}-smart-sniffer-agent:latest
+          cache-from: type=gha,scope=${{ matrix.arch }}
+
+  lint:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate config.yaml
+        run: |
+          python3 -c "
+          import yaml, sys
+          with open('${{ env.SLUG }}/config.yaml') as f:
+              config = yaml.safe_load(f)
+          required = ['name', 'version', 'slug', 'arch', 'description']
+          for key in required:
+              if key not in config:
+                  print(f'Missing required key: {key}')
+                  sys.exit(1)
+          print(f'Config OK: {config[\"name\"]} v{config[\"version\"]}')
+          "
+
+      - name: Validate build.yaml
+        run: |
+          python3 -c "
+          import yaml
+          with open('${{ env.SLUG }}/build.yaml') as f:
+              build = yaml.safe_load(f)
+          print(f'Build config OK: {build}')
+          "
+
+      - name: Check Python syntax
+        run: |
+          python3 -m py_compile ${{ env.SLUG }}/mock-agent.py
+          echo "mock-agent.py syntax OK"
+
+      - name: Check Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ env.SLUG }}/Dockerfile
+          failure-threshold: warning

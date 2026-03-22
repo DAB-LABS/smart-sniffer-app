@@ -1,0 +1,98 @@
+name: Build and Publish
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+env:
+  AGENT_REPO: DAB-LABS/smart-sniffer
+  APP_SLUG: smart_sniffer_agent
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - aarch64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version from config.yaml
+        id: version
+        run: |
+          VERSION=$(grep '^version:' ${{ env.APP_SLUG }}/config.yaml | sed 's/version: *"\(.*\)"/\1/')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "App version: ${VERSION}"
+
+      - name: Download Alpine.js
+        run: |
+          curl -fSL -o ${{ env.APP_SLUG }}/web/alpine.min.js \
+            "https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"
+
+      - name: Download Tailwind CSS
+        run: |
+          curl -fSL -o ${{ env.APP_SLUG }}/web/tailwind.min.js \
+            "https://cdn.tailwindcss.com/3.4.17"
+
+      - name: Build with HA Builder
+        uses: home-assistant/builder@master
+        with:
+          args: |
+            --${{ matrix.arch }} \
+            --target ${{ env.APP_SLUG }} \
+            --docker-hub ghcr.io/dab-labs
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.tag.outputs.version }}"
+          body: |
+            ## SMART Sniffer Agent v${{ steps.tag.outputs.version }}
+
+            See [CHANGELOG](smart_sniffer_agent/CHANGELOG.md) for details.
+
+            ### Installation
+
+            Add this repository to your HA add-on store:
+            ```
+            https://github.com/DAB-LABS/smart-sniffer-app
+            ```
+          draft: false
+          prerelease: false

@@ -1,0 +1,62 @@
+#include <tunables/global>
+
+profile smart_sniffer_agent flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # Capabilities required for smartctl to read SMART data from drives
+  capability sys_rawio,
+  capability sys_admin,
+
+  # Network access — agent listens on configured ports, web UI proxy
+  network inet stream,
+  network inet dgram,
+  network inet6 stream,
+  network inet6 dgram,
+
+  # mDNS multicast
+  network inet dgram,
+
+  # Standard add-on paths
+  /data/** rw,
+  /config/** r,
+  /ssl/** r,
+  /share/** r,
+
+  # Add-on executable and library paths
+  /usr/bin/smartha-agent rix,
+  /usr/bin/smartctl rix,
+  /usr/bin/python3* rix,
+  /usr/lib/python3*/** r,
+  /usr/lib/libpython3* r,
+  /opt/** r,
+  /opt/mock-agent.py rix,
+  /opt/web/** r,
+
+  # System libraries and runtime
+  /lib/** r,
+  /usr/lib/** r,
+  /etc/** r,
+  /proc/** r,
+  /sys/** r,
+  /run/** r,
+  /tmp/** rw,
+
+  # Device access — smartctl reads SMART data from these devices
+  /dev/sd* r,
+  /dev/nvme* r,
+  /dev/vd* r,
+  /dev/sg* r,
+  /dev/null rw,
+  /dev/urandom r,
+  /dev/random r,
+
+  # udev metadata for device identification
+  /run/udev/** r,
+
+  # Shell and standard utilities used by run.sh
+  /bin/** rix,
+  /usr/bin/** rix,
+  /usr/sbin/** rix,
+
+  # Deny everything else by default (implicit in AppArmor)
+}

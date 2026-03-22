@@ -1,0 +1,18 @@
+configuration:
+  port:
+    name: Agent Port
+    description: Port for the real SMART Sniffer agent API
+  token:
+    name: Bearer Token
+    description: Optional authentication token. Must match the token in the SMART Sniffer integration config.
+  scan_interval:
+    name: Scan Interval
+    description: How often to refresh SMART data from drives (in seconds)
+  mock_mode:
+    name: Enable Mock Test Drives
+    description: Launch simulated drives for testing. Runs alongside the real agent on a separate port.
+  mock_port:
+    name: Mock Agent Port
+    description: Port for the mock test drive agent. Must differ from the real agent port.
+network:
+  9099/tcp: SMART Sniffer Agent API

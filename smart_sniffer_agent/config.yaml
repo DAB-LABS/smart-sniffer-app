@@ -1,0 +1,56 @@
+name: "SMART Sniffer App"
+description: "Monitors the health of your Home Assistant system drive. Reads SMART data from local hardware and reports it to the SMART Sniffer integration as HA entities."
+version: "0.1.6"
+slug: "smart_sniffer_agent"
+url: "https://github.com/DAB-LABS/smart-sniffer-app"
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: auto
+init: false
+
+# Network
+ports:
+  9099/tcp: 9099
+ports_description:
+  9099/tcp: "SMART Sniffer Agent API"
+
+# Drive access — smartctl needs raw I/O to read SMART data from host drives
+privileged:
+  - SYS_RAWIO
+
+# TODO: A custom AppArmor profile (apparmor.txt) may be needed for official
+# app store submission. For now, the default profile is used. If SYS_RAWIO
+# alone isn't sufficient for drive access, consider adding specific devices
+# to the 'devices' list or using 'full_access: true' for testing.
+
+# Ingress — serves the unified web UI inside the HA sidebar
+ingress: true
+ingress_port: 8099
+ingress_entry: /
+panel_icon: mdi:harddisk
+panel_title: "SMART Sniffer"
+
+# Health monitoring
+watchdog: "http://[HOST]:[PORT:9099]/api/health"
+
+# User-configurable options
+options:
+  port: 9099
+  token: ""
+  scan_interval: 60
+  mock_mode: false
+  mock_port: 9100
+schema:
+  port: port
+  token: "str?"
+  scan_interval: "int(10,3600)"
+  mock_mode: bool
+  mock_port: port
+
+# Container image (uncomment for published releases, must be removed for local builds)
+# image: "ghcr.io/dab-labs/{arch}-smart-sniffer-agent"
+
+# Mark as experimental during development
+stage: experimental
