@@ -1,0 +1,85 @@
+name: Bug Report
+description: Report a bug with the SMART Sniffer App
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more detail you provide, the faster we can track it down.
+
+  - type: input
+    id: app-version
+    attributes:
+      label: App Version
+      description: "Found in Settings → Add-ons → SMART Sniffer App"
+      placeholder: "e.g. 0.2.1"
+    validations:
+      required: true
+
+  - type: input
+    id: ha-version
+    attributes:
+      label: Home Assistant Version
+      description: "Found in Settings → About"
+      placeholder: "e.g. 2026.3.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-type
+    attributes:
+      label: Installation Type
+      options:
+        - Home Assistant OS (HAOS)
+        - Home Assistant Supervised
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware
+      options:
+        - x86_64 / Intel / AMD
+        - Raspberry Pi 5
+        - Raspberry Pi 4
+        - Raspberry Pi 3
+        - ODROID
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug. What did you expect vs. what actually happened?
+      placeholder: "When I click Start, the app fails with..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we trigger this bug?
+      placeholder: |
+        1. Install the app from custom repository
+        2. Click Start
+        3. Open Web UI
+        4. See error...
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: App Logs
+      description: "Copy logs from Settings → Add-ons → SMART Sniffer App → Log"
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Screenshots, drive model, anything else that might help.

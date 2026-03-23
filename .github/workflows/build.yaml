@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, aarch64]
+        arch: [amd64, aarch64, armv7]
         include:
           - arch: amd64
             platform: linux/amd64
@@ -30,6 +30,9 @@ jobs:
           - arch: aarch64
             platform: linux/arm64
             base_image: ghcr.io/home-assistant/aarch64-base:latest
+          - arch: armv7
+            platform: linux/arm/v7
+            base_image: ghcr.io/home-assistant/armv7-base:latest
 
     steps:
       - name: Checkout
@@ -106,12 +109,12 @@ jobs:
           print(f'Config OK: {config[\"name\"]} v{config[\"version\"]}')
           "
 
-      - name: Validate build.yaml
+      - name: Validate build.json
         run: |
           python3 -c "
-          import yaml
-          with open('${{ env.SLUG }}/build.yaml') as f:
-              build = yaml.safe_load(f)
+          import json
+          with open('${{ env.SLUG }}/build.json') as f:
+              build = json.load(f)
           print(f'Build config OK: {build}')
           "
 

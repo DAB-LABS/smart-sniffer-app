@@ -27,6 +27,7 @@ RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
         x86_64)  GO_ARCH="amd64" ;; \
         aarch64) GO_ARCH="arm64" ;; \
+        armv7l)  GO_ARCH="arm" ;; \
         *)       echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
     RELEASE_URL="https://github.com/DAB-LABS/smart-sniffer/releases/latest/download/smartha-agent-linux-${GO_ARCH}" && \
