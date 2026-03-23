@@ -79,7 +79,9 @@ This creates a second connection alongside your real drive — mock drives and r
 
 ## Web UI
 
-Click **Open Web UI** in the app sidebar to access the Agent Control Center — a real-time dashboard showing the status of both the local drive agent and the Test Lab. From here you can see agent health, drive counts, and manage mock drive attributes.
+Click **Open Web UI** in the app sidebar to access the Agent Control Center — a real-time dashboard showing the status of both the local drive agent and the Test Lab. From here you can see agent health, IP addresses, drive counts, and manage mock drive attributes.
+
+![Agent Control Center](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/agent_control_center.png)
 
 ## Troubleshooting
 
