@@ -46,6 +46,12 @@ https://github.com/DAB-LABS/smart-sniffer-app
 3. If auto-discovery doesn't appear, add it manually: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter host `172.30.33.1` and port `9099`
 4. Your system drive will appear as a device with sensors for temperature, health, attention state, and SMART attributes
 
+<p align="center">
+  <img src="images/ras-pi-testers-wanted.png" alt="Raspberry Pi Testers Wanted" width="480">
+</p>
+
+> **Raspberry Pi (armv7) — New!** We now support Raspberry Pi 2/3/4 (32-bit OS) alongside amd64 and aarch64. This is freshly built and untested in the field — if you're running Home Assistant on a Pi, we'd love your feedback. [Open an issue](https://github.com/DAB-LABS/smart-sniffer/issues) and let us know how it goes.
+
 ## How It Works
 
 ![SMART Sniffer Architecture](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/smartsniffer-architecture.png)
