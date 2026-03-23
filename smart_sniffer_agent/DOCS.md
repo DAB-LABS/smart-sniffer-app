@@ -1,4 +1,4 @@
-![SMART Sniffer](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/SMARTsniffer.png)
+![SMART Sniffer App for Home Assistant OS](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/SMARTsniffer_app.png)
 
 ## Monitor Your Home Assistant Drive
 
@@ -21,8 +21,9 @@ The app handles your local drive. For monitoring drives on other machines — a 
 
 1. **Install the SMART Sniffer integration** via HACS or manually (if you haven't already)
 2. **Start this app** — it begins monitoring your HA system drive immediately
-3. **Add the local agent** in the integration: go to Settings → Devices & Services → SMART Sniffer → Add Device, and enter host `localhost` port `9099`
-4. Your system drive will appear as a device with sensors for temperature, health, attention state, and SMART attributes
+3. Your HAOS drive should be **auto-discovered** — look for a notification under **Settings → Devices & Services** prompting you to set up SMART Sniffer
+4. If auto-discovery doesn't appear, add it manually: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter host `172.30.33.1` and port `9099`
+5. Your system drive will appear as a device with sensors for temperature, health, attention state, and SMART attributes
 
 ## Configuration
 
@@ -40,7 +41,12 @@ The app includes a built-in Test Lab with simulated drives for safely testing th
 
 Mock drives behave exactly like real drives from the integration's perspective. You can adjust their SMART attributes in the web UI and watch how the integration responds — attention states, health changes, temperature alerts, and more.
 
-To connect mock drives to Home Assistant, add a second agent in the integration using host `172.30.33.1` and port `9100`.
+To connect mock drives to Home Assistant, add them as a **separate agent** in the integration:
+
+1. Go to **Settings → Devices & Services → SMART Sniffer → Add Device**
+2. Enter host `172.30.33.1` and port `9100`
+
+This creates a second connection alongside your real drive — mock drives and real drives are managed independently.
 
 ## Web UI
 

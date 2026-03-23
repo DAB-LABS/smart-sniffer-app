@@ -28,6 +28,10 @@
 - [ ] Auto-detect mock agent in "Add Device" config flow (check 172.30.33.1:9100)
 - [ ] Guided mock setup flow ("Mock Test Lab detected — add it?")
 
+## Web UI Improvements
+- [ ] **Show agent IP address on the web UI** — display the agent's network address (e.g. `172.30.33.1:9099`) on the Agent Control Center page so users can easily find the IP for manual integration setup
+- [ ] Show mock agent IP/port when mock mode is enabled
+
 ## Polish
 - [ ] Add CONTRIBUTING.md
 - [ ] Add GitHub issue templates
