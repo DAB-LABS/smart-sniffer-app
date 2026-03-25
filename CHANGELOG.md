@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.2] — 2026-03-24
+
+### Added
+- **Raspberry Pi (armv7) support** — CI pipeline now builds for amd64, aarch64, and armv7. Untested on real hardware — testers welcome.
+- **CONTRIBUTING.md** — development setup, architecture overview, and PR guidelines.
+- **GitHub issue templates** — structured bug report and feature request forms.
+- **Web UI screenshot** in README — Agent Control Center showing both agent cards with IP addresses.
+- **Raspberry Pi testers callout** in README with banner image.
+
+### Fixed
+- **mDNS name collision on multi-HA networks** — the app now queries the Supervisor API for the HA hostname and passes `--mdns-name=smartha-<hostname>` to the agent (requires agent v0.4.28+). Each HA instance gets a unique mDNS service name, so both appear in discovery.
+- **CI lint step** — was referencing `build.yaml` instead of `build.json`.
+
+### Note on Upgrade
+After updating to v0.2.2, the integration may **re-discover** the HAOS drive agent as a new device. This is expected — the agent is now advertising under a new mDNS name based on your HA hostname instead of the generic container hostname. Your existing drive connection still works. You can safely dismiss the new discovery notification.
+
 ## [0.2.0] — 2026-03-22
 
 First beta release of the SMART Sniffer App for Home Assistant.
@@ -25,7 +41,7 @@ First beta release of the SMART Sniffer App for Home Assistant.
 - Production install failure (`/init: Permission denied`) resolved by removing custom AppArmor profile.
 
 ### Known Issues
-- **mDNS name collision** — multiple HA instances on the same network advertise the same mDNS service name. Workaround: add the integration manually via IP address (172.30.33.x:9099).
+- ~~**mDNS name collision**~~ — fixed in v0.2.2.
 - **VM drives** — virtual disks (e.g. Proxmox VMs) may not support SMART commands. The agent detects them but cannot report SMART attributes.
 - **AppArmor** — no custom profile; relies on the Supervisor default. May need a custom profile for official app store submission.
 
