@@ -97,7 +97,7 @@ Click **Open Web UI** in the app sidebar to access the Agent Control Center — 
 
 **USB drives showing UNSUPPORTED** — Many USB enclosures block SMART passthrough at the hardware level. This is a limitation of the USB bridge chip, not the app.
 
-**mDNS not discovered** — If you have multiple HA instances on the same network, mDNS names may collide. Add the agent manually via IP address as described in Step 3 above.
+**mDNS not discovered** — The app uses your HA hostname (Settings → System → General) to create a unique mDNS name. If you have multiple HA instances, make sure each has a different hostname. If auto-discovery still doesn't work, add the agent manually via IP address as described in Step 3 above.
 
 ## Links
 

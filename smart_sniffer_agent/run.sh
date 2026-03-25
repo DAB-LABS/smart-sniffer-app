@@ -4,7 +4,7 @@
 # ==============================================================================
 set -e
 
-APP_VERSION="0.1.0"
+APP_VERSION="0.2.1"
 
 # ── Read configuration ───────────────────────────────────────────────────────
 PORT=$(bashio::config 'port')
@@ -52,10 +52,40 @@ except:
     fi
 fi
 
+# ── Resolve HA hostname for unique mDNS name ─────────────────────────────────
+# On multi-HA networks, each instance needs a unique mDNS service name.
+# Query the Supervisor API for the real HA hostname (set in Settings → System).
+# Falls back gracefully — the agent uses its container hostname if this fails.
+HA_HOSTNAME=""
+MDNS_NAME=""
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    HA_HOSTNAME=$(curl -sSL -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        http://supervisor/host/info 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('data', {}).get('hostname', ''))
+except:
+    print('')
+" 2>/dev/null || echo "")
+
+    if [ -n "${HA_HOSTNAME}" ]; then
+        MDNS_NAME="smartha-${HA_HOSTNAME}"
+        bashio::log.info "mDNS name: ${MDNS_NAME} (from HA hostname: ${HA_HOSTNAME})"
+    else
+        bashio::log.warning "Could not resolve HA hostname — mDNS will use container hostname"
+    fi
+else
+    bashio::log.warning "SUPERVISOR_TOKEN not available — mDNS will use container hostname"
+fi
+
 # ── Start the real Go agent ──────────────────────────────────────────────────
 bashio::log.info "Starting SMART Sniffer agent on port ${PORT}..."
 
 AGENT_ARGS="--port=${PORT} --scan-interval=${SCAN_INTERVAL}s"
+if [ -n "${MDNS_NAME}" ]; then
+    AGENT_ARGS="${AGENT_ARGS} --mdns-name=${MDNS_NAME}"
+fi
 if bashio::var.has_value "${TOKEN}"; then
     AGENT_ARGS="${AGENT_ARGS} --token=${TOKEN}"
     AUTH_STATUS="enabled"
@@ -95,6 +125,7 @@ WEBUI_PID=$!
 bashio::log.info "─────────────────────────────────────────"
 bashio::log.info "SMART Sniffer App v${APP_VERSION}"
 bashio::log.info "Agent: running on port ${PORT}"
+bashio::log.info "mDNS: ${MDNS_NAME:-default (container hostname)}"
 bashio::log.info "Auth: ${AUTH_STATUS}"
 bashio::log.info "Mock: ${MOCK_STATUS}"
 bashio::log.info "Web UI: http://localhost:${INGRESS_PORT} (via ingress)"

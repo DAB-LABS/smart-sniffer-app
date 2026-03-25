@@ -9,8 +9,8 @@
 - [ ] Review HA add-on store submission requirements and guidelines
 
 ## Networking / Multi-Instance
-- [ ] **mDNS name collision** — multiple HA instances on the same network advertise the same service name (`smartha-{slug}`). Each instance needs a unique mDNS name (e.g. include HA hostname or UUID) so zeroconf discovery works correctly on multi-HA networks. Requires changes in both the Go agent (`--mdns-name` flag) and this app's `run.sh`.
-- [ ] Investigate whether the agent should use the HA instance's hostname (available via Supervisor API) in the mDNS advertisement
+- [x] **mDNS name collision** — resolved. `run.sh` now queries the Supervisor API for the HA hostname and passes `--mdns-name=smartha-<hostname>` to the Go agent (requires agent v0.4.28+). Each HA instance gets a unique mDNS name.
+- [x] Agent uses HA instance hostname from Supervisor API in mDNS advertisement
 
 ## Integration-Side Changes (see also smart-sniffer repo)
 - [ ] Mask mDNS hostname in discovery dialog with friendly name ("Found HAOS Drive")
