@@ -4,7 +4,7 @@
 # ==============================================================================
 set -e
 
-APP_VERSION="0.2.1"
+APP_VERSION="0.2.2"
 
 # ── Read configuration ───────────────────────────────────────────────────────
 PORT=$(bashio::config 'port')
@@ -58,7 +58,13 @@ fi
 # Falls back gracefully — the agent uses its container hostname if this fails.
 HA_HOSTNAME=""
 MDNS_NAME=""
-if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+
+# Try bashio's native helper first (handles Supervisor auth automatically),
+# then fall back to raw curl if bashio isn't available.
+if HA_HOSTNAME=$(bashio::host.hostname 2>/dev/null) && [ -n "${HA_HOSTNAME}" ]; then
+    MDNS_NAME="smartha-${HA_HOSTNAME}"
+    bashio::log.info "mDNS name: ${MDNS_NAME} (from HA hostname: ${HA_HOSTNAME})"
+elif [ -n "${SUPERVISOR_TOKEN:-}" ]; then
     HA_HOSTNAME=$(curl -sSL -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
         http://supervisor/host/info 2>/dev/null | python3 -c "
 import sys, json
@@ -76,7 +82,7 @@ except:
         bashio::log.warning "Could not resolve HA hostname — mDNS will use container hostname"
     fi
 else
-    bashio::log.warning "SUPERVISOR_TOKEN not available — mDNS will use container hostname"
+    bashio::log.warning "Supervisor API not available — mDNS will use container hostname"
 fi
 
 # ── Start the real Go agent ──────────────────────────────────────────────────
@@ -84,7 +90,13 @@ bashio::log.info "Starting SMART Sniffer agent on port ${PORT}..."
 
 AGENT_ARGS="--port=${PORT} --scan-interval=${SCAN_INTERVAL}s"
 if [ -n "${MDNS_NAME}" ]; then
-    AGENT_ARGS="${AGENT_ARGS} --mdns-name=${MDNS_NAME}"
+    # Only pass --mdns-name if the agent binary supports it (v0.4.28+)
+    if /usr/bin/smartha-agent --help 2>&1 | grep -q "mdns-name"; then
+        AGENT_ARGS="${AGENT_ARGS} --mdns-name=${MDNS_NAME}"
+    else
+        bashio::log.warning "Agent binary does not support --mdns-name (needs v0.4.28+). Using default mDNS name."
+        MDNS_NAME=""
+    fi
 fi
 if bashio::var.has_value "${TOKEN}"; then
     AGENT_ARGS="${AGENT_ARGS} --token=${TOKEN}"
