@@ -1,6 +1,6 @@
 name: "SMART Sniffer App"
 description: "Monitors the health of your Home Assistant system drive. Reads SMART data from local hardware and reports it to the SMART Sniffer integration as HA entities."
-version: "0.2.4"
+version: "0.2.5"
 slug: "smart_sniffer_agent"
 url: "https://github.com/DAB-LABS/smart-sniffer-app"
 arch:
@@ -17,17 +17,20 @@ ports:
 ports_description:
   9099/tcp: "SMART Sniffer Agent API"
 
-# Drive access — smartctl needs raw I/O to read SMART data from host drives
+# Drive access — smartctl needs raw I/O to read SMART data from host drives.
+# SYS_RAWIO: required for SATA drives (SG_IO ioctls)
+# SYS_ADMIN: required for NVMe drives (NVMe admin passthrough commands)
 privileged:
   - SYS_RAWIO
+  - SYS_ADMIN
 
 # Supervisor API access — needed to query HA hostname for unique mDNS names
 hassio_api: true
 
 # TODO: A custom AppArmor profile (apparmor.txt) may be needed for official
-# app store submission. For now, the default profile is used. If SYS_RAWIO
-# alone isn't sufficient for drive access, consider adding specific devices
-# to the 'devices' list or using 'full_access: true' for testing.
+# app store submission. For now, the default profile is used. If capabilities
+# alone aren't sufficient for NVMe device access, consider adding specific
+# devices to the 'devices' list or using 'full_access: true' for testing.
 
 # Ingress — serves the unified web UI inside the HA sidebar
 ingress: true
