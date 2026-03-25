@@ -23,6 +23,8 @@ RUN pip3 install --no-cache-dir --break-system-packages zeroconf
 # Download the Go agent binary from GitHub releases.
 # Detect architecture from the running container (works for both local builds
 # and CI builds, regardless of whether BUILD_ARCH is set).
+# CACHE_BUST changes with each app version to force a fresh binary download.
+ARG CACHE_BUST=1
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
         x86_64)  GO_ARCH="amd64" ;; \

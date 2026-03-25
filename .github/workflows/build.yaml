@@ -69,6 +69,7 @@ jobs:
           build-args: |
             BUILD_FROM=${{ matrix.base_image }}
             BUILD_ARCH=${{ matrix.arch }}
+            CACHE_BUST=${{ steps.version.outputs.version }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
@@ -83,6 +84,7 @@ jobs:
           build-args: |
             BUILD_FROM=${{ matrix.base_image }}
             BUILD_ARCH=${{ matrix.arch }}
+            CACHE_BUST=${{ steps.version.outputs.version }}
           tags: |
             ${{ env.REGISTRY }}/dab-labs/${{ matrix.arch }}-smart-sniffer-agent:${{ steps.version.outputs.version }}
             ${{ env.REGISTRY }}/dab-labs/${{ matrix.arch }}-smart-sniffer-agent:latest
