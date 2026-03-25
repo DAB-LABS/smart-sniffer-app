@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6 — 2026-03-25
+
+### Fixed
+
+- Fixed startup log showing incorrect version (displayed "v0.2.3" instead of actual version). The `APP_VERSION` in `run.sh` was not updated in the v0.2.5 release. All version sources now align: config.yaml, run.sh, and CHANGELOG.
+
 ## 0.2.5 — 2026-03-25
 
 ### Fixed
