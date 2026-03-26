@@ -21,7 +21,7 @@ The app handles your local drive. For monitoring drives on other machines — a 
 
 1. **Install the SMART Sniffer integration** via HACS or manually (if you haven't already)
 2. **Start this app** — it begins monitoring your HA system drive immediately
-3. **Turn off Protection Mode** — Go to **Settings → Apps → SMART Sniffer → Protection mode** and switch it **OFF**, then restart the app. This is required for drive access (see [Why Protection Mode must be off](#protection-mode) below)
+3. If your drive shows **UNSUPPORTED** or you see **"DRIVE ACCESS BLOCKED"** in the logs, turn off **Protection Mode** — Go to **Settings → Apps → SMART Sniffer → Protection mode**, switch it **OFF**, then restart the app (see [Protection Mode](#protection-mode) below)
 4. Your HAOS drive should be **auto-discovered** — look for a notification under **Settings → Devices & Services** prompting you to set up SMART Sniffer
 5. If auto-discovery doesn't appear, add it manually: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter host `172.30.33.1` and port `9099`
 6. Your system drive will appear as a device with sensors for temperature, health, attention state, and SMART attributes
@@ -57,9 +57,9 @@ Click **Open Web UI** to access the Agent Control Center — a real-time dashboa
 
 SMART monitoring requires direct hardware access — the same low-level access that `smartmontools`, `hdparm`, and Scrutiny need. The app uses `smartctl` to send raw SCSI and NVMe commands to your physical drive. This is the only way to read SMART health data.
 
-Home Assistant's Protection Mode restricts this kind of hardware access by default. When Protection Mode is ON, the app can detect your drive but cannot read its SMART data. You'll see "DRIVE ACCESS BLOCKED" in the logs if this is happening.
+On some hardware, Home Assistant's Protection Mode restricts the container from accessing drive device nodes. When this happens, the app can detect your drive but cannot read its SMART data — you'll see "DRIVE ACCESS BLOCKED" in the logs and your drive will show as UNSUPPORTED.
 
-**To fix:** Go to **Settings → Apps → SMART Sniffer**, turn OFF **Protection mode**, and restart the app.
+**If this affects you:** Go to **Settings → Apps → SMART Sniffer**, turn OFF **Protection mode**, and restart the app.
 
 ![Protection Mode toggle](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/protection_mode_button.png)
 
@@ -72,7 +72,7 @@ Home Assistant's Protection Mode restricts this kind of hardware access by defau
 
 ## Troubleshooting
 
-**Drives show "UNSUPPORTED" or no SMART data** — Make sure Protection Mode is OFF (see above). Check the app logs for "DRIVE ACCESS BLOCKED". If you see it, toggle Protection Mode off and restart.
+**Drives show "UNSUPPORTED" or no SMART data** — Check the app logs for "DRIVE ACCESS BLOCKED". If you see it, turn off Protection Mode (see above) and restart the app.
 
 **No drives detected** — The app needs the `SYS_RAWIO` capability to read SMART data from host drives. This is configured automatically. Check the app logs if drives aren't appearing.
 

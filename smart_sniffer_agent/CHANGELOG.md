@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.9 — 2026-03-26
+
+### Fixed
+
+- **Bearer token + ingress/sidebar bug** — When a bearer token was configured, the sidebar Web UI (Agent Control Center) couldn't connect to the agent API. HA's ingress proxy doesn't pass the token header through, so the agent rejected all Web UI requests. The proxy now injects the bearer token on localhost requests automatically. External API access still requires the token as before.
+
+### Added
+
+- **Automatic drivedb.h updates** — The smartmontools drive database (`drivedb.h`) is now updated from upstream on every startup. This keeps SMART attribute definitions current for uncommon drives. The updated database is persisted to `/data` so it survives container rebuilds. Falls back silently to the bundled version if no internet is available.
+
+### Changed
+
+- **Protection Mode messaging softened** — Documentation no longer presents disabling Protection Mode as a mandatory step. The app works with Protection Mode ON for some hardware configurations. If your drive shows UNSUPPORTED or the logs show "DRIVE ACCESS BLOCKED," turning off Protection Mode is the recommended fix.
+
 ## 0.2.8 — 2026-03-25
 
 ### Added

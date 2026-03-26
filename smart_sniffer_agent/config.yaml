@@ -1,6 +1,6 @@
 name: "SMART Sniffer App"
 description: "Monitors the health of your Home Assistant system drive. Reads SMART data from local hardware and reports it to the SMART Sniffer integration as HA entities."
-version: "0.2.8"
+version: "0.2.9"
 slug: "smart_sniffer_agent"
 url: "https://github.com/DAB-LABS/smart-sniffer-app"
 arch:

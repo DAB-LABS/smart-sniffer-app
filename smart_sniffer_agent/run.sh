@@ -4,7 +4,7 @@
 # ==============================================================================
 set -e
 
-APP_VERSION="0.2.8"
+APP_VERSION="0.2.9"
 
 # ── Read configuration ───────────────────────────────────────────────────────
 PORT=$(bashio::config 'port')
@@ -88,6 +88,29 @@ except:
     fi
 fi
 
+# ── Update smartmontools drive database ──────────────────────────────────────
+# drivedb.h maps drive models to their SMART attribute definitions. The version
+# bundled with Alpine may be months old — updating it improves attribute
+# interpretation for uncommon drives. Persisted to /data so it survives rebuilds.
+DRIVEDB_PERSIST="/data/drivedb.h"
+DRIVEDB_SYSTEM="/var/lib/smartmontools/drivedb/drivedb.h"
+
+# Restore persisted copy if available (faster than downloading every restart)
+if [ -f "${DRIVEDB_PERSIST}" ]; then
+    cp "${DRIVEDB_PERSIST}" "${DRIVEDB_SYSTEM}" 2>/dev/null || true
+fi
+
+# Try to fetch latest from upstream — fail silently if no internet
+# --no-verify: skip GPG signature check (gnupg not installed; HTTPS provides transport security)
+if update-smart-drivedb --no-verify >/dev/null 2>&1; then
+    cp "${DRIVEDB_SYSTEM}" "${DRIVEDB_PERSIST}" 2>/dev/null || true
+    bashio::log.info "drivedb.h: updated from upstream"
+elif [ -f "${DRIVEDB_PERSIST}" ]; then
+    bashio::log.info "drivedb.h: using persisted copy"
+else
+    bashio::log.info "drivedb.h: using bundled version"
+fi
+
 # ── Resolve HA hostname for unique mDNS name ─────────────────────────────────
 # On multi-HA networks, each instance needs a unique mDNS service name.
 # Query the Supervisor API for the real HA hostname (set in Settings → System).
@@ -163,10 +186,12 @@ fi
 # ── Start the web UI proxy server ────────────────────────────────────────────
 bashio::log.info "Starting web UI proxy on port ${INGRESS_PORT}..."
 
-python3 /opt/web/proxy.py \
-    --port="${INGRESS_PORT}" \
-    --agent-port="${PORT}" \
-    --mock-port="${MOCK_PORT}" &
+PROXY_ARGS="--port=${INGRESS_PORT} --agent-port=${PORT} --mock-port=${MOCK_PORT}"
+if bashio::var.has_value "${TOKEN}"; then
+    PROXY_ARGS="${PROXY_ARGS} --token=${TOKEN}"
+fi
+
+python3 /opt/web/proxy.py ${PROXY_ARGS} &
 WEBUI_PID=$!
 
 # ── Startup summary ─────────────────────────────────────────────────────────

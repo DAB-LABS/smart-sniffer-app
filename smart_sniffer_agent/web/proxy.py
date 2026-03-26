@@ -32,6 +32,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     agent_port: int = 9099
     mock_port: int = 9100
+    token: str = ""
 
     def log_message(self, format, *args):
         """Send access logs to stdout for HA log viewer."""
@@ -89,6 +90,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if k.lower() not in skip_headers
             }
             headers["Host"] = f"{host}:{port}"
+
+            # Inject bearer token for ingress requests (HA's ingress proxy
+            # doesn't know our token, so the web UI can't authenticate).
+            # This is safe — only localhost can reach this proxy.
+            if self.token and "Authorization" not in headers:
+                headers["Authorization"] = f"Bearer {self.token}"
 
             # Make the proxied request
             conn = http.client.HTTPConnection(host, port, timeout=30)
@@ -167,10 +174,12 @@ def main():
     parser.add_argument("--port", type=int, default=8099, help="Port to listen on")
     parser.add_argument("--agent-port", type=int, default=9099, help="Real agent port")
     parser.add_argument("--mock-port", type=int, default=9100, help="Mock agent port")
+    parser.add_argument("--token", type=str, default="", help="Bearer token for agent auth")
     args = parser.parse_args()
 
     ProxyHandler.agent_port = args.agent_port
     ProxyHandler.mock_port = args.mock_port
+    ProxyHandler.token = args.token
 
     server = HTTPServer(("0.0.0.0", args.port), ProxyHandler)
     print(f"[webui] Serving on port {args.port}", flush=True)
