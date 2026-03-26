@@ -4,7 +4,7 @@
 # ==============================================================================
 set -e
 
-APP_VERSION="0.2.6"
+APP_VERSION="0.2.8"
 
 # ── Read configuration ───────────────────────────────────────────────────────
 PORT=$(bashio::config 'port')
@@ -44,6 +44,42 @@ except:
     print(0)
 " 2>/dev/null || echo "0")
         bashio::log.info "Drives detected by smartctl: ${DRIVE_COUNT}"
+
+        # Try to actually read the first detected drive to check permissions
+        if [ "${DRIVE_COUNT}" -gt 0 ] 2>/dev/null; then
+            FIRST_DRIVE=$(smartctl --scan --json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    devs = data.get('devices', [])
+    print(devs[0]['name'] if devs else '')
+except:
+    print('')
+" 2>/dev/null || echo "")
+
+            if [ -n "${FIRST_DRIVE}" ]; then
+                SMART_OUTPUT=$(smartctl --json -i "${FIRST_DRIVE}" 2>&1 || true)
+                if echo "${SMART_OUTPUT}" | grep -q "Operation not permitted"; then
+                    bashio::log.warning "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    bashio::log.warning "DRIVE ACCESS BLOCKED"
+                    bashio::log.warning "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    bashio::log.warning "smartctl cannot open ${FIRST_DRIVE}."
+                    bashio::log.warning "SMART Sniffer needs direct hardware access"
+                    bashio::log.warning "to read drive health data."
+                    bashio::log.warning ""
+                    bashio::log.warning "To fix: Go to Settings → Apps → SMART Sniffer"
+                    bashio::log.warning "→ turn OFF 'Protection mode', then restart."
+                    bashio::log.warning ""
+                    bashio::log.warning "Why? Protection mode restricts hardware access."
+                    bashio::log.warning "SMART monitoring requires raw drive I/O, the"
+                    bashio::log.warning "same access used by smartmontools and Scrutiny."
+                    bashio::log.warning "Our code is open source: github.com/DAB-LABS"
+                    bashio::log.warning "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                else
+                    bashio::log.info "Drive access: OK (${FIRST_DRIVE})"
+                fi
+            fi
+        fi
     else
         DRIVE_COUNT="?"
         bashio::log.warning "smartctl --scan failed. This may be a permissions issue."

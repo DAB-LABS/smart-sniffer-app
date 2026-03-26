@@ -1,6 +1,6 @@
 name: "SMART Sniffer App"
 description: "Monitors the health of your Home Assistant system drive. Reads SMART data from local hardware and reports it to the SMART Sniffer integration as HA entities."
-version: "0.2.6"
+version: "0.2.8"
 slug: "smart_sniffer_agent"
 url: "https://github.com/DAB-LABS/smart-sniffer-app"
 arch:
@@ -24,13 +24,19 @@ privileged:
   - SYS_RAWIO
   - SYS_ADMIN
 
+# Full hardware access — required for smartctl to open drive device nodes.
+# Without this, the container's /dev is read-only and the device cgroup blocks
+# raw I/O to drives. This is the same approach Scrutiny uses.
+# Users must also disable Protection Mode in the app settings for drive access.
+full_access: true
+
 # Supervisor API access — needed to query HA hostname for unique mDNS names
 hassio_api: true
 
-# TODO: A custom AppArmor profile (apparmor.txt) may be needed for official
-# app store submission. For now, the default profile is used. If capabilities
-# alone aren't sufficient for NVMe device access, consider adding specific
-# devices to the 'devices' list or using 'full_access: true' for testing.
+# AppArmor — custom profile (apparmor.txt) provides the Protection Mode toggle
+# in the HA UI and documents what the container actually accesses.
+# Security note: Protection Mode must be OFF for drive monitoring to work.
+# With full_access + custom apparmor, score is approximately 4/8.
 
 # Ingress — serves the unified web UI inside the HA sidebar
 ingress: true

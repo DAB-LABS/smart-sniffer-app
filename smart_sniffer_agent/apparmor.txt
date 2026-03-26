@@ -1,0 +1,60 @@
+#include <tunables/global>
+
+profile smart_sniffer_agent flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # ── Capabilities ────────────────────────────────────────────────────────────
+  # Required for container operations
+  capability chown,
+  capability dac_override,
+  capability dac_read_search,
+  capability fowner,
+  capability setgid,
+  capability setuid,
+
+  # Required for SMART data access
+  capability sys_rawio,           # SATA/SAS drives (SG_IO ioctls)
+  capability sys_admin,           # NVMe drives (admin passthrough commands)
+
+  # ── Filesystem ──────────────────────────────────────────────────────────────
+  # Blanket file access within the container namespace. Required because
+  # s6-overlay-suexec runs with elevated privileges and needs to read/execute
+  # across the entire container filesystem (/package, /init, /bin, etc.).
+  # Attempting to enumerate individual paths caused "/init: Permission denied"
+  # in both v0.2.0 and during v0.2.7 testing. This is the same approach
+  # Scrutiny uses in their working AppArmor profile.
+  file,
+  signal,
+
+  # ── Network ─────────────────────────────────────────────────────────────────
+  # Agent HTTP API (port 9099), Web UI proxy (port 8099), mDNS (UDP multicast)
+  network tcp,
+  network udp,
+  network inet,
+  network inet6,
+  network netlink raw,
+  network unix dgram,
+
+  # ── Drive Access ────────────────────────────────────────────────────────────
+  # smartctl needs read/write access to drive device nodes for SMART queries.
+  # This is the core of what we're allowing — the reason this profile exists.
+  /dev/sd*  mrwkl,               # SATA/SAS drives (/dev/sda, /dev/sdb, etc.)
+  /dev/sg*  mrwkl,               # SCSI generic devices (alternative SMART path)
+  /dev/nvme* mrwkl,              # NVMe drives (/dev/nvme0, /dev/nvme0n1, etc.)
+  /dev/mmcblk* mrwkl,            # eMMC/SD cards (won't have SMART, but no harm)
+
+  # ── Filesystem Access ───────────────────────────────────────────────────────
+  # Add-on data persistence
+  /data/** rw,
+
+  # Temp files (smartctl may use temp for large outputs)
+  /tmp/** mrkwl,
+
+  # ── Docker / Supervisor Integration ─────────────────────────────────────────
+  # Suppress ptrace denials when using 'ps' inside the container
+  ptrace (trace,read) peer=docker-default,
+
+  # Docker daemon signal handling
+  signal (receive) set=(kill,term) peer=/usr/bin/docker,
+  signal,
+}

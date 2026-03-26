@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.8 — 2026-03-25
+
+### Added
+
+- **Full hardware access** (`full_access: true`) — resolves the root cause of drive read failures across all hardware types (NVMe, SATA, M.2 SATA). Home Assistant's container security has four enforcement layers: Linux capabilities, AppArmor profiles, device cgroup rules, and the `/dev` mount mode. Previous releases addressed the first two (capabilities in v0.2.5, AppArmor in v0.2.7) but drives still returned "Operation not permitted" because the device cgroup blocked raw I/O to drive nodes. `full_access` tells the Supervisor to grant the device cgroup rule (`a *:* rwm`) that smartctl needs to open `/dev/sda`, `/dev/nvme0`, etc. This is the same approach used by Scrutiny and other drive monitoring tools on HAOS.
+
+- **Startup drive access detection** — the app now probes the first detected drive during preflight and logs a clear "DRIVE ACCESS BLOCKED" warning if smartctl cannot open it, with step-by-step instructions to disable Protection Mode. When access is working, it logs "Drive access: OK (/dev/sda)".
+
+- **Protection Mode documentation** — README and DOCS.md now include a dedicated section explaining why Protection Mode must be OFF for drive monitoring, what turning it off does, what the app does NOT do (no writes, no network access, no phoning home), and our commitment to open-source transparency. Includes a screenshot of the Protection Mode toggle.
+
+- **Security & Permissions section** in README — documents every permission the app requests, why each is needed, and links to the source code for audit.
+
+### Changed
+
+- Updated troubleshooting guidance to lead with Protection Mode as the primary fix for "UNSUPPORTED" or missing SMART data.
+- Terminology updated: HA "Add-ons" → "Apps" throughout docs to match current Home Assistant naming.
+
+### Security Note
+
+With `full_access: true`, the HA security score is approximately **4/8**. We ship a custom AppArmor profile that documents exactly what the container accesses. Protection Mode defaults to ON — users must disable it for drive monitoring. All code is open source at [github.com/DAB-LABS](https://github.com/DAB-LABS).
+
+## 0.2.7 — 2026-03-25
+
+### Added
+
+- Custom AppArmor profile (`apparmor.txt`) for targeted drive access. The default HA AppArmor profile was blocking the system calls that `smartctl` needs to read SMART attributes from certain hardware (confirmed on Intel NUC with M.2 SATA SSD). This profile allows only the specific access smartctl requires while maintaining container security. Enables the **Protection Mode** toggle in the add-on UI. Security score improves from **6/8 to 7/8**.
+
 ## 0.2.6 — 2026-03-25
 
 ### Fixed
