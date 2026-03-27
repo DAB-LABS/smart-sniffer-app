@@ -63,6 +63,10 @@ On some hardware, Home Assistant's Protection Mode restricts the container from 
 
 ![Protection Mode toggle](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/protection_mode_button.png)
 
+After disabling Protection Mode, you'll see this warning — that's expected:
+
+![Protection Mode disabled warning](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/images/protection-mode-disabled-warning.png)
+
 **What does turning off Protection Mode do?** It allows the app's container to access drive device nodes (`/dev/sda`, `/dev/nvme0`, etc.) for read operations. The app does not write to your drives, does not access your network beyond the local HA instance, and does not send data externally.
 
 **Is this safe?** Yes. SMART Sniffer is fully open source — the Go agent, shell scripts, AppArmor profile, and integration are all published on GitHub for anyone to review. We ship a custom AppArmor security profile that documents exactly what the container accesses. The app reads drive data and serves it over a local API. That's all it does.
@@ -73,6 +77,8 @@ On some hardware, Home Assistant's Protection Mode restricts the container from 
 ## Troubleshooting
 
 **Drives show "UNSUPPORTED" or no SMART data** — Check the app logs for "DRIVE ACCESS BLOCKED". If you see it, turn off Protection Mode (see above) and restart the app.
+
+![Drive Access Blocked log](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/images/drive-access-blocked-log.png)
 
 **No drives detected** — The app needs the `SYS_RAWIO` capability to read SMART data from host drives. This is configured automatically. Check the app logs if drives aren't appearing.
 

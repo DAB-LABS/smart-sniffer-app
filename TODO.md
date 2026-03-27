@@ -1,7 +1,7 @@
 # SMART Sniffer App — TODO
 
 ## App Store Submission
-- [ ] **AppArmor profile** — Create `apparmor.txt` for official store submission. Deferred: a custom profile caused `/init: Permission denied` on Production during beta testing. Revisit once the default profile is proven stable across architectures.
+- [x] **AppArmor profile** — Created `apparmor.txt` (v0.2.7). Previous v0.2.0 failure (`/init: Permission denied`) was caused by missing S6-Overlay rules. New profile includes full S6 init system access, targeted drive device access (`/dev/sd*`, `/dev/nvme*`, `/dev/sg*`), and network rules. Modeled on Scrutiny's working profile. Score: 7/8.
 - [ ] Test on armv7 (Raspberry Pi 3/4 32-bit) — pipeline is ready, needs real hardware validation
 - [ ] Publish container images to `ghcr.io/dab-labs/` (uncomment `image:` in config.yaml)
 - [ ] Move from `stage: experimental` to `stage: stable`

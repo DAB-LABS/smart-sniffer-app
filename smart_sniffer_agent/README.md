@@ -81,6 +81,10 @@ If this affects you, go to **Settings → Apps → SMART Sniffer**, switch Prote
 
 ![Protection Mode toggle](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/protection_mode_button.png)
 
+After disabling Protection Mode, you'll see this warning — that's expected:
+
+![Protection Mode disabled warning](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/images/protection-mode-disabled-warning.png)
+
 **Our commitment to transparency:**
 
 SMART Sniffer is fully open source. The Go agent, startup scripts, AppArmor profile, and integration code are all published here for anyone to audit. We ship a custom AppArmor security profile that documents exactly what the container accesses. We're committed to requesting only the minimum permissions needed and being upfront about why each one is required.
@@ -88,6 +92,8 @@ SMART Sniffer is fully open source. The Go agent, startup scripts, AppArmor prof
 ## Troubleshooting
 
 **Drives show "UNSUPPORTED" or no SMART data** — Check the app logs for "DRIVE ACCESS BLOCKED". If you see it, turn off Protection Mode (see above) and restart the app.
+
+![Drive Access Blocked log](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/images/drive-access-blocked-log.png)
 
 **No drives detected** — The app needs `SYS_RAWIO` to read SMART data from host drives. This is configured automatically. Check the app logs if drives aren't appearing.
 
