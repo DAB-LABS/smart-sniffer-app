@@ -329,8 +329,8 @@
               x-text="agent.online ? 'ACTIVE' : 'INACTIVE'"></span>
       </div>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px 20px; font-size:0.8rem;">
-        <div class="text-muted">IP</div>
-        <div class="mono">172.30.33.1</div>
+        <div class="text-muted">Host</div>
+        <div class="mono" style="font-size:0.7rem; user-select:all;">0449a086-smart-sniffer-agent</div>
         <div class="text-muted">Port</div>
         <div class="mono">9099</div>
         <div class="text-muted">Drives</div>
@@ -351,8 +351,8 @@
       </div>
       <template x-if="mock.online">
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px 20px; font-size:0.8rem;">
-          <div class="text-muted">IP</div>
-          <div class="mono">172.30.33.1</div>
+          <div class="text-muted">Host</div>
+          <div class="mono" style="font-size:0.7rem; user-select:all;">0449a086-smart-sniffer-agent</div>
           <div class="text-muted">Port</div>
           <div class="mono">9100</div>
           <div class="text-muted">Mock Drives</div>
@@ -389,7 +389,7 @@
         <div style="color:var(--text-muted);">
           1. Go to <span class="mono" style="color:var(--text);">Settings &rarr; Devices &amp; Services &rarr; SMART Sniffer</span><br>
           2. Click <span class="mono" style="color:var(--text);">Add Device</span><br>
-          3. Enter host <span class="mono" style="color:var(--text);">172.30.33.1</span> and port <span class="mono" style="color:var(--text);">9100</span><br>
+          3. Enter host <span class="mono" style="color:var(--text);">0449a086-smart-sniffer-agent</span> and port <span class="mono" style="color:var(--text);">9100</span><br>
           4. Mock drives will appear as real HA entities you can use for testing
         </div>
       </div>

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.10 — 2026-03-27
+
+### Fixed
+
+- **Integration connection fix** — The Web UI and docs were showing `172.30.33.1` as the agent address. Now displays the correct container hostname (`0449a086-smart-sniffer-agent`) which resolves reliably in HAOS.
+
+### Changed
+
+- **Web UI** — Agent cards now show "Host" with the stable container hostname instead of a misleading IP. The hostname is selectable for easy copy-paste.
+- **Startup log** — Now includes an `Integration host:` line showing the correct hostname and port for manual setup.
+- **Docs** — All manual setup instructions updated to use the container hostname across DOCS.md, README.md, and the outer README.
+
 ## 0.2.9 — 2026-03-26
 
 ### Fixed

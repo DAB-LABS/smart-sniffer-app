@@ -23,7 +23,7 @@ The app handles your local drive. For monitoring drives on other machines — a 
 2. **Start this app** — it begins monitoring your HA system drive immediately
 3. If your drive shows **UNSUPPORTED** or you see **"DRIVE ACCESS BLOCKED"** in the logs, turn off **Protection Mode** — Go to **Settings → Apps → SMART Sniffer → Protection mode**, switch it **OFF**, then restart the app _(see [Security & Permissions](#security--permissions) for details)_
 4. Your HAOS drive should be **auto-discovered** — look for a notification under **Settings → Devices & Services** prompting you to set up SMART Sniffer
-5. If auto-discovery doesn't appear, add it manually: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter host `172.30.33.1` and port `9099`
+5. If auto-discovery doesn't appear, add it manually: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter host `0449a086-smart-sniffer-agent` and port `9099`
 6. Your system drive will appear as a device with sensors for temperature, health, attention state, and SMART attributes
 
 ## Configuration
@@ -45,7 +45,7 @@ Mock drives behave exactly like real drives from the integration's perspective. 
 To connect mock drives to Home Assistant, add them as a **separate agent** in the integration:
 
 1. Go to **Settings → Devices & Services → SMART Sniffer → Add Device**
-2. Enter host `172.30.33.1` and port `9100`
+2. Enter host `0449a086-smart-sniffer-agent` and port `9100`
 
 This creates a second connection alongside your real drive — mock drives and real drives are managed independently.
 

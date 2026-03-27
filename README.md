@@ -44,7 +44,7 @@ https://github.com/DAB-LABS/smart-sniffer-app
 
 1. Install the **SMART Sniffer integration** via [HACS](https://github.com/DAB-LABS/smart-sniffer) if you haven't already
 2. Your HAOS drive should be **auto-discovered** — look for a notification under **Settings → Devices & Services** prompting you to set up SMART Sniffer
-3. If auto-discovery doesn't appear, add it manually: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter host `172.30.33.1` and port `9099`
+3. If auto-discovery doesn't appear, add it manually: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter host `0449a086-smart-sniffer-agent` and port `9099`
 4. Your system drive will appear as a device with sensors for temperature, health, attention state, and SMART attributes
 
 <p align="center">
@@ -80,7 +80,7 @@ Mock drives behave exactly like real drives from the integration's perspective. 
 To connect mock drives to Home Assistant, add them as a **separate agent** in the integration:
 
 1. Go to **Settings → Devices & Services → SMART Sniffer → Add Device**
-2. Enter host `172.30.33.1` and port `9100`
+2. Enter host `0449a086-smart-sniffer-agent` and port `9100`
 
 This creates a second connection alongside your real drive — mock drives and real drives are managed independently.
 
@@ -132,7 +132,7 @@ SMART Sniffer is fully open source. The Go agent, startup scripts, AppArmor prof
 
 **USB drives showing UNSUPPORTED** — Many USB enclosures block SMART passthrough at the hardware level. This is a limitation of the USB bridge chip, not the app.
 
-**mDNS not discovered** — The app uses your HA hostname (Settings → System → General) to create a unique mDNS name. If you have multiple HA instances, make sure each has a different hostname. If auto-discovery still doesn't work, add the agent manually via IP address as described in Step 3 above.
+**mDNS not discovered** — The app uses your HA hostname (Settings → System → General) to create a unique mDNS name. If you have multiple HA instances, make sure each has a different hostname. If auto-discovery still doesn't work, add the agent manually using host `0449a086-smart-sniffer-agent` and port `9099` as described in Step 3 above.
 
 ## Links
 

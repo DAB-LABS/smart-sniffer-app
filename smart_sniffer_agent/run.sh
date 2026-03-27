@@ -4,7 +4,7 @@
 # ==============================================================================
 set -e
 
-APP_VERSION="0.2.9"
+APP_VERSION="0.2.10"
 
 # ── Read configuration ───────────────────────────────────────────────────────
 PORT=$(bashio::config 'port')
@@ -198,6 +198,7 @@ WEBUI_PID=$!
 bashio::log.info "─────────────────────────────────────────"
 bashio::log.info "SMART Sniffer App v${APP_VERSION}"
 bashio::log.info "Agent: running on port ${PORT}"
+bashio::log.info "Integration host: 0449a086-smart-sniffer-agent:${PORT}"
 bashio::log.info "mDNS: ${MDNS_NAME:-default (container hostname)}"
 bashio::log.info "Auth: ${AUTH_STATUS}"
 bashio::log.info "Mock: ${MOCK_STATUS}"
