@@ -12,6 +12,8 @@ __pycache__/
 
 # Local dev
 temp/
+smart_sniffer_agent_dev/
+docs/internal/
 
 # OS
 .DS_Store
