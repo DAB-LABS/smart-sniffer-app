@@ -21,3 +21,4 @@ Thumbs.db
 
 # Docker
 *.tar
+trash/
