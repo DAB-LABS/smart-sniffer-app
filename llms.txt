@@ -1,0 +1,53 @@
+# SMART Sniffer App (HAOS Add-on)
+
+> SMART Sniffer App is a Home Assistant OS add-on that monitors the health of the local
+> HAOS boot drive -- the SSD or NVMe that Home Assistant OS runs on. It runs a
+> lightweight S.M.A.R.T. agent inside the HA supervisor and exposes drive health data
+> to the SMART Sniffer HACS integration as native HA entities. Requires the SMART
+> Sniffer integration to be installed separately via HACS.
+
+This add-on handles one specific use case: the drive inside the Home Assistant OS
+machine itself. It is not for monitoring remote machines.
+
+Key behaviors:
+- Reads S.M.A.R.T. data from the HAOS host drive via smartctl inside the HA container.
+  Requires SYS_RAWIO capability, which is configured automatically by the add-on.
+- Exposes drive data via HTTP at 172.30.33.1:9099 by default.
+- Advertises itself via mDNS so the SMART Sniffer integration can auto-discover it.
+- Includes a Test Lab with simulated drives for safely testing the integration without
+  real hardware. Mock drives are configurable via the built-in web UI.
+- The web UI (Agent Control Center) is accessible from the HA add-on sidebar.
+
+Configuration options:
+- Agent Port (default: 9099)
+- Bearer Token (optional, must match what is configured in the integration)
+- Scan Interval in seconds (default: 60)
+- Enable Mock Test Drives (off by default)
+- Mock Agent Port (default: 9100)
+
+What this add-on is NOT:
+- Not for monitoring remote machines -- use the standalone Go agent from smart-sniffer
+  for NAS, Proxmox, workstations, Macs, and other machines.
+- Not a standalone tool -- requires the SMART Sniffer HACS integration to function.
+- Not available on HACS -- install by adding the repo URL to the HA add-on store.
+
+## Repositories
+
+- [smart-sniffer-app (this repo)](https://github.com/DAB-LABS/smart-sniffer-app):
+  Add-on source (smart_sniffer_agent/), configuration schema (repository.yaml),
+  Test Lab, and web UI.
+- [smart-sniffer](https://github.com/DAB-LABS/smart-sniffer): Primary repo. HACS
+  integration, standalone Go agent for remote machines, and all project documentation.
+
+## Documentation
+
+- [README](https://github.com/DAB-LABS/smart-sniffer-app/blob/main/README.md):
+  Installation steps, configuration reference, Test Lab usage, troubleshooting guide.
+- [CHANGELOG](https://github.com/DAB-LABS/smart-sniffer-app/blob/main/CHANGELOG.md):
+  Release history for the add-on.
+
+## Optional
+
+- [SMART Sniffer llms.txt](https://github.com/DAB-LABS/smart-sniffer/blob/main/llms.txt):
+  Full project context: agent architecture, entity reference, Attention Needed
+  classification logic, supported drive types, and design rationale.
