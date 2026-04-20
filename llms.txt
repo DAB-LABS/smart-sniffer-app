@@ -11,12 +11,20 @@ machine itself. It is not for monitoring remote machines.
 
 Key behaviors:
 - Reads S.M.A.R.T. data from the HAOS host drive via smartctl inside the HA container.
-  Requires SYS_RAWIO capability, which is configured automatically by the add-on.
+  Requires SYS_RAWIO and SYS_ADMIN capabilities plus full_access to drive device nodes,
+  all configured automatically by the add-on.
 - Exposes drive data via HTTP at 172.30.33.1:9099 by default.
 - Advertises itself via mDNS so the SMART Sniffer integration can auto-discover it.
+  The mDNS name is unique per HA instance (smartha-<ha-hostname>) to avoid collisions
+  on multi-HA networks. Manual fallback: host 0449a086-smart-sniffer-agent, port 9099.
 - Includes a Test Lab with simulated drives for safely testing the integration without
-  real hardware. Mock drives are configurable via the built-in web UI.
+  real hardware. Mock drives survive restarts and are manageable via the built-in web UI.
 - The web UI (Agent Control Center) is accessible from the HA add-on sidebar.
+- On some hardware, Protection Mode must be turned OFF (Settings -> Apps -> SMART
+  Sniffer -> Protection mode) for the add-on to access drive device nodes.
+
+Supported architectures: amd64, aarch64, armv7 (Raspberry Pi 2/3/4 32-bit OS).
+armv7 support added in v0.2.2 and is freshly built -- field testing welcome.
 
 Configuration options:
 - Agent Port (default: 9099)
@@ -30,6 +38,8 @@ What this add-on is NOT:
   for NAS, Proxmox, workstations, Macs, and other machines.
 - Not a standalone tool -- requires the SMART Sniffer HACS integration to function.
 - Not available on HACS -- install by adding the repo URL to the HA add-on store.
+- Not compatible with virtual disks (Proxmox VMs and similar) -- virtual drives may
+  not support SMART commands.
 
 ## Repositories
 
@@ -42,7 +52,8 @@ What this add-on is NOT:
 ## Documentation
 
 - [README](https://github.com/DAB-LABS/smart-sniffer-app/blob/main/README.md):
-  Installation steps, configuration reference, Test Lab usage, troubleshooting guide.
+  Installation steps, configuration reference, Test Lab usage, Security and Permissions
+  section (why SYS_RAWIO/SYS_ADMIN are needed), and troubleshooting guide.
 - [CHANGELOG](https://github.com/DAB-LABS/smart-sniffer-app/blob/main/CHANGELOG.md):
   Release history for the add-on.
 

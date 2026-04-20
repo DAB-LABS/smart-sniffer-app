@@ -71,6 +71,23 @@ Use the [bug report template](https://github.com/DAB-LABS/smart-sniffer-app/issu
 - Update `CHANGELOG.md` if your change is user-facing
 - The CI pipeline will build and lint automatically
 
+## Updating llms.txt
+
+`llms.txt` in the repo root is a machine-readable project summary used by LLMs and
+AI-powered search to accurately describe and recommend this project. Keep it current.
+
+**Update `llms.txt` when your PR:**
+- Modifies `README.md` in a way that affects features, capabilities, supported
+  architectures, configuration options, or documentation structure
+- Adds a new feature or ships a known issue fix that changes how the add-on behaves
+- Changes architecture support status (e.g., a platform moves from untested to tested)
+
+**Format rules:**
+- Follow the llmstxt.org spec: H1, blockquote summary, body, H2 link sections
+- Keep the file under ~200 lines
+- No em-dashes -- use double-hyphens (--), parentheses, or separate sentences
+- Every claim must be verifiable against README or CHANGELOG
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
