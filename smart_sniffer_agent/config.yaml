@@ -1,6 +1,6 @@
 name: "SMART Sniffer App"
 description: "Monitors the health of your Home Assistant system drive. Reads SMART data from local hardware and reports it to the SMART Sniffer integration as HA entities."
-version: "0.2.10"
+version: "0.2.11"
 slug: "smart_sniffer_agent"
 url: "https://github.com/DAB-LABS/smart-sniffer-app"
 arch:
@@ -46,7 +46,7 @@ panel_icon: mdi:harddisk
 panel_title: "SMART Sniffer"
 
 # Health monitoring
-watchdog: "http://[HOST]:[PORT:9099]/api/health"
+watchdog: "tcp://[HOST]:[PORT:9099]"
 
 # User-configurable options
 options:

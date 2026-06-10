@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.11 — 2026-06-10
+
+### Fixed
+
+- **Watchdog restart loop when bearer token is set** -- switched Supervisor watchdog from HTTP to TCP health check. The HTTP probe hit `/api/health` without a token, got 401, and Supervisor restart-looped the container (~every 4 min). TCP check confirms the port is accepting connections. Interim workaround -- will revert to HTTP when the App ships an agent binary with the auth bypass fix (v0.5.16+). See [#6](https://github.com/DAB-LABS/smart-sniffer-app/issues/6).
+
 ## 0.2.10 — 2026-03-27
 
 ### Fixed
