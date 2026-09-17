@@ -1,8 +1,13 @@
-ARG BUILD_FROM
-FROM ${BUILD_FROM}
-
-# Build argument for architecture-specific binary selection
-ARG BUILD_ARCH
+# Home Assistant base image, pinned for build stability.
+# Published as a multi-platform manifest, so a single FROM covers both
+# supported architectures (linux/amd64 and linux/arm64) -- per-arch base
+# images are no longer needed.
+#
+# This replaces the former `ARG BUILD_FROM` / `FROM ${BUILD_FROM}` pair fed
+# by build.yaml. Supervisor stopped supplying BUILD_FROM by default in
+# 2026.04.0, so relying on it would break the build once build.yaml is gone.
+# See https://developers.home-assistant.io/blog/2026/04/02/builder-migration
+FROM ghcr.io/home-assistant/base:3.24-2026.08.0
 
 # Install runtime dependencies
 # - smartmontools: smartctl for reading SMART data from host drives
@@ -21,15 +26,14 @@ RUN apk add --no-cache \
 RUN pip3 install --no-cache-dir --break-system-packages zeroconf
 
 # Download the Go agent binary from GitHub releases.
-# Detect architecture from the running container (works for both local builds
-# and CI builds, regardless of whether BUILD_ARCH is set).
+# Architecture is detected from the running container via uname -m, which works
+# for local builds, Supervisor builds, and CI alike without needing a build arg.
 # CACHE_BUST changes with each app version to force a fresh binary download.
 ARG CACHE_BUST=1
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
         x86_64)  GO_ARCH="amd64" ;; \
         aarch64) GO_ARCH="arm64" ;; \
-        armv7l)  GO_ARCH="arm" ;; \
         *)       echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
     RELEASE_URL="https://github.com/DAB-LABS/smart-sniffer/releases/latest/download/smartha-agent-linux-${GO_ARCH}" && \

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.12] — 2026-09-17
+
+### Changed
+
+- **Dropped 32-bit ARM (`armv7`) support** -- Home Assistant [deprecated `armv7`, `armhf`, and `i386`](https://www.home-assistant.io/blog/2025/05/22/deprecating-core-and-supervised-installation-methods-and-32-bit-systems/) in May 2025 and stopped building for them from release 2025.12. There are no 32-bit HAOS builds to run the App on, so this removes a declaration rather than a capability. Clears a Supervisor deprecation warning. See [smart-sniffer#42](https://github.com/DAB-LABS/smart-sniffer/issues/42).
+- **Migrated build configuration into the Dockerfile** -- removed `build.yaml` and the unused `build.json`, and replaced the `ARG BUILD_FROM` / `FROM ${BUILD_FROM}` pair with an explicit, pinned `FROM ghcr.io/home-assistant/base:3.24-2026.08.0`. Supervisor stopped supplying `BUILD_FROM` by default in 2026.04.0, so the explicit base image is now required. Base images ship as multi-platform manifests, so one `FROM` covers both supported architectures. Clears the second Supervisor deprecation warning.
+- **Pinned the base image** -- previously tracked `latest`. The pinned tag resolves to the same Alpine 3.24.1 image in use today, so nothing changes at runtime; it just stops the base from drifting between builds.
+
+### Fixed
+
+- **Restored the HTTP health watchdog** -- reverted from the interim TCP check introduced in v0.2.11. The agent-side fix that exempts `/api/health` from bearer-token auth shipped in agent v0.5.16, and the bundled binary is now well past that. HTTP is the stronger signal: it confirms the agent process is alive, the HTTP server is responding, and the application is healthy, not merely that something holds the port. See [#6](https://github.com/DAB-LABS/smart-sniffer-app/issues/6).
+
 ## [0.2.11] — 2026-06-10
 
 ### Fixed

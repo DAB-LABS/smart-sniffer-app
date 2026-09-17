@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.12 — 2026-09-17
+
+### Changed
+
+- **Dropped 32-bit ARM (`armv7`) support** -- Home Assistant deprecated `armv7`, `armhf`, and `i386` in May 2025 and stopped building for them from release 2025.12. No 32-bit HAOS builds exist to run the App on, so this removes a declaration rather than a capability. Clears a Supervisor deprecation warning.
+- **Build configuration moved into the Dockerfile** -- `build.yaml` and the unused `build.json` are gone. The Dockerfile now carries an explicit, pinned `FROM ghcr.io/home-assistant/base:3.24-2026.08.0` in place of the old `ARG BUILD_FROM` indirection, which Supervisor stopped populating by default in 2026.04.0. Same Alpine 3.24.1 as before -- no runtime change.
+
+### Fixed
+
+- **Restored the HTTP health watchdog** -- reverted the interim TCP check from v0.2.11 now that the bundled agent includes the `/api/health` auth exemption (agent v0.5.16+). HTTP confirms the application is actually healthy rather than merely that the port is open.
+
 ## 0.2.11 — 2026-06-10
 
 ### Fixed

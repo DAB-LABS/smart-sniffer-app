@@ -22,17 +22,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, aarch64, armv7]
+        arch: [amd64, aarch64]
         include:
           - arch: amd64
             platform: linux/amd64
-            base_image: ghcr.io/home-assistant/amd64-base:latest
           - arch: aarch64
             platform: linux/arm64
-            base_image: ghcr.io/home-assistant/aarch64-base:latest
-          - arch: armv7
-            platform: linux/arm/v7
-            base_image: ghcr.io/home-assistant/armv7-base:latest
 
     steps:
       - name: Checkout
@@ -67,8 +62,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: false
           build-args: |
-            BUILD_FROM=${{ matrix.base_image }}
-            BUILD_ARCH=${{ matrix.arch }}
             CACHE_BUST=${{ steps.version.outputs.version }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
@@ -82,8 +75,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           build-args: |
-            BUILD_FROM=${{ matrix.base_image }}
-            BUILD_ARCH=${{ matrix.arch }}
             CACHE_BUST=${{ steps.version.outputs.version }}
           tags: |
             ${{ env.REGISTRY }}/dab-labs/${{ matrix.arch }}-smart-sniffer-agent:${{ steps.version.outputs.version }}
@@ -109,15 +100,6 @@ jobs:
                   print(f'Missing required key: {key}')
                   sys.exit(1)
           print(f'Config OK: {config[\"name\"]} v{config[\"version\"]}')
-          "
-
-      - name: Validate build.json
-        run: |
-          python3 -c "
-          import json
-          with open('${{ env.SLUG }}/build.json') as f:
-              build = json.load(f)
-          print(f'Build config OK: {build}')
           "
 
       - name: Check Python syntax
