@@ -21,6 +21,16 @@ carry no query string, so the server reads the flags from the Referer.
     CONNECT ok | error                    error: /ha/connect fails with flow_failed
     POOL_DEVICES  1 | 0                   1: pools carry a full "devices" list
     LAB_ENTRY 0 | 1                       with LAB=off: the Test Lab entry is still in HA
+    SLUG    <slug> | none                 the app's slug (default local_smart_sniffer_agent);
+                                          none: the Supervisor could not tell, slug is null
+    HOSTNAME <host>                       the agent host (default: the slug with dashes)
+    MDNS_NAME <name> | none               the agent's mDNS name; none (or empty) for none
+                                          (default smartha-homeassistant)
+
+HOSTNAME is read from the environment like the rest, and some shells and
+containers export it already, so set it on the command line when it matters:
+
+    SLUG=local_smart_sniffer_agent HOSTNAME=local-smart-sniffer-agent python3 devserver.py
 
 The repo's alpine.min.js and tailwind.min.js are placeholders that the image
 build replaces. Download the real ones (URLs are in the placeholders) into a
@@ -57,7 +67,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 WEB_DIR = Path(__file__).resolve().parent
-HOST = "0449a086-smart-sniffer-agent"
 AGENT_PORT = 9099
 MOCK_PORT = 9100
 APP_VERSION = "0.3.0-dev"
@@ -76,6 +85,9 @@ DEFAULTS = {
     "LAB_ENTRY": "0",
     "AGENT_ENTRY": "1",
     "CONNECT": "ok",
+    "SLUG": "local_smart_sniffer_agent",
+    "HOSTNAME": "",
+    "MDNS_NAME": "smartha-homeassistant",
 }
 
 LOCK = threading.Lock()
@@ -509,13 +521,30 @@ def flags_for(handler) -> dict[str, str]:
     return flags
 
 
+def app_slug(flags) -> str | None:
+    slug = flags["SLUG"].strip()
+    return None if slug.lower() in ("", "none", "null") else slug
+
+
+def agent_host(flags) -> str:
+    # The Supervisor names the container after the slug, with dashes.
+    host = flags["HOSTNAME"].strip()
+    return host or (app_slug(flags) or "smart-sniffer-agent").replace("_", "-")
+
+
+def mdns_name(flags) -> str | None:
+    name = flags["MDNS_NAME"].strip()
+    return None if name.lower() in ("", "none", "null") else name
+
+
 def ha_targets(flags) -> dict:
     agent_on = flags["AGENT_ENTRY"] == "1"
     lab_on = flags["LAB"] == "connected" or flags["LAB_ENTRY"] == "1"
+    host = agent_host(flags)
     return {
-        "agent": {"host": HOST, "port": AGENT_PORT, "entry_id": "01J9DEVAGENT" if agent_on else None,
+        "agent": {"host": host, "port": AGENT_PORT, "entry_id": "01J9DEVAGENT" if agent_on else None,
                   "state": "loaded" if agent_on else None},
-        "testlab": {"host": HOST, "port": MOCK_PORT, "entry_id": "01J9DEVTESTLAB" if lab_on else None,
+        "testlab": {"host": host, "port": MOCK_PORT, "entry_id": "01J9DEVTESTLAB" if lab_on else None,
                     "state": "loaded" if lab_on else None},
     }
 
@@ -612,7 +641,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "rules_version": None if flags["RULES"] == "missing" else RULES_VERSION,
                                     "agent_port": AGENT_PORT, "mock_port": MOCK_PORT,
                                     "mock_enabled": flags["LAB"] != "off",
-                                    "ha_api": flags["HA"] != "unreachable"})
+                                    "ha_api": flags["HA"] != "unreachable",
+                                    "hostname": agent_host(flags),
+                                    "slug": app_slug(flags),
+                                    "mdns_name": mdns_name(flags)})
 
         if head == "api":
             if flags["AGENT"] == "down":
@@ -738,9 +770,10 @@ class Handler(BaseHTTPRequestHandler):
         loaded = flags["HA"] == "loaded"
         unreachable = {"result": "error", "message": "unreachable"}
         if parts == ["status"] and method == "GET":
+            host = agent_host(flags)
             targets = ha_targets(flags) if loaded else {
-                "agent": {"host": HOST, "port": AGENT_PORT, "entry_id": None, "state": None},
-                "testlab": {"host": HOST, "port": MOCK_PORT, "entry_id": None, "state": None}}
+                "agent": {"host": host, "port": AGENT_PORT, "entry_id": None, "state": None},
+                "testlab": {"host": host, "port": MOCK_PORT, "entry_id": None, "state": None}}
             return self._send(200, {"reachable": reachable, "integration_loaded": loaded and reachable,
                                     "targets": targets})
         if parts == ["connect"] and method == "POST":

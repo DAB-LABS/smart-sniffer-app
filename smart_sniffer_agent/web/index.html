@@ -297,7 +297,7 @@
     <template x-if="agent.checked && !agent.online">
       <div class="notice bad">
         The drive agent is not answering. The app may still be starting; this page keeps trying.
-        If it stays like this, check the <a href="/hassio/addon/0449a086_smart_sniffer_agent/logs" target="_top">Mission Log</a>.
+        If it stays like this, check the <a :href="appPage('logs')" target="_top">Mission Log</a>.
       </div>
     </template>
 
@@ -308,7 +308,7 @@
     <template x-if="agent.online && agent.drivesLoaded && realDrives.length === 0">
       <div class="notice">
         No drives readable. If the app log says <span class="mono">DRIVE ACCESS BLOCKED</span>, turn off Protection Mode and restart the app.
-        <a href="/hassio/addon/0449a086_smart_sniffer_agent/info" target="_top">Open the app's info page</a>
+        <a :href="appPage('info')" target="_top">Open the app's info page</a>
       </div>
     </template>
 
@@ -562,7 +562,7 @@
         <template x-if="lab.checked && !lab.online">
           <div class="notice bad" style="margin-bottom:14px">
             The Test Lab is on but its agent is not answering yet. It may still be starting.
-            If this stays, check the <a href="/hassio/addon/0449a086_smart_sniffer_agent/logs" target="_top">Mission Log</a>.
+            If this stays, check the <a :href="appPage('logs')" target="_top">Mission Log</a>.
           </div>
         </template>
 
@@ -732,8 +732,8 @@
 
   <!-- ═══ Footer ═══ -->
   <footer>
-    <a href="/hassio/addon/0449a086_smart_sniffer_agent/logs" target="_top">Mission Log</a>
-    <a href="/hassio/addon/0449a086_smart_sniffer_agent/config" target="_top">App configuration</a>
+    <a :href="appPage('logs')" target="_top">Mission Log</a>
+    <a :href="appPage('config')" target="_top">App configuration</a>
     <a x-show="haMode === 'loaded'" href="/config/integrations/integration/smart_sniffer" target="_top">Integration</a>
     <a href="https://github.com/DAB-LABS/smart-sniffer-app" target="_blank" rel="noopener">GitHub</a>
     <span class="spacer"></span>
@@ -927,9 +927,17 @@ function controlCenter() {
 
     get agentPort() { return this.appInfo?.agent_port || this.ha?.targets?.agent?.port || 9099; },
     get mockPort() { return this.appInfo?.mock_port || this.ha?.targets?.testlab?.port || 9100; },
-    // Not in the contract today: shown only if app/info or ha/status carries it.
-    get mdnsName() { return this.appInfo?.mdns_name || this.agentTarget?.mdns_name || ''; },
-    get hostName() { return this.ha?.targets?.agent?.host || '0449a086-smart-sniffer-agent'; },
+    // The app's identity comes from app/info: run.sh hands the proxy the
+    // container hostname and the mDNS name, the Supervisor gives the slug. A
+    // local install is local_smart_sniffer_agent / local-smart-sniffer-agent.
+    get mdnsName() { return this.appInfo?.mdns_name || ''; },
+    get hostName() { return this.appInfo?.hostname || this.ha?.targets?.agent?.host || '...'; },
+    get appSlug() { return this.appInfo?.slug || null; },
+    // The app's own pages in Home Assistant (config, logs, info). Without a
+    // slug, the list of installed apps, where this one is a click away.
+    appPage(page) {
+      return this.appSlug ? `/hassio/addon/${encodeURIComponent(this.appSlug)}/${page}` : '/hassio/dashboard';
+    },
 
     // ── Real agent ─────────────────────────────────────────────────
     async pollAgent() {

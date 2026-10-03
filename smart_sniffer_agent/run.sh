@@ -194,8 +194,18 @@ bashio::log.info "Starting web UI proxy on port ${INGRESS_PORT}..."
 
 # SUPERVISOR_TOKEN is already in this environment (with-contenv) and the
 # proxy inherits it; it is never passed on the command line.
+# The container's hostname is the name the integration connects to: the
+# app's slug with dashes, for example local-smart-sniffer-agent when the app
+# is installed as a local app. The page shows it and Connect uses it.
+AGENT_HOST="$(hostname 2>/dev/null || true)"
 PROXY_ARGS="--port=${INGRESS_PORT} --agent-port=${PORT} --mock-port=${MOCK_PORT}"
 PROXY_ARGS="${PROXY_ARGS} --app-version=${APP_VERSION} --mock-enabled=${MOCK_MODE}"
+if [ -n "${AGENT_HOST}" ]; then
+    PROXY_ARGS="${PROXY_ARGS} --agent-host=${AGENT_HOST}"
+else
+    bashio::log.warning "Could not read the container hostname. The Control Center will show the default host."
+fi
+PROXY_ARGS="${PROXY_ARGS} --mdns-name=${MDNS_NAME}"
 if bashio::var.has_value "${TOKEN}"; then
     PROXY_ARGS="${PROXY_ARGS} --token=${TOKEN}"
 fi
@@ -207,7 +217,7 @@ WEBUI_PID=$!
 bashio::log.info "─────────────────────────────────────────"
 bashio::log.info "SMART Sniffer App v${APP_VERSION}"
 bashio::log.info "Agent: running on port ${PORT}"
-bashio::log.info "Integration host: 0449a086-smart-sniffer-agent:${PORT}"
+bashio::log.info "Integration host: ${AGENT_HOST:-unknown}:${PORT}"
 bashio::log.info "mDNS: ${MDNS_NAME:-default (container hostname)}"
 bashio::log.info "Auth: ${AUTH_STATUS}"
 bashio::log.info "Mock: ${MOCK_STATUS}"

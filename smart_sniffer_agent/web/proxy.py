@@ -6,7 +6,8 @@ Serves static files from /opt/web/ at the root path and proxies:
   /mock/* -> localhost:$MOCK_PORT   (Python mock agent, /mock/ rewritten to /api/)
 
 It also answers the Control Center's own routes:
-  GET  /app/info     app version, rules version, ports, Test Lab flag
+  GET  /app/info     app version, rules version, ports, Test Lab flag, and
+                     the app's identity: hostname, slug, mDNS name
   POST /evaluate     the integration's Attention verdict for one drive payload
   POST /lab/on       turn the Test Lab on (sets mock_mode, restarts the app)
   POST /lab/off      turn the Test Lab off (same, mock_mode false)
@@ -62,8 +63,9 @@ STATIC_DIR = "/opt/web"
 DEFAULT_RULES_DIR = "/opt/ssrules/custom_components"
 
 # The hostname Home Assistant uses to reach this app's agents from the
-# integration (the app's container hostname when installed from the DAB-LABS
-# repository).
+# integration. run.sh passes the container's real hostname with --agent-host
+# (it follows the slug, so a local install is local-smart-sniffer-agent); this
+# default, the published app's hostname, is only for running the proxy by hand.
 DEFAULT_AGENT_HOST = "0449a086-smart-sniffer-agent"
 
 INTEGRATION_DOMAIN = "smart_sniffer"
@@ -201,6 +203,8 @@ class Supervisor:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self._ha_api_cache: tuple[float, bool] | None = None
+        self._slug: str | None = None
+        self._slug_failed_at: float | None = None
 
     @property
     def available(self) -> bool:
@@ -255,6 +259,28 @@ class Supervisor:
             return cached[1]
         return self.core_reachable()
 
+    def app_slug(self) -> str | None:
+        """This app's slug (the repository's id plus _smart_sniffer_agent when
+        installed from a repository, local_smart_sniffer_agent as a local
+        app). It cannot change while the app runs, so the first answer is
+        kept. None when the Supervisor cannot tell; asked again after
+        HA_API_CACHE_SECONDS."""
+        if self._slug:
+            return self._slug
+        if not self.available:
+            return None
+        failed = self._slug_failed_at
+        if failed is not None and time.monotonic() - failed < HA_API_CACHE_SECONDS:
+            return None
+        status, info = self.call("GET", "/addons/self/info")
+        data = info.get("data") if isinstance(info, dict) else None
+        slug = data.get("slug") if isinstance(data, dict) else None
+        if status == 200 and isinstance(slug, str) and slug:
+            self._slug = slug
+            return slug
+        self._slug_failed_at = time.monotonic()
+        return None
+
 
 # ── Request handler ─────────────────────────────────────────────────────────
 
@@ -267,6 +293,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     app_version: str | None = None
     mock_enabled: bool = False
     agent_host: str = DEFAULT_AGENT_HOST
+    mdns_name: str | None = None
     rules: Rules = Rules(DEFAULT_RULES_DIR)
     supervisor: Supervisor = Supervisor("http://supervisor", "")
 
@@ -382,6 +409,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "mock_port": self.mock_port,
             "mock_enabled": self.mock_enabled,
             "ha_api": ha_api,
+            "hostname": self.agent_host,
+            "slug": self.supervisor.app_slug(),
+            "mdns_name": self.mdns_name,
         })
 
     # ── /evaluate ──
@@ -798,7 +828,10 @@ def main():
     parser.add_argument("--supervisor-url", type=str, default="http://supervisor",
                         help="Supervisor API base URL")
     parser.add_argument("--agent-host", type=str, default=DEFAULT_AGENT_HOST,
-                        help="Hostname Home Assistant uses to reach this app's agents")
+                        help="Hostname Home Assistant uses to reach this app's agents "
+                             "(run.sh passes the container hostname)")
+    parser.add_argument("--mdns-name", type=str, default="",
+                        help="The agent's mDNS name, shown on the page (empty: none)")
     args = parser.parse_args()
 
     ProxyHandler.agent_port = args.agent_port
@@ -806,7 +839,8 @@ def main():
     ProxyHandler.token = args.token
     ProxyHandler.app_version = args.app_version
     ProxyHandler.mock_enabled = parse_bool(args.mock_enabled)
-    ProxyHandler.agent_host = args.agent_host
+    ProxyHandler.agent_host = args.agent_host.strip() or DEFAULT_AGENT_HOST
+    ProxyHandler.mdns_name = args.mdns_name.strip() or None
     ProxyHandler.rules = Rules(args.rules_dir)
     ProxyHandler.supervisor = Supervisor(
         args.supervisor_url, os.environ.get("SUPERVISOR_TOKEN", "")
@@ -818,6 +852,7 @@ def main():
     log(f"Proxying /api/* -> 127.0.0.1:{args.agent_port}")
     log(f"Proxying /mock/* -> 127.0.0.1:{args.mock_port}")
     log(f"Integration rules: {ProxyHandler.rules.version or 'not found'}")
+    log(f"Agent host for the integration: {ProxyHandler.agent_host}")
     if not ProxyHandler.supervisor.available:
         log("No Supervisor token: Test Lab button and Home Assistant routes are off")
 

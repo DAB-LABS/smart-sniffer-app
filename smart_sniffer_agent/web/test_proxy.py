@@ -19,6 +19,7 @@ Run with:
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import os
 import socket
@@ -41,7 +42,11 @@ _SIBLING = Path(__file__).resolve().parents[3] / "smart-sniffer" / "custom_compo
 RULES_DIR = Path(os.environ.get("SS_RULES_DIR", _SIBLING))
 FIXTURES = Path(os.environ.get("SS_FIXTURES", RULES_DIR.parent / "tests" / "fixtures"))
 TOKEN = "test-supervisor-token"
-AGENT_HOST = "0449a086-smart-sniffer-agent"
+# The app installed as a local app: run.sh passes the container hostname and
+# the Supervisor reports the slug.
+AGENT_HOST = "local-smart-sniffer-agent"
+SLUG = "local_smart_sniffer_agent"
+MDNS_NAME = "smartha-homeassistant"
 
 needs_rules = pytest.mark.skipif(
     not (RULES_DIR / "smart_sniffer" / "attention.py").is_file()
@@ -103,7 +108,9 @@ class FakeSupervisor(BaseHTTPRequestHandler):
             return
 
         if path == "/addons/self/info" and method == "GET":
-            _json_reply(self, 200, {"result": "ok", "data": {"options": STATE.options}})
+            _json_reply(self, 200, {"result": "ok", "data": {
+                "slug": SLUG, "hostname": AGENT_HOST, "options": STATE.options,
+            }})
             return
         if path == "/addons/self/options" and method == "POST":
             STATE.options = body["options"]
@@ -234,30 +241,16 @@ def backends():
     agent.shutdown()
 
 
-@pytest.fixture(scope="session")
-def proxy(backends):
-    supervisor, agent = backends
+def _start_proxy(args: list[str], token: str) -> tuple[subprocess.Popen, Proxy]:
     port = _free_port()
-    agent_port = agent.server_address[1]
-    env = {**os.environ, "SUPERVISOR_TOKEN": TOKEN}
+    env = {**os.environ, "SUPERVISOR_TOKEN": token}
     env.pop("APP_VERSION", None)
     proc = subprocess.Popen(
-        [
-            sys.executable, str(PROXY),
-            f"--port={port}",
-            f"--agent-port={agent_port}",
-            "--mock-port=9100",
-            "--app-version=0.3.0",
-            "--mock-enabled=true",
-            f"--rules-dir={RULES_DIR}",
-            f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
-            f"--agent-host={AGENT_HOST}",
-        ],
+        [sys.executable, str(PROXY), f"--port={port}", *args],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    client = Proxy(f"http://127.0.0.1:{port}")
     deadline = time.monotonic() + 10
     while True:
         try:
@@ -269,16 +262,37 @@ def proxy(backends):
                 proc.kill()
                 pytest.fail(f"proxy did not start:\n{out}")
             time.sleep(0.05)
-    client.agent_port = agent_port  # type: ignore[attr-defined]
-    yield client
+    return proc, Proxy(f"http://127.0.0.1:{port}")
+
+
+def _stop_proxy(proc: subprocess.Popen) -> str:
     proc.terminate()
     try:
         out, _ = proc.communicate(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
         out, _ = proc.communicate()
+    return out.decode(errors="replace")
+
+
+@pytest.fixture(scope="session")
+def proxy(backends):
+    supervisor, agent = backends
+    agent_port = agent.server_address[1]
+    proc, client = _start_proxy([
+        f"--agent-port={agent_port}",
+        "--mock-port=9100",
+        "--app-version=0.3.0",
+        "--mock-enabled=true",
+        f"--rules-dir={RULES_DIR}",
+        f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
+        f"--agent-host={AGENT_HOST}",
+        f"--mdns-name={MDNS_NAME}",
+    ], TOKEN)
+    client.agent_port = agent_port  # type: ignore[attr-defined]
+    yield client
     # The Supervisor token must never reach the log.
-    assert TOKEN not in out.decode(errors="replace")
+    assert TOKEN not in _stop_proxy(proc)
 
 
 @pytest.fixture(autouse=True)
@@ -323,7 +337,42 @@ def test_app_info(proxy):
         "mock_port": 9100,
         "mock_enabled": True,
         "ha_api": True,
+        "hostname": AGENT_HOST,
+        "slug": SLUG,
+        "mdns_name": MDNS_NAME,
     }
+
+
+def test_app_info_slug_is_cached(proxy):
+    proxy.get("/app/info")
+    STATE.calls.clear()
+    _, info = proxy.get("/app/info")
+    assert info["slug"] == SLUG
+    assert not any(c[1] == "/addons/self/info" for c in STATE.calls)
+
+
+def test_app_info_without_supervisor(backends):
+    # The Supervisor refuses the token, run.sh found no mDNS name, and no
+    # --agent-host was given: slug and mdns_name are null, the host is the
+    # proxy's default.
+    supervisor, _ = backends
+    spec = importlib.util.spec_from_file_location("webui_proxy", PROXY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    proc, client = _start_proxy([
+        f"--rules-dir={RULES_DIR}",
+        f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
+        "--mdns-name=",
+    ], "not-the-token")
+    try:
+        status, info = client.get("/app/info")
+    finally:
+        _stop_proxy(proc)
+    assert status == 200
+    assert info["ha_api"] is False
+    assert info["slug"] is None
+    assert info["mdns_name"] is None
+    assert info["hostname"] == module.DEFAULT_AGENT_HOST
 
 
 def test_wrong_method_is_405(proxy):
