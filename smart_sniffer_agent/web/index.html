@@ -328,6 +328,13 @@
             <span class="small muted mono" x-show="rulesMissing">rules unavailable</span>
             <span class="small">Health <b class="mono" :class="healthText(drive) === 'FAILED' ? 'red' : ''" x-text="healthText(drive)"></b></span>
           </div>
+          <template x-if="attState('real', drive) === 'UNSUPPORTED'">
+            <div class="small" style="margin-top:10px">
+              <span class="muted">Home Assistant will show:</span>
+              <span class="dim" x-text="evalOf('real', drive).reasons_text || 'No usable SMART data'"></span>
+              <div class="tiny muted" style="margin-top:4px">The agent can see this drive, but it gives no SMART health data to watch. Virtual disks and some USB bridges do this.</div>
+            </div>
+          </template>
           <template x-if="drive.readable === false">
             <div class="small muted">Not readable right now. The values below are the last ones the agent saw, if any.</div>
           </template>
@@ -340,7 +347,7 @@
             <div class="tiny muted" x-text="'Accepted: ' + evalOf('real', drive).accepted.join('; ')"></div>
           </template>
 
-          <div class="stats" style="margin-top:8px">
+          <div class="stats" style="margin-top:8px" x-show="hasStats(drive)">
             <span x-text="tempText(drive)"></span><span class="sep">&middot;</span><span x-text="pohText(drive)"></span><span class="sep">&middot;</span><span x-text="cyclesText(drive)"></span>
           </div>
 
@@ -619,7 +626,7 @@
                 <template x-for="a in mockAttrs(drive).filter((r) => !r.more)" :key="a.key">
                   <div class="attr-row" :class="a.level ? 'lvl-' + a.level : ''">
                     <span class="attr-label" :title="a.key" x-text="a.label"></span>
-                    <input type="number" class="input input-num" :value="a.value" :step="a.step || 1" :aria-label="a.label"
+                    <input type="number" class="input input-num" placeholder="n/a" :value="a.value" :step="a.step || 1" :aria-label="a.label"
                            @change="editAttr(drive, a, $event.target.value)">
                     <span class="attr-hint" x-text="a.hint"></span>
                   </div>
@@ -632,7 +639,7 @@
                     <template x-for="a in mockAttrs(drive).filter((r) => r.more)" :key="a.key">
                       <div class="attr-row">
                         <span class="attr-label" :title="a.key" x-text="a.label"></span>
-                        <input type="number" class="input input-num" :value="a.value" :aria-label="a.label"
+                        <input type="number" class="input input-num" placeholder="n/a" :value="a.value" :aria-label="a.label"
                                @change="editAttr(drive, a, $event.target.value)">
                         <span class="attr-hint"></span>
                       </div>
@@ -933,10 +940,22 @@ function controlCenter() {
     get mdnsName() { return this.appInfo?.mdns_name || ''; },
     get hostName() { return this.appInfo?.hostname || this.ha?.targets?.agent?.host || '...'; },
     get appSlug() { return this.appInfo?.slug || null; },
+    // Home Assistant 2026 moved the app pages from /hassio/addon/<slug>/... to
+    // /config/app/<slug>/..., and the old paths answer 404 on a full page load,
+    // which is what these target="_top" links do. app/info carries Home
+    // Assistant's version: before 2026 the old paths, otherwise (and when the
+    // version is unknown) the new ones.
+    get haLegacyPaths() {
+      const m = /^(\d{4})\./.exec(String(this.appInfo?.ha_version || ''));
+      return !!m && Number(m[1]) < 2026;
+    },
     // The app's own pages in Home Assistant (config, logs, info). Without a
     // slug, the list of installed apps, where this one is a click away.
     appPage(page) {
-      return this.appSlug ? `/hassio/addon/${encodeURIComponent(this.appSlug)}/${page}` : '/hassio/dashboard';
+      const legacy = this.haLegacyPaths;
+      if (!this.appSlug) return legacy ? '/hassio/dashboard' : '/config/apps';
+      const slug = encodeURIComponent(this.appSlug);
+      return legacy ? `/hassio/addon/${slug}/${page}` : `/config/app/${slug}/${page}`;
     },
 
     // ── Real agent ─────────────────────────────────────────────────
@@ -1051,6 +1070,11 @@ function controlCenter() {
 
     async editAttr(drive, a, raw) {
       const id = encodeURIComponent(drive.id);
+      // A cleared box is not a 0; put the current value back.
+      if (String(raw).trim() === '') {
+        await this.pollMock(true);
+        return;
+      }
       let r;
       if (a.kind === 'devstat') {
         r = await this.request(`mock/drives/${id}/devstat`, { method: 'PATCH', body: { reported_uncorrectable: parseInt(raw, 10) || 0 } });
@@ -1071,7 +1095,7 @@ function controlCenter() {
     },
 
     isDevstatPreset(drive) {
-      return drive.device_statistics?.status === 'present' && this.devstatUnc(drive) !== null;
+      return drive.device_statistics?.status === 'present' && this.devstatUncEntry(drive) !== null;
     },
 
     async runScenario(drive, name) {
@@ -1375,23 +1399,41 @@ function controlCenter() {
       if (p === false) return 'FAILED';
       return 'not reported';
     },
-    fmtNum(n) { return Number(n).toLocaleString('en-US'); },
+    // A missing reading is null or undefined and shows as n/a, never as 0.
+    isNum(n) { return typeof n === 'number' && Number.isFinite(n); },
+    fmtNum(n) { return this.isNum(n) ? n.toLocaleString('en-US') : 'n/a'; },
+    firstNum(values) { return values.find((v) => this.isNum(v)) ?? null; },
+    tempC(drive) {
+      const raw = this.ataRaw(drive, ['Temperature_Celsius', 'Airflow_Temperature_Cel', 'Temperature_Internal']);
+      // smartctl writes 0 for a drive with no temperature to give (a SCSI
+      // virtual disk: "Current Drive Temperature: 0 C"), so 0 is not a reading.
+      const t = [this.sd(drive).temperature?.current, this.nvmeLog(drive)?.temperature,
+                 this.isNum(raw) ? raw & 0xff : null].find((v) => this.isNum(v) && v !== 0);
+      return t ?? null;
+    },
+    pohValue(drive) {
+      return this.firstNum([this.sd(drive).power_on_time?.hours, this.nvmeLog(drive)?.power_on_hours,
+                            this.ataRaw(drive, ['Power_On_Hours'])]);
+    },
+    cyclesValue(drive) {
+      return this.firstNum([this.sd(drive).power_cycle_count, this.nvmeLog(drive)?.power_cycles,
+                            this.ataRaw(drive, ['Power_Cycle_Count'])]);
+    },
     tempText(drive) {
-      const sd = this.sd(drive);
-      let t = sd.temperature?.current ?? this.nvmeLog(drive)?.temperature;
-      if (t == null) {
-        const raw = this.ataRaw(drive, ['Temperature_Celsius', 'Airflow_Temperature_Cel', 'Temperature_Internal']);
-        if (raw != null) t = raw & 0xff;
-      }
-      return t == null ? 'temp n/a' : `${t} °C`;
+      const t = this.tempC(drive);
+      return t === null ? 'temp n/a' : `${t} °C`;
     },
     pohText(drive) {
-      const h = this.sd(drive).power_on_time?.hours ?? this.nvmeLog(drive)?.power_on_hours ?? this.ataRaw(drive, ['Power_On_Hours']);
-      return h == null ? 'hours n/a' : `${this.fmtNum(h)} h`;
+      const h = this.pohValue(drive);
+      return h === null ? 'hours n/a' : `${this.fmtNum(h)} h`;
     },
     cyclesText(drive) {
-      const c = this.sd(drive).power_cycle_count ?? this.nvmeLog(drive)?.power_cycles ?? this.ataRaw(drive, ['Power_Cycle_Count']);
-      return c == null ? 'cycles n/a' : `${this.fmtNum(c)} cycles`;
+      const c = this.cyclesValue(drive);
+      return c === null ? 'cycles n/a' : `${this.fmtNum(c)} cycles`;
+    },
+    // No temperature, hours or cycles at all: the stats line would say n/a three times.
+    hasStats(drive) {
+      return this.tempC(drive) !== null || this.pohValue(drive) !== null || this.cyclesValue(drive) !== null;
     },
 
     watchedRows(kind, drive) {
@@ -1408,7 +1450,7 @@ function controlCenter() {
       const readings = ev?.readings || this.rawReadings(drive);
       for (const [label, value] of Object.entries(readings)) {
         rows.push({ label: READING_NAMES[label] || label,
-                    value: PERCENT_LABELS.has(label) ? `${value}%` : this.fmtNum(value),
+                    value: PERCENT_LABELS.has(label) && this.isNum(value) ? `${value}%` : this.fmtNum(value),
                     level: this.levelFor(ev, label) });
       }
       return rows;
@@ -1477,11 +1519,15 @@ function controlCenter() {
         default: return ds.status || 'not reported';
       }
     },
-    devstatUnc(drive) {
+    devstatUncEntry(drive) {
       for (const page of drive.device_statistics?.pages || []) {
-        for (const e of page.table || []) if (/Reported Uncorrectable/i.test(e.name || '')) return e.value ?? 0;
+        for (const e of page.table || []) if (/Reported Uncorrectable/i.test(e.name || '')) return e;
       }
       return null;
+    },
+    devstatUnc(drive) {
+      const v = this.devstatUncEntry(drive)?.value;
+      return this.isNum(v) ? v : null;
     },
 
     agoText(ts) {
@@ -1543,14 +1589,13 @@ function controlCenter() {
         for (const a of this.ataTable(drive)) {
           const lab = ATA_LABELS[a.name];
           rows.push({ key: a.name, label: a.name.replace(/_/g, ' '), hint: (lab && ATA_HINTS[lab]) || '',
-                      value: a.raw?.value ?? 0, level: this.levelFor(ev, lab),
+                      value: a.raw?.value ?? null, level: this.levelFor(ev, lab),
                       more: !lab && !MAIN_ATA.has(a.name) });
         }
       }
-      const unc = this.devstatUnc(drive);
-      if (unc !== null) {
+      if (this.devstatUncEntry(drive)) {
         rows.push({ key: 'devstat:reported_uncorrectable', kind: 'devstat', label: 'Reported Uncorrectable (Device Statistics)',
-                    hint: '1+ is YES', value: unc, level: this.levelFor(ev, 'Reported Uncorrectable Errors') });
+                    hint: '1+ is YES', value: this.devstatUnc(drive), level: this.levelFor(ev, 'Reported Uncorrectable Errors') });
       }
       if (this.writesEditable(drive)) {
         const bytes = drive.derived?.host_writes?.bytes;

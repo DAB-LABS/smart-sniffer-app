@@ -26,6 +26,12 @@ carry no query string, so the server reads the flags from the Referer.
     HOSTNAME <host>                       the agent host (default: the slug with dashes)
     MDNS_NAME <name> | none               the agent's mDNS name; none (or empty) for none
                                           (default smartha-homeassistant)
+    HA_VERSION <version> | none           Home Assistant's version (default 2026.7.2); 2025.x
+                                          and earlier give the /hassio/... link paths, none:
+                                          Core could not tell, ha_version is null
+    VDISK   0 | 1 | zero                  1: the agent also sees a QEMU SCSI virtual disk with no
+                                          SMART data and no temperature (UNSUPPORTED); zero: the
+                                          same disk with smartctl's 0 C stand-in temperature
 
 HOSTNAME is read from the environment like the rest, and some shells and
 containers export it already, so set it on the command line when it matters:
@@ -88,6 +94,8 @@ DEFAULTS = {
     "SLUG": "local_smart_sniffer_agent",
     "HOSTNAME": "",
     "MDNS_NAME": "smartha-homeassistant",
+    "HA_VERSION": "2026.7.2",
+    "VDISK": "0",
 }
 
 LOCK = threading.Lock()
@@ -164,14 +172,17 @@ def stand_in_evaluate(drive: dict) -> dict:
         crit.append("SMART overall status: FAILED")
     log = sd.get("nvme_smart_health_information_log")
     table = (sd.get("ata_smart_attributes") or {}).get("table") or []
-    if not log and not table:
+    if not log and not table and "passed" not in (sd.get("smart_status") or {}):
         return {"state": "UNSUPPORTED", "severity": "none", "reasons": [], "accepted": [],
                 "readings": {}, "reasons_text": "No usable SMART data",
                 "rules_version": RULES_VERSION}
     if log:
-        readings = {"NVMe Media Errors": log.get("media_errors", 0),
-                    "NVMe Spare Warn Below": log.get("available_spare", 100),
-                    "SSD Wear Percent Used": log.get("percentage_used", 0)}
+        # A field the drive leaves out is not a reading of 0.
+        for label, key in (("NVMe Media Errors", "media_errors"),
+                           ("NVMe Spare Warn Below", "available_spare"),
+                           ("SSD Wear Percent Used", "percentage_used")):
+            if log.get(key) is not None:
+                readings[label] = log[key]
         if log.get("critical_warning"):
             crit.append(f"NVMe critical warning flag set (0x{log['critical_warning']:02x})")
         if log.get("media_errors"):
@@ -188,7 +199,9 @@ def stand_in_evaluate(drive: dict) -> dict:
     for attr in table:
         if attr["name"] in labels:
             label, limit, bucket = labels[attr["name"]]
-            value = attr["raw"]["value"]
+            value = (attr.get("raw") or {}).get("value")
+            if value is None:
+                continue
             readings[label] = value
             if value > limit:
                 bucket.append(f"{label}: {value} (expected 0)" if not limit
@@ -329,7 +342,26 @@ def wdc_payload(drive_id, serial, path, unc=0, writes_tb=107.83):
     }
 
 
-def real_drives(count: int) -> list:
+def scsi_vdisk_payload(zero_temperature: bool) -> dict:
+    """A QEMU SCSI virtual disk as the agent reports it: smartctl finds the
+    device but no SMART support, so the integration calls it UNSUPPORTED. Some
+    smartctl builds still write a temperature of 0 for it."""
+    model, serial, path = "QEMU HARDDISK", "drive-scsi0", "/dev/sdb"
+    sd = {"device": {"name": path, "info_name": path, "type": "scsi", "protocol": "SCSI"},
+          "scsi_vendor": "QEMU", "scsi_product": "QEMU HARDDISK", "scsi_model_name": "QEMU QEMU HARDDISK",
+          "model_name": model, "serial_number": serial, "logical_block_size": 512}
+    if zero_temperature:
+        sd["temperature"] = {"current": 0, "drive_trip": 0}
+    return {
+        "id": "sdb", "model": model, "serial": serial, "protocol": "SCSI",
+        "device_path": path, "readable": True, "in_standby": False,
+        "last_updated": iso(25), "smart_data": sd,
+        "device_statistics": {"status": "not_applicable"},
+        "derived": {"host_writes_omitted": "no_source", "host_reads_omitted": "no_source"},
+    }
+
+
+def real_drives(count: int, vdisk: str = "0") -> list:
     drives = [nvme_payload("nvme0", "Samsung SSD 980 PRO 1TB", "S5GXNX0DEMO412A", "/dev/nvme0",
                            nvme_log(), 9_121_388, 18_250_114)]
     if count >= 2:
@@ -337,7 +369,10 @@ def real_drives(count: int) -> list:
         hdd["in_standby"] = True
         hdd["last_updated"] = iso(3 * 3600 + 120)
         drives.append(hdd)
-    return drives[:count]
+    drives = drives[:count]
+    if vdisk in ("1", "zero"):
+        drives.append(scsi_vdisk_payload(vdisk == "zero"))
+    return drives
 
 
 # ── Mock store ───────────────────────────────────────────────────────────────
@@ -537,6 +572,14 @@ def mdns_name(flags) -> str | None:
     return None if name.lower() in ("", "none", "null") else name
 
 
+def ha_version(flags) -> str | None:
+    # The proxy asks Core, so there is no version when Core is out of reach.
+    version = flags["HA_VERSION"].strip()
+    if flags["HA"] == "unreachable" or version.lower() in ("", "none", "null"):
+        return None
+    return version
+
+
 def ha_targets(flags) -> dict:
     agent_on = flags["AGENT_ENTRY"] == "1"
     lab_on = flags["LAB"] == "connected" or flags["LAB_ENTRY"] == "1"
@@ -644,12 +687,13 @@ class Handler(BaseHTTPRequestHandler):
                                     "ha_api": flags["HA"] != "unreachable",
                                     "hostname": agent_host(flags),
                                     "slug": app_slug(flags),
-                                    "mdns_name": mdns_name(flags)})
+                                    "mdns_name": mdns_name(flags),
+                                    "ha_version": ha_version(flags)})
 
         if head == "api":
             if flags["AGENT"] == "down":
                 return self._send(502, {"error": "Backend unavailable on port 9099"})
-            drives = real_drives(int(flags["DRIVES"]))
+            drives = real_drives(int(flags["DRIVES"]), flags["VDISK"])
             if parts[1:] == ["health"]:
                 return self._send(200, {"status": "ok", "version": AGENT_VERSION, "os": "linux",
                                         "uptime_seconds": int(time.time() - STARTED) + 3600,

@@ -6,8 +6,9 @@ Serves static files from /opt/web/ at the root path and proxies:
   /mock/* -> localhost:$MOCK_PORT   (Python mock agent, /mock/ rewritten to /api/)
 
 It also answers the Control Center's own routes:
-  GET  /app/info     app version, rules version, ports, Test Lab flag, and
-                     the app's identity: hostname, slug, mDNS name
+  GET  /app/info     app version, rules version, ports, Test Lab flag, the
+                     app's identity (hostname, slug, mDNS name) and the Home
+                     Assistant version, which picks the page's link paths
   POST /evaluate     the integration's Attention verdict for one drive payload
   POST /lab/on       turn the Test Lab on (sets mock_mode, restarts the app)
   POST /lab/off      turn the Test Lab off (same, mock_mode false)
@@ -205,6 +206,8 @@ class Supervisor:
         self._ha_api_cache: tuple[float, bool] | None = None
         self._slug: str | None = None
         self._slug_failed_at: float | None = None
+        self._ha_version: str | None = None
+        self._ha_version_failed_at: float | None = None
 
     @property
     def available(self) -> bool:
@@ -279,6 +282,26 @@ class Supervisor:
             self._slug = slug
             return slug
         self._slug_failed_at = time.monotonic()
+        return None
+
+    def ha_version(self) -> str | None:
+        """Home Assistant's version ("2026.7.2"), from Core's /api/config. The
+        page picks the paths of its Home Assistant links by it. Kept once known,
+        like the slug; None when Core cannot be reached, asked again after
+        HA_API_CACHE_SECONDS."""
+        if self._ha_version:
+            return self._ha_version
+        if not self.available:
+            return None
+        failed = self._ha_version_failed_at
+        if failed is not None and time.monotonic() - failed < HA_API_CACHE_SECONDS:
+            return None
+        status, config = self.core("GET", "/config")
+        version = config.get("version") if isinstance(config, dict) else None
+        if status == 200 and isinstance(version, str) and version:
+            self._ha_version = version
+            return version
+        self._ha_version_failed_at = time.monotonic()
         return None
 
 
@@ -412,6 +435,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "hostname": self.agent_host,
             "slug": self.supervisor.app_slug(),
             "mdns_name": self.mdns_name,
+            "ha_version": self.supervisor.ha_version(),
         })
 
     # ── /evaluate ──

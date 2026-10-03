@@ -47,6 +47,9 @@ TOKEN = "test-supervisor-token"
 AGENT_HOST = "local-smart-sniffer-agent"
 SLUG = "local_smart_sniffer_agent"
 MDNS_NAME = "smartha-homeassistant"
+# Home Assistant 2026 moved the app pages to /config/app/<slug>/...; the page
+# picks its link paths from this version.
+HA_VERSION = "2026.7.2"
 
 needs_rules = pytest.mark.skipif(
     not (RULES_DIR / "smart_sniffer" / "attention.py").is_file()
@@ -65,6 +68,7 @@ class FakeState:
 
     def reset(self) -> None:
         self.core_status = 200  # 401 makes Core unreachable
+        self.ha_version = HA_VERSION
         self.entries: list[dict[str, Any]] = []
         self.components: list[str] = ["sensor", "zeroconf"]
         self.flow_handlers: list[str] = ["met", "zha"]
@@ -133,7 +137,8 @@ class FakeSupervisor(BaseHTTPRequestHandler):
         if core == "/" and method == "GET":
             _json_reply(self, 200, {"message": "API running."})
         elif core == "/config" and method == "GET":
-            _json_reply(self, 200, {"components": STATE.components})
+            _json_reply(self, 200, {"components": STATE.components,
+                                    "version": STATE.ha_version})
         elif core == "/config/config_entries/flow_handlers" and method == "GET":
             _json_reply(self, 200, STATE.flow_handlers)
         elif parsed.path == "/config/config_entries/entry" and method == "GET":
@@ -340,6 +345,7 @@ def test_app_info(proxy):
         "hostname": AGENT_HOST,
         "slug": SLUG,
         "mdns_name": MDNS_NAME,
+        "ha_version": HA_VERSION,
     }
 
 
@@ -348,7 +354,50 @@ def test_app_info_slug_is_cached(proxy):
     STATE.calls.clear()
     _, info = proxy.get("/app/info")
     assert info["slug"] == SLUG
+    assert info["ha_version"] == HA_VERSION
     assert not any(c[1] == "/addons/self/info" for c in STATE.calls)
+    assert not any(c[1] == "/core/api/config" for c in STATE.calls)
+
+
+def _app_info_from_fresh_proxy(supervisor) -> dict[str, Any]:
+    """/app/info from a proxy of its own, so nothing is cached yet."""
+    proc, client = _start_proxy([
+        f"--rules-dir={RULES_DIR}",
+        f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
+        f"--agent-host={AGENT_HOST}",
+    ], TOKEN)
+    try:
+        status, info = client.get("/app/info")
+    finally:
+        _stop_proxy(proc)
+    assert status == 200
+    return info
+
+
+def test_app_info_older_home_assistant(backends):
+    # Before 2026 the app pages live under /hassio/addon/<slug>/; the page
+    # reads the year from this version.
+    STATE.ha_version = "2025.12.0"
+    info = _app_info_from_fresh_proxy(backends[0])
+    assert info["ha_version"] == "2025.12.0"
+    assert info["slug"] == SLUG
+
+
+def test_app_info_core_unreachable(backends):
+    # The Supervisor answers but Core does not: the slug is known, the
+    # version is null and the page falls back to the newer paths.
+    STATE.core_status = 401
+    info = _app_info_from_fresh_proxy(backends[0])
+    assert info["ha_api"] is False
+    assert info["slug"] == SLUG
+    assert info["ha_version"] is None
+
+
+def test_app_info_version_missing_from_config(backends):
+    # A Core that leaves the field out: null, never a made-up version.
+    STATE.ha_version = None
+    info = _app_info_from_fresh_proxy(backends[0])
+    assert info["ha_version"] is None
 
 
 def test_app_info_without_supervisor(backends):
@@ -372,6 +421,7 @@ def test_app_info_without_supervisor(backends):
     assert info["ha_api"] is False
     assert info["slug"] is None
     assert info["mdns_name"] is None
+    assert info["ha_version"] is None
     assert info["hostname"] == module.DEFAULT_AGENT_HOST
 
 
