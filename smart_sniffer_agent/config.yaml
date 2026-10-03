@@ -29,8 +29,14 @@ privileged:
 # Users must also disable Protection Mode in the app settings for drive access.
 full_access: true
 
-# Supervisor API access — needed to query HA hostname for unique mDNS names
+# Supervisor API access: needed to query HA hostname for unique mDNS names,
+# and for the Control Center's Test Lab button (sets mock_mode, restarts the app)
 hassio_api: true
+
+# Home Assistant Core API access: the Control Center adds and removes the
+# integration entries for this app's own agents and reads the drive's
+# Attention state. Without it the page shows the manual steps instead.
+homeassistant_api: true
 
 # AppArmor — custom profile (apparmor.txt) provides the Protection Mode toggle
 # in the HA UI and documents what the container actually accesses.
