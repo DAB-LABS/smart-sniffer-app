@@ -38,11 +38,13 @@ The app handles your local drive. For monitoring drives on other machines — a 
 
 ## Test Lab
 
-The app includes a built-in Test Lab with simulated drives for safely testing the SMART Sniffer integration without touching real hardware. Enable **Mock Test Drives** in the app configuration to activate it.
+The app includes a built-in Test Lab with simulated drives for safely testing the SMART Sniffer integration without touching real hardware.
 
 Mock drives behave exactly like real drives from the integration's perspective. You can adjust their SMART attributes in the web UI and watch how the integration responds — attention states, health changes, temperature alerts, and more.
 
-To connect mock drives to Home Assistant, add them as a **separate agent** in the integration:
+**Turn it on and connect it from the Control Center.** Open the app's web UI and press **Turn on** in the Test Lab section. The app restarts with the Test Lab running, which takes about 20 seconds. Then press **Connect** to add the Test Lab to the SMART Sniffer integration as a separate agent. When you are done, **Disconnect** removes the Test Lab entry and its mock devices from Home Assistant, and **Turn off** stops the Test Lab. Connect and Disconnect need the integration installed and the app's Home Assistant API access (see [Security & Permissions](#security--permissions)).
+
+**Manual steps (fallback).** If the buttons are not shown, enable **Mock Test Drives** in the app configuration, restart the app, and add the mock drives as a **separate agent** in the integration:
 
 1. Go to **Settings → Devices & Services → SMART Sniffer → Add Device**
 2. Enter host `0449a086-smart-sniffer-agent` and port `9100`
@@ -52,6 +54,8 @@ This creates a second connection alongside your real drive — mock drives and r
 ## Web UI
 
 Click **Open Web UI** to access the Agent Control Center — a real-time dashboard showing the status of both the local drive agent and the Test Lab. From here you can see agent health, drive counts, and manage mock drive attributes.
+
+The Control Center also connects this app's agents to Home Assistant: a **Connect** button adds the drive agent or the Test Lab to the SMART Sniffer integration, and a **Turn on** button starts the Test Lab. If Home Assistant cannot be reached from the app, or the integration is not installed yet, the page shows the manual steps instead, and the steps in [Getting Started](#getting-started) and [Test Lab](#test-lab) still work.
 
 ## Security & Permissions
 
@@ -64,6 +68,7 @@ SMART Sniffer needs direct hardware access to read drive health data. This is no
 | `SYS_RAWIO` | Send SCSI commands to SATA/SAS drives |
 | `SYS_ADMIN` | Send admin commands to NVMe drives |
 | `full_access` | Open drive device nodes (`/dev/sda`, `/dev/nvme0`) |
+| `homeassistant_api` | Adds and removes the integration entries for this app's own agents from the Control Center and reads the drive's Attention state |
 | Protection Mode OFF | May be needed to allow the above permissions to take effect |
 
 **What the app does NOT do:**
