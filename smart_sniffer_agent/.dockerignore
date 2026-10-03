@@ -3,3 +3,4 @@ web/test_proxy.py
 **/__pycache__
 **/*.pyc
 .pytest_cache
+web/devserver.py
