@@ -1,0 +1,5 @@
+# Development only, not part of the image
+web/test_proxy.py
+**/__pycache__
+**/*.pyc
+.pytest_cache

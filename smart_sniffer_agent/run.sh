@@ -174,10 +174,16 @@ MOCK_DRIVE_COUNT="0"
 
 if bashio::var.true "${MOCK_MODE}"; then
     bashio::log.info "Starting mock agent on port ${MOCK_PORT}..."
-    python3 /opt/mock-agent.py \
-        --port="${MOCK_PORT}" \
-        --data-dir /data \
-        --preload sata_hdd,sata_ssd,nvme,usb_blocked &
+    # The mock comes from the smart-sniffer release (see the Dockerfile).
+    # Pass --data-dir only when that version supports it, so an older mock
+    # still starts (its drives then live in memory and reset on restart).
+    MOCK_ARGS="--port=${MOCK_PORT} --preload sata_hdd,sata_ssd,nvme,usb_blocked"
+    if python3 /opt/mock-agent.py --help 2>&1 | grep -q -- "--data-dir"; then
+        MOCK_ARGS="${MOCK_ARGS} --data-dir /data"
+    else
+        bashio::log.warning "Mock agent does not support --data-dir. Mock drive edits will not survive a restart."
+    fi
+    python3 /opt/mock-agent.py ${MOCK_ARGS} &
     MOCK_PID=$!
     MOCK_STATUS="enabled on port ${MOCK_PORT}"
     MOCK_DRIVE_COUNT="4"  # preloaded count
@@ -186,7 +192,10 @@ fi
 # ── Start the web UI proxy server ────────────────────────────────────────────
 bashio::log.info "Starting web UI proxy on port ${INGRESS_PORT}..."
 
+# SUPERVISOR_TOKEN is already in this environment (with-contenv) and the
+# proxy inherits it; it is never passed on the command line.
 PROXY_ARGS="--port=${INGRESS_PORT} --agent-port=${PORT} --mock-port=${MOCK_PORT}"
+PROXY_ARGS="${PROXY_ARGS} --app-version=${APP_VERSION} --mock-enabled=${MOCK_MODE}"
 if bashio::var.has_value "${TOKEN}"; then
     PROXY_ARGS="${PROXY_ARGS} --token=${TOKEN}"
 fi
@@ -202,6 +211,7 @@ bashio::log.info "Integration host: 0449a086-smart-sniffer-agent:${PORT}"
 bashio::log.info "mDNS: ${MDNS_NAME:-default (container hostname)}"
 bashio::log.info "Auth: ${AUTH_STATUS}"
 bashio::log.info "Mock: ${MOCK_STATUS}"
+bashio::log.info "Integration rules: $(cat /opt/ssrules/VERSION 2>/dev/null || echo 'not found')"
 bashio::log.info "Web UI: http://localhost:${INGRESS_PORT} (via ingress)"
 bashio::log.info "Drives detected: ${DRIVE_COUNT:-0}"
 bashio::log.info "─────────────────────────────────────────"

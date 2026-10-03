@@ -41,8 +41,32 @@ RUN ARCH=$(uname -m) && \
     curl -fSL -o /usr/bin/smartha-agent "${RELEASE_URL}" && \
     chmod +x /usr/bin/smartha-agent
 
-# Copy the mock agent
-COPY mock-agent.py /opt/mock-agent.py
+# The integration's Attention rules and the mock agent, from the smart-sniffer
+# release this app version is built against. The proxy runs the rules for the
+# Control Center's verdict (/evaluate); the mock is the Test Lab. SS_TAG is
+# bumped with each app release.
+#
+# attention.py, devstat.py and extract.py import nothing from Home Assistant.
+# They go in custom_components/smart_sniffer/ with no package __init__.py of
+# their own; the proxy registers that package itself so their relative imports
+# resolve without the integration's __init__ (which needs Home Assistant).
+ARG SS_TAG=v0.8.0
+RUN SS_RAW="https://raw.githubusercontent.com/DAB-LABS/smart-sniffer/${SS_TAG}" && \
+    RULES_DIR=/opt/ssrules/custom_components && \
+    mkdir -p "${RULES_DIR}/smart_sniffer" && \
+    : > "${RULES_DIR}/__init__.py" && \
+    for f in attention.py devstat.py extract.py; do \
+      echo "Downloading ${f} from smart-sniffer ${SS_TAG}" && \
+      curl -fSL -o "${RULES_DIR}/smart_sniffer/${f}" \
+        "${SS_RAW}/custom_components/smart_sniffer/${f}" || exit 1; \
+    done && \
+    echo "${SS_TAG}" > /opt/ssrules/VERSION && \
+    echo "Downloading mock-agent.py from smart-sniffer ${SS_TAG}" && \
+    curl -fSL -o /opt/mock-agent.py "${SS_RAW}/tools/mock-agent.py" && \
+    python3 -m py_compile /opt/mock-agent.py \
+      "${RULES_DIR}/smart_sniffer/attention.py" \
+      "${RULES_DIR}/smart_sniffer/devstat.py" \
+      "${RULES_DIR}/smart_sniffer/extract.py"
 
 # Copy the web UI
 COPY web/ /opt/web/
