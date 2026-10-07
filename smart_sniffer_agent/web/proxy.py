@@ -96,21 +96,25 @@ _TITLE_RE = re.compile(r"^SMART Sniffer \((?P<inner>.+)\)$")
 INTEGRATION_URL = "/config/integrations/integration/smart_sniffer"
 
 # Every device of the integration with its id, name, serial number,
-# identifiers and config entries, printed as JSON by Core's template
+# identifiers and config entry, printed as JSON by Core's template
 # endpoint. The REST API has no device registry list; the websocket API does,
 # but this proxy has no websocket client. Sets become lists for to_json.
+# The entry comes from config_entry_id() of the device's first entity:
+# device_attr(d, 'config_entries') raises on Home Assistant 2026.10, where
+# DeviceEntry.config_entries is deprecated.
 DEVICES_TEMPLATE = (
-    "{%- set ns = namespace(ids=[]) -%}"
+    "{%- set ns = namespace(ids=[], entries=[]) -%}"
     "{%- for e in integration_entities('smart_sniffer') -%}"
     "{%- set d = device_id(e) -%}"
-    "{%- if d and d not in ns.ids -%}{%- set ns.ids = ns.ids + [d] -%}{%- endif -%}"
+    "{%- if d and d not in ns.ids -%}{%- set ns.ids = ns.ids + [d] -%}"
+    "{%- set ns.entries = ns.entries + [config_entry_id(e)] -%}{%- endif -%}"
     "{%- endfor -%}"
     "[{%- for d in ns.ids -%}"
     '{"id": {{ d | to_json }}, '
     '"name": {{ device_attr(d, \'name\') | to_json }}, '
     '"serial_number": {{ device_attr(d, \'serial_number\') | to_json }}, '
     '"identifiers": {{ (device_attr(d, \'identifiers\') or []) | list | map(\'list\') | list | to_json }}, '
-    '"config_entries": {{ (device_attr(d, \'config_entries\') or []) | list | to_json }}}'
+    '"config_entries": {{ [ns.entries[loop.index0]] | select | list | to_json }}}'
     "{{ ',' if not loop.last else '' }}"
     "{%- endfor -%}]"
 )
