@@ -153,6 +153,7 @@
       <div class="scen-bar">
         <span class="label" x-show="scenOptions(it).length">Scenario</span>
         <select class="select" aria-label="Scenario" x-show="scenOptions(it).length" @change="ui.scen[it.id] = $event.target.value">
+          <template x-if="!scenSel(it)"><option value="" selected disabled>Choose a scenario</option></template>
           <template x-for="o in scenOptions(it)" :key="o.id"><option :value="o.id" x-text="o.label" :selected="o.id === scenSel(it)"></option></template>
         </select>
         <button class="btn btn-sm" type="button" x-show="scenOptions(it).length" :disabled="!!ui.busy['scen:' + it.id]" @click="applyScenario(it)">Apply</button>
