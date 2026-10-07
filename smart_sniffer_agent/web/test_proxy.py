@@ -11,6 +11,9 @@ smart-sniffer checkout beside this repository); the drive fixtures come from the
 checkout's tests/fixtures, or from SS_FIXTURES. The /evaluate tests are
 skipped when the rules are absent.
 
+drive_view(), pool_verdict() and Rules are also tested directly, imported
+from proxy.py without starting it.
+
 Run with:
   SS_RULES_DIR=../smart-sniffer/custom_components \
     python3 -m pytest smart_sniffer_agent/web/test_proxy.py
@@ -22,9 +25,11 @@ import copy
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -41,6 +46,9 @@ PROXY = Path(__file__).resolve().parent / "proxy.py"
 _SIBLING = Path(__file__).resolve().parents[3] / "smart-sniffer" / "custom_components"
 RULES_DIR = Path(os.environ.get("SS_RULES_DIR", _SIBLING))
 FIXTURES = Path(os.environ.get("SS_FIXTURES", RULES_DIR.parent / "tests" / "fixtures"))
+# The replica agent: SS_MOCK, else the rules checkout's tools/mock-agent.py.
+# The replica tests are skipped when that mock has no replica files.
+MOCK_AGENT = Path(os.environ.get("SS_MOCK", RULES_DIR.parent / "tools" / "mock-agent.py"))
 TOKEN = "test-supervisor-token"
 # The app installed as a local app: run.sh passes the container hostname and
 # the Supervisor reports the slug.
@@ -50,6 +58,19 @@ MDNS_NAME = "smartha-homeassistant"
 # Home Assistant 2026 moved the app pages to /config/app/<slug>/...; the page
 # picks its link paths from this version.
 HA_VERSION = "2026.7.2"
+
+def _mock_has_replicas() -> bool:
+    try:
+        text = MOCK_AGENT.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "--user-replicas" in text and (MOCK_AGENT.parent / "replicas").is_dir()
+
+
+needs_mock = pytest.mark.skipif(
+    not _mock_has_replicas(),
+    reason=f"replica mock agent not found ({MOCK_AGENT}); set SS_MOCK",
+)
 
 needs_rules = pytest.mark.skipif(
     not (RULES_DIR / "smart_sniffer" / "attention.py").is_file()
@@ -75,8 +96,15 @@ class FakeState:
         self.flow_step: dict[str, Any] = {"type": "create_entry"}
         self.options: dict[str, Any] = {
             "port": 9099, "token": "", "scan_interval": 60,
-            "mock_mode": False, "mock_port": 9100,
+            "mock_port": 9100, "hosts": [],
         }
+        self.options_status = 200  # 400 makes the Supervisor refuse a write
+        self.network: dict[str, Any] = {"interfaces": [
+            {"interface": "lo0", "primary": False, "connected": True,
+             "ipv4": {"address": ["192.168.99.2/24"]}},
+            {"interface": "enp0s18", "primary": True, "connected": True,
+             "ipv4": {"address": ["127.0.0.1/24"]}},
+        ]}
         self.states: list[dict[str, Any]] = []
         self.diagnostics: dict[str, int] = {}  # entry_id -> port
         self.calls: list[tuple[str, str, Any]] = []
@@ -117,8 +145,16 @@ class FakeSupervisor(BaseHTTPRequestHandler):
             }})
             return
         if path == "/addons/self/options" and method == "POST":
+            if STATE.options_status != 200:
+                _json_reply(self, STATE.options_status, {
+                    "result": "error", "message": "Option 'hosts' does not match the schema",
+                })
+                return
             STATE.options = body["options"]
             _json_reply(self, 200, {"result": "ok", "data": {}})
+            return
+        if path == "/network/info" and method == "GET":
+            _json_reply(self, 200, {"result": "ok", "data": STATE.network})
             return
         if path == "/addons/self/restart" and method == "POST":
             STATE.restarted.set()
@@ -281,20 +317,59 @@ def _stop_proxy(proc: subprocess.Popen) -> str:
 
 
 @pytest.fixture(scope="session")
-def proxy(backends):
+def mock_agent():
+    """The replica agent from the smart-sniffer checkout, with the shipped
+    replica folder and a temporary user folder. None when it is not there;
+    the replica tests skip, the rest run against a closed port."""
+    if not _mock_has_replicas():
+        yield None
+        return
+    work = Path(tempfile.mkdtemp(prefix="ss-mock-"))
+    user = work / "user"
+    user.mkdir()
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, str(MOCK_AGENT), f"--port={port}", "--host=127.0.0.1",
+         "--no-mdns", "--replicas", str(MOCK_AGENT.parent / "replicas"),
+         "--user-replicas", str(user)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _wait_for_port(port, proc)
+    yield {"port": port, "user": user, "proc": proc}
+    proc.terminate()
+    proc.wait(timeout=5)
+    shutil.rmtree(work, ignore_errors=True)
+
+
+def _wait_for_port(port: int, proc: subprocess.Popen) -> None:
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return
+        except OSError:
+            if proc.poll() is not None or time.monotonic() > deadline:
+                proc.kill()
+                pytest.fail(f"process on port {port} did not start")
+            time.sleep(0.05)
+
+
+@pytest.fixture(scope="session")
+def proxy(backends, mock_agent):
     supervisor, agent = backends
     agent_port = agent.server_address[1]
+    mock_port = mock_agent["port"] if mock_agent else _free_port()
     proc, client = _start_proxy([
         f"--agent-port={agent_port}",
-        "--mock-port=9100",
+        f"--mock-port={mock_port}",
         "--app-version=0.3.0",
-        "--mock-enabled=true",
         f"--rules-dir={RULES_DIR}",
         f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
         f"--agent-host={AGENT_HOST}",
         f"--mdns-name={MDNS_NAME}",
     ], TOKEN)
     client.agent_port = agent_port  # type: ignore[attr-defined]
+    client.mock_port = mock_port  # type: ignore[attr-defined]
     yield client
     # The Supervisor token must never reach the log.
     assert TOKEN not in _stop_proxy(proc)
@@ -330,23 +405,317 @@ def _entry(entry_id: str, title: str, state: str = "loaded") -> dict[str, Any]:
     }
 
 
+# ── proxy.py imported as a module ───────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def mod():
+    """proxy.py imported without starting it, its rules loaded."""
+    spec = importlib.util.spec_from_file_location("webui_proxy_under_test", PROXY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    rules = module.Rules(str(RULES_DIR))
+    module.loaded_rules = rules if rules.load() else None
+    return module
+
+
+def _devstat_drive(name: str) -> dict[str, Any]:
+    """A v0.8.0 agent's drive from the integration's devstat fixtures."""
+    with (FIXTURES / "devstat" / f"{name}.a.json").open(encoding="utf-8") as handle:
+        smart_data = json.load(handle)
+    with (FIXTURES / "devstat" / f"{name}.devstat.json").open(encoding="utf-8") as handle:
+        stats = json.load(handle)
+    return {
+        "id": name, "device_path": "/dev/fixture",
+        "model": smart_data.get("model_name", ""), "serial": smart_data.get("serial_number", ""),
+        "protocol": "ATA", "readable": True,
+        "smart_data": smart_data,
+        "device_statistics": {
+            "status": "present", "complete": True, "exit_status": 0,
+            "logical_block_size": 512, "pages": stats["ata_device_statistics"]["pages"],
+        },
+    }
+
+
+def _ata_drive(attrs: dict[str, int], passed: bool = True, wear: int | None = None) -> dict[str, Any]:
+    """A small ATA drive: the given attribute raw values."""
+    ids = {"Reallocated_Sector_Ct": 5, "Spin_Retry_Count": 10, "Reported_Uncorrect": 187,
+           "Command_Timeout": 188, "Reallocated_Event_Count": 196,
+           "Current_Pending_Sector": 197, "Offline_Uncorrectable": 198}
+    table = [
+        {"id": ids[name], "name": name, "value": 100, "worst": 100, "thresh": 0,
+         "raw": {"value": raw, "string": str(raw)}}
+        for name, raw in attrs.items()
+    ]
+    if wear is not None:
+        table.append({"id": 177, "name": "Wear_Leveling_Count", "value": 100 - wear,
+                      "worst": 100 - wear, "thresh": 0, "flags": {"value": 19},
+                      "raw": {"value": 10, "string": "10"}})
+    return {
+        "id": "sda", "model": "Test ATA", "serial": "T1", "protocol": "ATA",
+        "smart_data": {
+            "smart_status": {"passed": passed},
+            "temperature": {"current": 38},
+            "power_on_time": {"hours": 31502},
+            "power_cycle_count": 1204,
+            "ata_smart_attributes": {"table": table},
+        },
+        "derived": {"host_writes": {"bytes": 61200000000000, "source": "ata_attribute",
+                                    "attribute_id": 241, "attribute_name": "Total_LBAs_Written"},
+                    "host_reads_omitted": "no_source"},
+        "device_statistics": {"status": "absent"},
+    }
+
+
+def _view(mod, drive: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    verdict = mod.loaded_rules.evaluate(drive)
+    return verdict, mod.drive_view(drive, verdict)
+
+
+def _rows(view: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["key"]: row for row in view["rows"]}
+
+
+@needs_rules
+def test_view_ata_critical(mod):
+    verdict, view = _view(mod, _ata_drive({
+        "Reallocated_Sector_Ct": 24, "Current_Pending_Sector": 3,
+        "Offline_Uncorrectable": 0, "Reallocated_Event_Count": 0,
+    }))
+    assert verdict["state"] == "YES"
+    assert view["header"] == "attention" and view["health_failed"] is False
+    rows = _rows(view)
+    assert rows["reallocated"] == {"key": "reallocated", "name": "Reallocated sectors",
+                                   "value": "24", "mark": "crit", "expect": "expected 0",
+                                   "note": None}
+    assert rows["pending"]["mark"] == "crit" and rows["pending"]["value"] == "3"
+    assert rows["offline_unc"]["mark"] is None and rows["offline_unc"]["expect"] is None
+    assert [r["key"] for r in view["rows"]] == [
+        "reallocated", "pending", "offline_unc", "realloc_events"]
+    assert view["stats"] == {"temp_c": 38, "power_on_hours": 31502, "power_cycles": 1204}
+    assert view["volumes"] == {
+        "written": {"bytes": 61200000000000, "source": "attribute", "attribute_id": 241},
+        "read": {"omitted": "no_source"},
+    }
+    assert view["devstat"] == "absent"
+    assert view["report"] == {"kind": "ata", "count": 4}
+    assert view["can_save"] is True
+
+
+@needs_rules
+def test_view_ata_warning(mod):
+    verdict, view = _view(mod, _ata_drive({"Command_Timeout": 120, "Reallocated_Event_Count": 1}))
+    assert verdict["state"] == "MAYBE"
+    assert view["header"] == "maybe"
+    rows = _rows(view)
+    assert rows["cmd_timeout"]["mark"] == "warn"
+    assert rows["cmd_timeout"]["expect"] == "warns above 100"
+    assert rows["realloc_events"]["mark"] == "warn"
+    assert rows["realloc_events"]["expect"] == "expected 0"
+
+
+@needs_rules
+def test_view_smart_failed(mod):
+    _, view = _view(mod, _ata_drive({"Reallocated_Sector_Ct": 24}, passed=False))
+    assert view["header"] == "attention"
+    assert view["health_failed"] is True
+    # Health FAILED is on the header line; no row repeats it.
+    assert all(row["key"] not in ("smart_status", "other") for row in view["rows"])
+
+
+@needs_rules
+def test_view_ata_wear(mod):
+    _, view = _view(mod, _ata_drive({"Reallocated_Sector_Ct": 0}, wear=95))
+    rows = _rows(view)
+    assert rows["wear"] == {"key": "wear", "name": "Wear used", "value": "95%",
+                            "mark": "warn", "expect": "warns at 90%", "note": None}
+
+
+def _nvme(**changes: Any) -> dict[str, Any]:
+    drive = _drive("nvme_healthy")
+    drive["smart_data"]["nvme_smart_health_information_log"].update(changes)
+    return drive
+
+
+@needs_rules
+def test_view_nvme_spare_warning(mod):
+    verdict, view = _view(mod, _nvme(available_spare=15))
+    assert verdict["state"] == "MAYBE"
+    rows = _rows(view)
+    assert rows["available_spare"]["value"] == "15%"
+    assert rows["available_spare"]["mark"] == "warn"
+    assert rows["available_spare"]["expect"] == "warns below 20%"
+    assert [r["key"] for r in view["rows"]] == [
+        "critical_warning", "media_errors", "available_spare", "wear"]
+    assert view["report"]["kind"] == "nvme"
+
+
+@needs_rules
+def test_view_nvme_spare_critical(mod):
+    verdict, view = _view(mod, _nvme(available_spare=8))
+    assert verdict["state"] == "YES"
+    spare = _rows(view)["available_spare"]
+    assert spare["mark"] == "crit" and spare["value"] == "8%"
+    assert spare["expect"] == "at or below the drive's own 10%"
+
+
+@needs_rules
+def test_view_nvme_wear_and_critical_warning(mod):
+    _, view = _view(mod, _nvme(percentage_used=92, critical_warning=4, media_errors=2))
+    rows = _rows(view)
+    assert rows["wear"]["mark"] == "warn" and rows["wear"]["expect"] == "warns at 90%"
+    assert rows["critical_warning"]["value"] == "0x04"
+    assert rows["critical_warning"]["mark"] == "crit"
+    assert rows["media_errors"]["mark"] == "crit"
+    assert rows["media_errors"]["expect"] == "expected 0"
+
+
+@needs_rules
+def test_view_devstat_gap(mod):
+    drive = _devstat_drive("ata_devstat_wdc_unc")
+    verdict, view = _view(mod, drive)
+    assert verdict["state"] == "YES"
+    keys = [r["key"] for r in view["rows"]]
+    # The attribute row is a ghost, the page 4 count stands in right after it.
+    i = keys.index("reported_unc")
+    assert keys[i + 1] == "reported_unc_devstat"
+    assert view["rows"][i] == {"key": "reported_unc", "name": "Reported uncorrectable",
+                               "value": "not known", "mark": "unk", "expect": None,
+                               "note": "no attribute 187"}
+    assert view["rows"][i + 1] == {"key": "reported_unc_devstat", "name": "Uncorrectable, page 4",
+                                   "value": "18", "mark": "crit",
+                                   "expect": "expected 0, from device statistics", "note": None}
+    assert view["devstat"] == "present"
+    assert "reallocated_devstat" not in keys  # attribute 5 is there
+
+
+@needs_rules
+def test_view_unsupported(mod):
+    drive = {"id": "sdz", "model": "USB bridge", "protocol": "ATA", "smart_data": {}}
+    verdict, view = _view(mod, drive)
+    assert verdict["state"] == "UNSUPPORTED"
+    assert view["header"] == "unknown"
+    assert view["can_save"] is False
+    assert [(r["key"], r["value"], r["mark"]) for r in view["rows"]] == [
+        ("reallocated", "not known", "unk"), ("pending", "not known", "unk")]
+
+
+def test_view_without_verdict(mod):
+    view = mod.drive_view(_ata_drive({"Reallocated_Sector_Ct": 5}), None)
+    assert view["header"] == "unknown"
+    assert all(row["mark"] is None for row in view["rows"])
+
+
+def test_view_unmatched_reason_becomes_other(mod):
+    verdict = {"state": "MAYBE", "severity": "warning", "reasons": ["Something new: 3"]}
+    view = mod.drive_view(_ata_drive({}), verdict)
+    assert view["rows"][-1] == {"key": "other", "name": "Something new: 3", "value": "",
+                                "mark": "warn", "expect": None, "note": None}
+
+
+def _fixture_drives() -> list[dict[str, Any]]:
+    drives = [_drive(p.stem) for p in sorted(FIXTURES.glob("*.json"))]
+    drives += [_devstat_drive(p.name[:-len(".a.json")])
+               for p in sorted((FIXTURES / "devstat").glob("*.a.json"))
+               if (FIXTURES / "devstat" / p.name.replace(".a.json", ".devstat.json")).is_file()]
+    return drives
+
+
+@needs_rules
+def test_every_fixture_reason_maps_to_a_row(mod):
+    reasons: set[str] = set()
+    for drive in _fixture_drives():
+        verdict, view = _view(mod, drive)
+        reasons.update(verdict["reasons"])
+        assert all(row["key"] != "other" for row in view["rows"]), drive["id"]
+    golden = json.loads((FIXTURES / "golden" / "v070-attention.json").read_text(encoding="utf-8"))
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("default", "overrides") and isinstance(value, list) and len(value) == 4:
+                    reasons.update(value[2])
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(golden)
+    # Every label the rule module knows, worded as it words a breach.
+    attention = mod.loaded_rules.attention
+    for label in set(attention._CRITICAL_ATA.values()) | set(attention._WARNING_ATA.values()):
+        reasons.add(f"{label}: 7 (expected 0)")
+        reasons.add(f"{label}: 7 (expected 0; from device statistics)")
+    reasons.update({
+        "SMART overall status: FAILED",
+        "NVMe critical warning flag set (0x04)",
+        "NVMe media errors: 3 (expected 0)",
+        "NVMe available spare (5%) at or below drive threshold (10%)",
+        "NVMe available spare low: 15% remaining",
+        "NVMe drive wear at 92% of rated life — consider scheduling replacement",
+        "SSD wear at 95% of rated life -- consider scheduling replacement",
+        "SSD wear at 95% of rated life -- consider scheduling replacement (from device statistics)",
+        "Command Timeout: 120 (threshold 100)",
+    })
+    assert len(reasons) > 20
+    for reason in sorted(reasons):
+        assert mod.classify_reason(reason) is not None, reason
+
+
+@needs_rules
+def test_pool_verdict(mod):
+    pools = json.loads((FIXTURES / "pools" / "degraded-faulted.json").read_text(encoding="utf-8"))
+    verdict = mod.pool_verdict(pools[0], mod.loaded_rules)
+    assert verdict["state"] == "YES"
+    assert verdict["problems"][0] == "State: DEGRADED"
+    healthy = json.loads((FIXTURES / "pools" / "never-scrubbed.json").read_text(encoding="utf-8"))
+    assert mod.pool_verdict(healthy[0]) == {"state": "NO", "problems": []}
+
+
+def test_pool_view_replica(mod):
+    lab = {"vanished": False, "vdev": {"name": "mirror-0", "type": "mirror"},
+           "devices": [{"name": "MOCK0001", "state": "ONLINE", "read": 0, "write": 0, "cksum": 0},
+                       {"name": "MOCK0002", "state": "FAULTED", "read": 12, "write": 0, "cksum": 0}]}
+    view = mod.pool_view({"name": "tank", "state": "DEGRADED"}, {"state": "YES"}, lab)
+    assert view["header"] == "attention"
+    assert view["layout"] == "two-disk mirror"
+    assert view["state"] == "DEGRADED"
+    assert [d["mark"] for d in view["disks"]] == [None, "crit"]
+    real = mod.pool_view({"name": "tank", "state": "ONLINE"}, {"state": "NO"})
+    assert real == {"header": "ok", "layout": None, "state": "ONLINE", "disks": None,
+                    "vanished": False}
+    gone = mod.pool_view({"name": "tank", "state": "ONLINE"}, {"state": "NO"}, {"vanished": True})
+    assert gone["header"] == "unknown" and gone["vanished"] is True
+
+
 # ── /app/info ───────────────────────────────────────────────────────────────
 
-def test_app_info(proxy):
+def test_app_info(proxy, mock_agent):
+    STATE.flow_handlers.append("smart_sniffer")
     status, info = proxy.get("/app/info")
     assert status == 200
+    replicas = info.pop("replicas")
     assert info == {
         "app_version": "0.3.0",
         "rules_version": info["rules_version"],  # from VERSION beside the rules, if any
         "agent_port": proxy.agent_port,
-        "mock_port": 9100,
-        "mock_enabled": True,
-        "ha_api": True,
+        "mock_port": proxy.mock_port,
         "hostname": AGENT_HOST,
         "slug": SLUG,
         "mdns_name": MDNS_NAME,
         "ha_version": HA_VERSION,
+        "ha_api": True,
+        "supervisor": True,
+        "integration_installed": info["integration_installed"],  # cached 30 s, see below
+        "network": {"block": "127.0.0.0/24", "address": "127.0.0.1", "prefix": 24,
+                    "source": "supervisor"},
+        "refresh_minutes": 15,
     }
+    assert "mock_enabled" not in info
+    if mock_agent:
+        assert replicas == {"agent": "ok", "folder": "ok", "path": str(mock_agent["user"]),
+                            "shipped": 6, "user": replicas["user"]}
+    else:
+        assert replicas["agent"] == "down"
 
 
 def test_app_info_slug_is_cached(proxy):
@@ -357,14 +726,17 @@ def test_app_info_slug_is_cached(proxy):
     assert info["ha_version"] == HA_VERSION
     assert not any(c[1] == "/addons/self/info" for c in STATE.calls)
     assert not any(c[1] == "/core/api/config" for c in STATE.calls)
+    assert not any(c[1] == "/network/info" for c in STATE.calls)
 
 
-def _app_info_from_fresh_proxy(supervisor) -> dict[str, Any]:
+def _app_info_from_fresh_proxy(supervisor, *extra: str) -> dict[str, Any]:
     """/app/info from a proxy of its own, so nothing is cached yet."""
     proc, client = _start_proxy([
         f"--rules-dir={RULES_DIR}",
         f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
         f"--agent-host={AGENT_HOST}",
+        f"--mock-port={_free_port()}",
+        *extra,
     ], TOKEN)
     try:
         status, info = client.get("/app/info")
@@ -385,12 +757,44 @@ def test_app_info_older_home_assistant(backends):
 
 def test_app_info_core_unreachable(backends):
     # The Supervisor answers but Core does not: the slug is known, the
-    # version is null and the page falls back to the newer paths.
+    # version and the integration are null and the page falls back to the
+    # newer paths.
     STATE.core_status = 401
     info = _app_info_from_fresh_proxy(backends[0])
     assert info["ha_api"] is False
     assert info["slug"] == SLUG
     assert info["ha_version"] is None
+    assert info["integration_installed"] is None
+
+
+def test_app_info_integration_installed(backends):
+    assert _app_info_from_fresh_proxy(backends[0])["integration_installed"] is False
+    STATE.entries = [_entry("e1", "SMART Sniffer (nas.local:9099)")]
+    assert _app_info_from_fresh_proxy(backends[0])["integration_installed"] is True
+    STATE.entries = []
+    STATE.components.append("smart_sniffer")
+    assert _app_info_from_fresh_proxy(backends[0])["integration_installed"] is True
+
+
+def test_app_info_network_first_primary_connected(backends):
+    STATE.network = {"interfaces": [
+        {"interface": "wlan0", "primary": True, "connected": False,
+         "ipv4": {"address": ["10.9.9.9/24"]}},
+        {"interface": "eth0", "primary": True, "connected": True,
+         "ipv4": {"address": ["10.0.10.5/22", "10.0.20.5/24"]}},
+    ]}
+    info = _app_info_from_fresh_proxy(backends[0])
+    assert info["network"] == {"block": "10.0.8.0/22", "address": "10.0.10.5", "prefix": 22,
+                               "source": "supervisor"}
+    STATE.network = {"interfaces": [{"interface": "eth0", "primary": True, "connected": True,
+                                     "ipv4": {"address": []}}]}
+    assert _app_info_from_fresh_proxy(backends[0])["network"] is None
+
+
+def test_app_info_replica_agent_down(backends):
+    info = _app_info_from_fresh_proxy(backends[0])
+    assert info["replicas"] == {"agent": "down", "folder": None, "path": None,
+                                "shipped": None, "user": None}
 
 
 def test_app_info_version_missing_from_config(backends):
@@ -402,8 +806,8 @@ def test_app_info_version_missing_from_config(backends):
 
 def test_app_info_without_supervisor(backends):
     # The Supervisor refuses the token, run.sh found no mDNS name, and no
-    # --agent-host was given: slug and mdns_name are null, the host is the
-    # proxy's default.
+    # --agent-host was given: slug, network and mdns_name are null, the host
+    # is the proxy's default.
     supervisor, _ = backends
     spec = importlib.util.spec_from_file_location("webui_proxy", PROXY)
     module = importlib.util.module_from_spec(spec)
@@ -419,7 +823,10 @@ def test_app_info_without_supervisor(backends):
         _stop_proxy(proc)
     assert status == 200
     assert info["ha_api"] is False
+    assert info["supervisor"] is False
     assert info["slug"] is None
+    assert info["network"] is None
+    assert info["integration_installed"] is None
     assert info["mdns_name"] is None
     assert info["ha_version"] is None
     assert info["hostname"] == module.DEFAULT_AGENT_HOST
@@ -427,7 +834,7 @@ def test_app_info_without_supervisor(backends):
 
 def test_wrong_method_is_405(proxy):
     status, body = proxy.get("/evaluate")
-    assert status == 405 and "error" in body
+    assert status == 405 and body["error"] == "method_not_allowed"
 
 
 def test_agent_proxy_still_works(proxy):
@@ -448,6 +855,7 @@ def test_evaluate_healthy_nvme(proxy):
     assert verdict["reasons_text"] == "No issues detected"
     assert verdict["readings"]["NVMe Media Errors"] == 0
     assert "rules_version" in verdict
+    assert verdict["view"]["header"] == "ok"
 
 
 @needs_rules
@@ -461,11 +869,47 @@ def test_evaluate_nvme_media_errors(proxy):
     assert verdict["reasons"] == ["NVMe media errors: 3 (expected 0)"]
     assert verdict["reasons_text"] == "NVMe media errors: 3 (expected 0)"
     assert verdict["readings"]["NVMe Media Errors"] == 3
+    rows = {r["key"]: r for r in verdict["view"]["rows"]}
+    assert rows["media_errors"]["mark"] == "crit"
+
+
+@needs_rules
+def test_evaluate_pool(proxy):
+    pools = json.loads((FIXTURES / "pools" / "degraded-faulted.json").read_text(encoding="utf-8"))
+    status, body = proxy.post("/evaluate", {"pool": pools[0]})
+    assert status == 200
+    assert body["state"] == "YES" and "State: DEGRADED" in body["problems"]
+    healthy = json.loads((FIXTURES / "pools" / "never-scrubbed.json").read_text(encoding="utf-8"))
+    assert proxy.post("/evaluate", {"pool": healthy[0]}) == (200, {"state": "NO", "problems": []})
 
 
 def test_evaluate_rejects_non_object(proxy):
     status, body = proxy.post("/evaluate", [1, 2])
-    assert status == 400 and "error" in body
+    assert status == 400 and body["error"] == "bad_request"
+
+
+def test_evaluate_without_rules(backends):
+    proc, client = _start_proxy([
+        "--rules-dir=/nonexistent",
+        f"--supervisor-url=http://127.0.0.1:{backends[0].server_address[1]}",
+    ], TOKEN)
+    try:
+        status, body = client.post("/evaluate", {"id": "sda", "smart_data": {}})
+    finally:
+        _stop_proxy(proc)
+    assert status == 503 and body["error"] == "rules_unavailable"
+
+
+# ── Removed routes ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/lab/on"), ("POST", "/lab/off"),
+])
+def test_removed_routes_are_404(proxy, method, path):
+    status, body = proxy.request(method, path, {})
+    assert status == 404 and body["error"] == "not_found"
+    assert not STATE.restarted.is_set()
+    assert not any(c[1] == "/addons/self/options" for c in STATE.calls)
 
 
 # ── /ha/status ──────────────────────────────────────────────────────────────
@@ -479,7 +923,7 @@ def test_ha_status_unreachable(proxy):
     assert body["targets"]["agent"] == {
         "host": AGENT_HOST, "port": proxy.agent_port, "entry_id": None, "state": None,
     }
-    assert body["targets"]["testlab"]["port"] == 9100
+    assert body["targets"]["testlab"]["port"] == proxy.mock_port
 
 
 def test_ha_status_reachable_without_integration(proxy):
@@ -500,7 +944,7 @@ def test_ha_status_with_entries(proxy):
     STATE.entries = [
         _entry("e-nas", "SMART Sniffer (nas.local:9099)"),
         _entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})"),
-        _entry("e-lab", f"SMART Sniffer ({AGENT_HOST}:9100)", state="setup_retry"),
+        _entry("e-lab", f"SMART Sniffer ({AGENT_HOST}:{proxy.mock_port})", state="setup_retry"),
     ]
     status, body = proxy.get("/ha/status")
     assert status == 200
@@ -519,7 +963,7 @@ def test_ha_status_zeroconf_titles(proxy):
         _entry("z-agent", f"SMART Sniffer ({AGENT_HOST})"),
         _entry("z-lab", f"SMART Sniffer ({AGENT_HOST})"),
     ]
-    STATE.diagnostics = {"z-lab": 9100}
+    STATE.diagnostics = {"z-lab": proxy.mock_port}
     _, body = proxy.get("/ha/status")
     assert body["targets"]["agent"]["entry_id"] == "z-agent"
     assert body["targets"]["testlab"]["entry_id"] == "z-lab"
@@ -530,7 +974,7 @@ def test_ha_status_zeroconf_titles(proxy):
 def test_ha_connect_creates_entry(proxy):
     STATE.flow_handlers.append("smart_sniffer")
     STATE.flow_step = {
-        "type": "create_entry", "title": f"SMART Sniffer ({AGENT_HOST}:9100)",
+        "type": "create_entry", "title": f"SMART Sniffer ({AGENT_HOST}:{proxy.mock_port})",
         "result": {"entry_id": "new-lab", "domain": "smart_sniffer"},
     }
     status, body = proxy.post("/ha/connect", {"target": "testlab"})
@@ -546,7 +990,7 @@ def test_ha_connect_creates_entry(proxy):
     )
     assert flow_calls[1] == (
         "POST", "/core/api/config/config_entries/flow/flow123",
-        {"host": AGENT_HOST, "port": 9100, "token": "", "scan_interval": 60},
+        {"host": AGENT_HOST, "port": proxy.mock_port, "token": "", "scan_interval": 60},
     )
 
 
@@ -594,7 +1038,7 @@ def test_ha_disconnect_refuses_agent(proxy):
 def test_ha_disconnect_testlab(proxy):
     STATE.entries = [
         _entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})"),
-        _entry("e-lab", f"SMART Sniffer ({AGENT_HOST}:9100)"),
+        _entry("e-lab", f"SMART Sniffer ({AGENT_HOST}:{proxy.mock_port})"),
     ]
     status, body = proxy.post("/ha/disconnect", {"target": "testlab"})
     assert status == 200
@@ -646,26 +1090,3 @@ def test_ha_verdict_needs_serial(proxy):
     assert status == 400
 
 
-# ── /lab/on, /lab/off ───────────────────────────────────────────────────────
-
-def test_lab_on(proxy):
-    STATE.options["token"] = "agent-secret"
-    status, body = proxy.post("/lab/on")
-    assert status == 200
-    assert body == {"result": "restarting"}
-    # The full options object goes back, with only mock_mode changed.
-    assert STATE.options == {
-        "port": 9099, "token": "agent-secret", "scan_interval": 60,
-        "mock_mode": True, "mock_port": 9100,
-    }
-    assert STATE.restarted.wait(5), "restart was not requested"
-    order = [c[1] for c in STATE.calls if c[1].startswith("/addons/")]
-    assert order == ["/addons/self/info", "/addons/self/options", "/addons/self/restart"]
-
-
-def test_lab_off(proxy):
-    STATE.options["mock_mode"] = True
-    status, body = proxy.post("/lab/off")
-    assert status == 200 and body == {"result": "restarting"}
-    assert STATE.options["mock_mode"] is False
-    assert STATE.restarted.wait(5)

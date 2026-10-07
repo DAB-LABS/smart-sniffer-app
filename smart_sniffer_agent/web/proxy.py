@@ -1,34 +1,30 @@
 #!/usr/bin/env python3
-"""SMART Sniffer App -- Web UI Proxy Server.
+"""SMART Sniffer App: Web UI proxy server.
 
 Serves static files from /opt/web/ at the root path and proxies:
-  /api/*  -> localhost:$AGENT_PORT  (real Go agent)
-  /mock/* -> localhost:$MOCK_PORT   (Python mock agent, /mock/ rewritten to /api/)
+  /api/*  -> localhost:$AGENT_PORT  (this app's Go agent, app token injected)
+  /mock/* -> localhost:$MOCK_PORT   (the replica agent, /mock/ rewritten to /api/)
 
 It also answers the Control Center's own routes:
-  GET  /app/info     app version, rules version, ports, Test Lab flag, the
-                     app's identity (hostname, slug, mDNS name) and the Home
-                     Assistant version, which picks the page's link paths
-  POST /evaluate     the integration's Attention verdict for one drive payload
-  POST /lab/on       turn the Test Lab on (sets mock_mode, restarts the app)
-  POST /lab/off      turn the Test Lab off (same, mock_mode false)
-  GET  /ha/status    is Home Assistant reachable, is the integration there,
-                     which of this app's agents have a config entry
-  POST /ha/connect   add the integration entry for the agent or the Test Lab
-  POST /ha/disconnect  remove the Test Lab entry (never the real agent's)
-  GET  /ha/verdict   the live Attention Needed state Home Assistant shows
+  GET  /app/info     versions, ports, the app's identity, network and replicas
+  POST /evaluate     the integration's verdict for a drive (plus its view), or
+                     for a ZFS pool ({"pool": {...}})
 
-/evaluate runs the integration's own rule modules (attention.py, devstat.py),
-which the Dockerfile downloads from the smart-sniffer release this app is
-built against. They import nothing from Home Assistant.
+The verdict comes from the integration's own rule modules (attention.py,
+devstat.py, extract.py, pool_health.py), which the Dockerfile takes from the
+smart-sniffer release this app is built against. They import nothing from
+Home Assistant.
 
-The /lab and /ha routes talk to the Supervisor (and, through it, to Home
+drive_view(), pool_verdict(), pool_view() and Rules are importable without
+side effects, so the page's dev harness can use them.
+
+The Home Assistant routes talk to the Supervisor (and, through it, to Home
 Assistant Core) with the SUPERVISOR_TOKEN the Supervisor puts in the app's
 environment. The token is never logged and never sent to the browser.
 
-Runs on the ingress port (8099) so HA can embed the UI in the sidebar.
-All requests from the web UI go to the same origin, so there is no CORS.
-Python standard library only.
+Runs on the ingress port (8099) so Home Assistant can embed the page in the
+sidebar. Every request from the page goes to the same origin, so there is no
+CORS. Python standard library only.
 """
 
 from __future__ import annotations
@@ -36,6 +32,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import importlib
+import ipaddress
 import json
 import mimetypes
 import os
@@ -49,7 +46,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import ModuleType
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 # Ensure .js and .css MIME types are correct
 mimetypes.add_type("application/javascript", ".js")
@@ -59,8 +56,8 @@ mimetypes.add_type("text/css", ".css")
 STATIC_DIR = "/opt/web"
 
 # Where the Dockerfile puts the integration's rule modules: this directory
-# holds smart_sniffer/{attention,devstat,extract}.py, and its parent holds
-# VERSION (the smart-sniffer release tag they came from).
+# holds smart_sniffer/{attention,devstat,extract,pool_health,const}.py, and
+# its parent holds VERSION (the smart-sniffer tag or branch they came from).
 DEFAULT_RULES_DIR = "/opt/ssrules/custom_components"
 
 # The hostname Home Assistant uses to reach this app's agents from the
@@ -71,9 +68,10 @@ DEFAULT_AGENT_HOST = "0449a086-smart-sniffer-agent"
 
 INTEGRATION_DOMAIN = "smart_sniffer"
 SUPERVISOR_TIMEOUT = 5  # seconds, every Supervisor and Core call
-MAX_BODY = 4 * 1024 * 1024  # largest request body the app routes accept
-RESTART_DELAY = 0.5  # seconds between answering /lab/* and asking for the restart
+MAX_BODY = 4 * 1024 * 1024  # largest JSON request body the app routes accept
 HA_API_CACHE_SECONDS = 30
+REFRESH_MINUTES = 15  # how often the page re-reads stored field agents
+REPLICA_AGENT_TIMEOUT = 1.0  # seconds, /app/info's check of the replica agent
 
 # Matches the titles the integration's config flow gives its entries:
 #   user step:     "SMART Sniffer (<host>:<port>)"
@@ -85,32 +83,32 @@ def log(message: str) -> None:
     print(f"[webui] {message}", flush=True)
 
 
-def parse_bool(value: str) -> bool:
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
-
-
-def slugify(text: str) -> str:
-    """Home Assistant's slugify for ASCII text: lower case, every run of
-    characters other than a-z and 0-9 becomes one underscore, no leading or
-    trailing underscore."""
-    return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
+def utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 # ── Integration rules ───────────────────────────────────────────────────────
 
-class Rules:
-    """The integration's attention and devstat modules, loaded once.
+# The Rules instance that loaded last; drive_view() and pool_verdict() read
+# the rule modules' own tables through it.
+_ACTIVE_RULES: Rules | None = None
 
-    The modules use relative imports (attention imports devstat), so they are
-    loaded as members of a synthetic package custom_components.smart_sniffer
-    whose __path__ is the rules directory. The integration's own __init__.py
-    (which imports Home Assistant) is never present and never executed.
+
+class Rules:
+    """The integration's rule modules, loaded once.
+
+    The modules use relative imports (attention imports devstat, pool_health
+    imports const), so they are loaded as members of a synthetic package
+    custom_components.smart_sniffer whose __path__ is the rules directory.
+    The integration's own __init__.py (which imports Home Assistant) is never
+    present and never executed.
     """
 
     def __init__(self, rules_dir: str) -> None:
         self.rules_dir = rules_dir
         self.attention: ModuleType | None = None
         self.devstat: ModuleType | None = None
+        self.pool_health: ModuleType | None = None
         self.version: str | None = None
         self._lock = threading.Lock()
         self._tried = False
@@ -130,28 +128,31 @@ class Rules:
                 continue
         return None
 
+    def _import(self, name: str) -> ModuleType:
+        return importlib.import_module(f"custom_components.smart_sniffer.{name}")
+
     def load(self) -> bool:
-        """Import the modules on first use. True when /evaluate can run."""
+        """Import the modules on first use. True when drives can be judged."""
+        global _ACTIVE_RULES
         with self._lock:
             if self._tried:
                 return self.attention is not None
             self._tried = True
             package_dir = os.path.join(self.rules_dir, "smart_sniffer")
             if not os.path.isfile(os.path.join(package_dir, "attention.py")):
-                log(f"Integration rules not found in {package_dir}; /evaluate is off")
+                log(f"Integration rules not found in {package_dir}; verdicts are off")
                 return False
             try:
-                if "custom_components" not in sys.modules:
+                parent = sys.modules.get("custom_components")
+                if parent is None:
                     parent = ModuleType("custom_components")
-                    parent.__path__ = [self.rules_dir]
+                    parent.__path__ = [self.rules_dir]  # type: ignore[attr-defined]
                     sys.modules["custom_components"] = parent
                 if "custom_components.smart_sniffer" not in sys.modules:
                     package = ModuleType("custom_components.smart_sniffer")
-                    package.__path__ = [package_dir]
+                    package.__path__ = [package_dir]  # type: ignore[attr-defined]
                     sys.modules["custom_components.smart_sniffer"] = package
-                attention = importlib.import_module(
-                    "custom_components.smart_sniffer.attention"
-                )
+                attention = self._import("attention")
                 for name in ("evaluate_attention", "current_readings", "compose_reasons_text"):
                     if not callable(getattr(attention, name, None)):
                         raise ImportError(f"attention.{name} is missing")
@@ -159,9 +160,7 @@ class Rules:
                 # devstat.py arrived with integration v0.8.0. Without it the
                 # verdict is computed with no Device Statistics merge.
                 if os.path.isfile(os.path.join(package_dir, "devstat.py")):
-                    devstat = importlib.import_module(
-                        "custom_components.smart_sniffer.devstat"
-                    )
+                    devstat = self._import("devstat")
                     if callable(getattr(devstat, "merge_devstat", None)) and hasattr(
                         devstat, "DEVSTAT_KEY"
                     ):
@@ -171,12 +170,25 @@ class Rules:
                 self.attention = None
                 self.devstat = None
                 return False
+            # pool_health.py (with const.py) judges ZFS pools. Without it the
+            # drives are still judged and pools carry no verdict.
+            if os.path.isfile(os.path.join(package_dir, "pool_health.py")):
+                try:
+                    pool_health = self._import("pool_health")
+                    if callable(getattr(pool_health, "pool_problems", None)):
+                        self.pool_health = pool_health
+                except Exception as err:  # noqa: BLE001
+                    log(f"Could not load the pool rules: {type(err).__name__}: {err}")
+            _ACTIVE_RULES = self
+            _build_reason_table(self.attention)
             log(f"Integration rules loaded ({self.version or 'unknown version'})")
             return True
 
     def evaluate(self, drive: dict[str, Any]) -> dict[str, Any]:
         """The verdict the integration would give this drive, at default
-        thresholds and with no held Device Statistics readings."""
+        thresholds and with no held Device Statistics readings. Puts the
+        merged Device Statistics readings on the drive as _devstat, as the
+        integration's coordinator does."""
         attention = self.attention
         assert attention is not None
         if self.devstat is not None:
@@ -195,6 +207,537 @@ class Rules:
         }
 
 
+def pool_verdict(pool: dict[str, Any], rules: Rules | None = None) -> dict[str, Any]:
+    """The integration's verdict for one ZFS pool: {"state": "YES" | "NO",
+    "problems": [...]}. Pools have no Maybe. Uses the given rules, else the
+    last Rules that loaded; RuntimeError when no pool rules are loaded."""
+    rules = rules or _ACTIVE_RULES
+    pool_health = rules.pool_health if rules is not None else None
+    if pool_health is None:
+        raise RuntimeError("pool rules are not loaded")
+    problems = list(pool_health.pool_problems(pool))
+    return {"state": "YES" if problems else "NO", "problems": problems}
+
+
+# ── The drive view ──────────────────────────────────────────────────────────
+#
+# drive_view() turns a drive payload and its verdict into what the page
+# draws: the header word, the stats, one row per watched counter with the
+# mark of the reason that names it, the data volumes and the Field report
+# size. The page does no rule matching of its own.
+
+HEADER_BY_STATE = {"YES": "attention", "MAYBE": "maybe", "NO": "ok", "UNSUPPORTED": "unknown"}
+
+# Wear attribute names, as attention._ATA_WEAR_NAMES has them (refreshed from
+# the module when it loads).
+_WEAR_NAMES: set[str] = {
+    "Wear_Leveling_Count", "Media_Wearout_Indicator", "SSD_Life_Left",
+    "Remaining_Lifetime_Perc", "Percent_Lifetime_Remain", "Perc_Rated_Life_Remain",
+    "Percent_Life_Remaining",
+}
+
+# ATA rows in display order: key, name, attribute names, attribute id.
+_ATA_ROWS: list[tuple[str, str, tuple[str, ...], int | None]] = [
+    ("reallocated", "Reallocated sectors", ("Reallocated_Sector_Ct", "Retired_Block_Count"), 5),
+    ("pending", "Pending sectors",
+     ("Current_Pending_Sector", "Current_Pending_Sector_Ct", "Total_Pending_Sectors"), 197),
+    ("offline_unc", "Offline uncorrectable", ("Offline_Uncorrectable", "Total_Offl_Uncorrectabl"), 198),
+    ("reported_unc", "Reported uncorrectable", ("Reported_Uncorrect", "Uncorrectable_Error_Cnt"), 187),
+    ("cmd_timeout", "Command timeout", ("Command_Timeout",), 188),
+    ("realloc_events", "Reallocated events", ("Reallocated_Event_Count",), 196),
+    ("spin_retries", "Spin retries", ("Spin_Retry_Count",), 10),
+    ("wear", "Wear used", (), None),
+]
+_NVME_ROWS: list[tuple[str, str]] = [
+    ("critical_warning", "Critical warning"),
+    ("media_errors", "Media errors"),
+    ("available_spare", "Available spare"),
+    ("wear", "Wear used"),
+]
+_SCSI_ROWS: list[tuple[str, str]] = [("grown_defects", "Grown defects")]
+
+# The two rows an Unsupported drive shows as "not known", by protocol.
+_MAIN_ROWS = {
+    "ata": [("reallocated", "Reallocated sectors"), ("pending", "Pending sectors")],
+    "nvme": [("critical_warning", "Critical warning"), ("media_errors", "Media errors")],
+    "scsi": [("grown_defects", "Grown defects")],
+}
+
+# Device Statistics readings that stand in for a missing attribute (the
+# integration's gap-fill): reading -> (page, offset, row key, row name,
+# the attribute row it stands in for, the note on that row).
+_DEVSTAT_ROWS: dict[str, tuple[int, int, str, str, str, str]] = {
+    "unc": (4, 0x008, "reported_unc_devstat", "Uncorrectable, page 4",
+            "reported_unc", "no attribute 187"),
+    "realloc": (3, 0x020, "reallocated_devstat", "Reallocated, page 3",
+                "reallocated", "no attribute 5"),
+    "wear_used": (7, 0x008, "wear_devstat", "Wear used, page 7",
+                  "wear", "no wear attribute"),
+}
+_DEVSTAT_SUFFIX = "from device statistics"
+
+# Reason label (the text before the colon) -> (row key, mark). Built from the
+# rule module's own dictionaries when it loads; this copy is the fallback.
+_REASON_LABELS: dict[str, tuple[str, str]] = {
+    "Reallocated Sector Count": ("reallocated", "crit"),
+    "Current Pending Sector Count": ("pending", "crit"),
+    "Offline Uncorrectable Errors": ("offline_unc", "crit"),
+    "Total Offline Uncorrectable": ("offline_unc", "crit"),
+    "Reported Uncorrectable Errors": ("reported_unc", "crit"),
+    "Uncorrectable Error Count": ("reported_unc", "crit"),
+    "Reallocated Event Count": ("realloc_events", "warn"),
+    "Spin Retry Count": ("spin_retries", "warn"),
+    "Command Timeout": ("cmd_timeout", "warn"),
+    "NVMe media errors": ("media_errors", "crit"),
+}
+# Thresholds named in the expectations, refreshed from the module.
+_THRESHOLDS = {"spare_warn_below": 20, "wear_warn_at": 90}
+
+
+def _build_reason_table(attention: ModuleType | None) -> None:
+    """Refresh the reason table from attention.py's own dictionaries, so a
+    counter the integration starts watching gets its row and mark."""
+    if attention is None:
+        return
+    names_to_key = {name: key for key, _, names, _ in _ATA_ROWS for name in names}
+    critical = getattr(attention, "_CRITICAL_ATA", None)
+    warning = getattr(attention, "_WARNING_ATA", None)
+    for table, mark in ((critical, "crit"), (warning, "warn")):
+        if not isinstance(table, dict):
+            continue
+        for name, label in table.items():
+            key = names_to_key.get(name) or re.sub(r"[^a-z0-9]+", "_", str(label).lower()).strip("_")
+            _REASON_LABELS[str(label)] = (key, mark)
+    media = getattr(attention, "LABEL_NVME_MEDIA_ERRORS", None)
+    if isinstance(media, str):
+        _REASON_LABELS.setdefault("NVMe media errors", ("media_errors", "crit"))
+    wear = getattr(attention, "_ATA_WEAR_NAMES", None)
+    if isinstance(wear, (set, frozenset)) and wear:
+        _WEAR_NAMES.clear()
+        _WEAR_NAMES.update(str(n) for n in wear)
+    for key, attr in (("spare_warn_below", "_NVME_SPARE_WARN_BELOW"),
+                      ("wear_warn_at", "_ATA_WEAR_WARN_THRESHOLD")):
+        value = getattr(attention, attr, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            _THRESHOLDS[key] = value
+
+
+def _short_expect(paren: str | None) -> str | None:
+    """A reason's parenthesis, made short: "expected 0", "warns above 100"."""
+    if not paren:
+        return None
+    parts = [p.strip() for p in paren.split(";")]
+    out: list[str] = []
+    for part in parts:
+        if part == _DEVSTAT_SUFFIX:
+            continue
+        match = re.fullmatch(r"threshold (\d+)", part)
+        out.append(f"warns above {match.group(1)}" if match else part)
+    text = ", ".join(p for p in out if p)
+    if _DEVSTAT_SUFFIX in parts:
+        text = f"{text}, {_DEVSTAT_SUFFIX}" if text else _DEVSTAT_SUFFIX
+    return text or None
+
+
+def classify_reason(reason: str) -> dict[str, Any] | None:
+    """Which row a verdict reason marks: {"key", "mark", "expect", "value"}.
+    "value" is the reading the reason states, for a row the drive data does
+    not have. None for a reason that matches nothing."""
+    text = str(reason)
+    devstat = _DEVSTAT_SUFFIX in text
+    suffix = "_devstat" if devstat else ""
+    tail = f", {_DEVSTAT_SUFFIX}" if devstat else ""
+    if text.startswith("SMART overall status"):
+        return {"key": "smart_status", "mark": "crit", "expect": None, "value": "FAILED"}
+    match = re.match(r"NVMe critical warning flag set \((0x[0-9a-fA-F]+)\)", text)
+    if match:
+        return {"key": "critical_warning", "mark": "crit", "expect": "expected 0x00",
+                "value": match.group(1)}
+    match = re.match(r"NVMe available spare \((\d+)%\) at or below drive threshold \((\d+)%\)", text)
+    if match:
+        return {"key": "available_spare", "mark": "crit",
+                "expect": f"at or below the drive's own {match.group(2)}%",
+                "value": f"{match.group(1)}%"}
+    match = re.match(r"NVMe available spare low: (\d+)% remaining(?: \(accepted down to (\d+)%\))?", text)
+    if match:
+        expect = (f"accepted down to {match.group(2)}%" if match.group(2)
+                  else f"warns below {_THRESHOLDS['spare_warn_below']}%")
+        return {"key": "available_spare", "mark": "warn", "expect": expect,
+                "value": f"{match.group(1)}%"}
+    match = re.match(r"(?:NVMe drive|SSD) wear at (\d+)% of rated life(?:.*?\(accepted (\d+)%\))?", text)
+    if match:
+        expect = (f"accepted {match.group(2)}%" if match.group(2)
+                  else f"warns at {_THRESHOLDS['wear_warn_at']}%")
+        return {"key": "wear" + suffix, "mark": "warn", "expect": expect + tail,
+                "value": f"{match.group(1)}%"}
+    match = re.match(r"(?P<label>[^:()]+): (?P<value>[^(]+?)(?: \((?P<paren>[^)]*)\))?$", text)
+    if match:
+        found = _REASON_LABELS.get(match.group("label").strip())
+        if found:
+            key, mark = found
+            value = match.group("value").strip()
+            if re.fullmatch(r"\d+", value):
+                value = f"{int(value):,}"
+            return {"key": key + suffix, "mark": mark,
+                    "expect": _short_expect(match.group("paren")), "value": value}
+    return None
+
+
+def _smart_data(drive: dict[str, Any]) -> dict[str, Any]:
+    raw = drive.get("smart_data") if isinstance(drive, dict) else None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    return raw if isinstance(raw, dict) else {}
+
+
+def _int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _fmt(value: int) -> str:
+    return f"{value:,}"
+
+
+def _decode_raw(name: str, raw: Any) -> int | None:
+    """An ATA raw value as a count: Command_Timeout's low 16 bits, a packed
+    value's leading figure from raw.string (as the integration reads them)."""
+    if not isinstance(raw, dict):
+        return _int(raw)
+    value = _int(raw.get("value"))
+    if value is None:
+        return None
+    if name == "Command_Timeout" and value > 0xFFFF:
+        return value & 0xFFFF
+    if value > 0xFFFF:
+        match = re.match(r"\s*(\d+)", str(raw.get("string") or ""))
+        if match and int(match.group(1)) != value:
+            return int(match.group(1))
+    return value
+
+
+def _is_dead_wear(attr: dict[str, Any]) -> bool:
+    flags = attr.get("flags")
+    flags_value = flags.get("value") if isinstance(flags, dict) else None
+    fields = (attr.get("value"), attr.get("worst"), attr.get("thresh"), flags_value)
+    return all(isinstance(f, int) and not isinstance(f, bool) and f == 0 for f in fields)
+
+
+def _usable_wear(table: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for attr in table:
+        if attr.get("name") in _WEAR_NAMES and not _is_dead_wear(attr):
+            return attr
+    return None
+
+
+def _nvme_value(log_: dict[str, Any], key: str) -> tuple[bool, int | None]:
+    """(present, value) for an NVMe counter; a 128-bit value at or above
+    2^64 is present but not readable, as the integration reads it."""
+    if f"{key}_le" in log_:
+        return True, None
+    raw = log_.get(f"{key}_s", log_.get(key))
+    if raw is None:
+        return key in log_, None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return True, None
+    if value < 0 or value >= 1 << 64:
+        return True, None
+    return True, value
+
+
+def _devstat_entry(pages: Any, page: int, offset: int) -> int | None:
+    if not isinstance(pages, list):
+        return None
+    for candidate in pages:
+        if not isinstance(candidate, dict) or candidate.get("number") != page:
+            continue
+        for entry in candidate.get("table") or []:
+            if not isinstance(entry, dict) or entry.get("offset") != offset:
+                continue
+            flags = entry.get("flags")
+            if not (isinstance(flags, dict) and flags.get("valid") is True):
+                return None
+            return _int(entry.get("value"))
+    return None
+
+
+def _devstat_readings(drive: dict[str, Any]) -> dict[str, int]:
+    """The three Device Statistics readings: the merged ones the rules put on
+    the drive (_devstat), else this read's pages."""
+    merged = drive.get("_devstat")
+    out: dict[str, int] = {}
+    if isinstance(merged, dict) and merged:
+        for name in _DEVSTAT_ROWS:
+            value = _int(merged.get(name))
+            if value is not None and value >= 0:
+                out[name] = value
+        return out
+    block = drive.get("device_statistics")
+    if not isinstance(block, dict) or block.get("status") != "present":
+        return out
+    for name, (page, offset, *_rest) in _DEVSTAT_ROWS.items():
+        value = _devstat_entry(block.get("pages"), page, offset)
+        if value is not None and value >= 0:
+            out[name] = value
+    return out
+
+
+def _protocol(drive: dict[str, Any], smart: dict[str, Any]) -> str | None:
+    if smart.get("nvme_smart_health_information_log"):
+        return "nvme"
+    if (smart.get("ata_smart_attributes") or {}).get("table"):
+        return "ata"
+    proto = str(drive.get("protocol") or (smart.get("device") or {}).get("protocol") or "").lower()
+    if "nvme" in proto:
+        return "nvme"
+    if "scsi" in proto or "sas" in proto or "scsi_grown_defect_list" in smart:
+        return "scsi"
+    if "ata" in proto or "sat" in proto:
+        return "ata"
+    return None
+
+
+def _row(key: str, name: str, value: str, mark: str | None = None,
+         expect: str | None = None, note: str | None = None) -> dict[str, Any]:
+    return {"key": key, "name": name, "value": value, "mark": mark, "expect": expect, "note": note}
+
+
+def _ghost(key: str, name: str, note: str | None = None) -> dict[str, Any]:
+    return _row(key, name, "not known", "unk", None, note)
+
+
+def _data_rows(drive: dict[str, Any], smart: dict[str, Any], protocol: str | None) -> list[dict[str, Any]]:
+    """Rows for the counters the drive reports, unmarked, in display order."""
+    rows: list[dict[str, Any]] = []
+    if protocol == "nvme":
+        log_ = smart.get("nvme_smart_health_information_log") or {}
+        for key, name in _NVME_ROWS:
+            if key == "critical_warning":
+                value = _int(log_.get("critical_warning"))
+                if value is not None:
+                    rows.append(_row(key, name, f"0x{value:02x}"))
+            elif key == "media_errors":
+                present, value = _nvme_value(log_, "media_errors")
+                if present:
+                    rows.append(_row(key, name, _fmt(value)) if value is not None
+                                else _ghost(key, name, "not readable"))
+            elif key == "available_spare":
+                value = _int(log_.get("available_spare"))
+                if value is not None:
+                    rows.append(_row(key, name, f"{value}%"))
+            elif key == "wear":
+                value = _int(log_.get("percentage_used"))
+                if value is not None:
+                    rows.append(_row(key, name, f"{value}%"))
+        return rows
+    if protocol == "scsi":
+        value = _int(smart.get("scsi_grown_defect_list"))
+        if value is not None:
+            rows.append(_row("grown_defects", "Grown defects", _fmt(value)))
+        return rows
+    if protocol != "ata":
+        return rows
+
+    table = [a for a in (smart.get("ata_smart_attributes") or {}).get("table") or []
+             if isinstance(a, dict)]
+    ids = {a.get("id") for a in table}
+    gaps = {}
+    readings = _devstat_readings(drive)
+    for reading, (_page, _offset, dkey, dname, base, note) in _DEVSTAT_ROWS.items():
+        value = readings.get(reading)
+        if value is None:
+            continue
+        if reading == "wear_used":
+            if _usable_wear(table) is not None:
+                continue
+        elif _DEVSTAT_BLOCKING[reading] in ids:
+            continue
+        gaps[base] = (dkey, dname, note, value, reading)
+
+    for key, name, names, _attr_id in _ATA_ROWS:
+        if key == "wear":
+            attr = _usable_wear(table)
+            value = _int(attr.get("value")) if attr else None
+            if value is not None:
+                rows.append(_row(key, name, f"{max(0, 100 - value)}%"))
+            elif key in gaps:
+                rows.append(_ghost(key, name, gaps[key][2]))
+        else:
+            attr = next((a for a in table if a.get("name") in names), None)
+            value = _decode_raw(str(attr.get("name")), attr.get("raw")) if attr else None
+            if value is not None:
+                rows.append(_row(key, name, _fmt(value)))
+            elif key in gaps:
+                rows.append(_ghost(key, name, gaps[key][2]))
+        if key in gaps:
+            dkey, dname, _note, value, reading = gaps[key]
+            text = f"{value}%" if reading == "wear_used" else _fmt(value)
+            rows.append(_row(dkey, dname, text))
+    return rows
+
+
+# The attribute id whose presence blocks a gap-fill reading.
+_DEVSTAT_BLOCKING = {"unc": 187, "realloc": 5, "wear_used": None}
+
+
+def _stats(smart: dict[str, Any]) -> dict[str, int | None]:
+    log_ = smart.get("nvme_smart_health_information_log") or {}
+    temp = _int((smart.get("temperature") or {}).get("current"))
+    hours = _int((smart.get("power_on_time") or {}).get("hours"))
+    cycles = _int(smart.get("power_cycle_count"))
+    if temp is None:
+        temp = _int(log_.get("temperature"))
+    if hours is None:
+        hours = _int(log_.get("power_on_hours"))
+    if cycles is None:
+        cycles = _int(log_.get("power_cycles"))
+    return {"temp_c": temp, "power_on_hours": hours, "power_cycles": cycles}
+
+
+_VOLUME_SOURCES = {"ata_attribute": "attribute", "nvme": "nvme", "ata_device_statistics": "devstat"}
+
+
+def _volumes(drive: dict[str, Any]) -> dict[str, Any]:
+    derived = drive.get("derived")
+    out: dict[str, Any] = {}
+    for word, key in (("written", "host_writes"), ("read", "host_reads")):
+        if not isinstance(derived, dict):
+            out[word] = {"omitted": "not_reported"}
+            continue
+        volume = derived.get(key)
+        if isinstance(volume, dict) and _int(volume.get("bytes")) is not None:
+            entry: dict[str, Any] = {
+                "bytes": _int(volume.get("bytes")),
+                "source": _VOLUME_SOURCES.get(str(volume.get("source")), volume.get("source")),
+            }
+            if volume.get("attribute_id") is not None:
+                entry["attribute_id"] = volume.get("attribute_id")
+            out[word] = entry
+        else:
+            out[word] = {"omitted": derived.get(f"{key}_omitted") or "no_source"}
+    return out
+
+
+def _report(smart: dict[str, Any], protocol: str | None) -> dict[str, Any]:
+    if protocol == "ata":
+        table = (smart.get("ata_smart_attributes") or {}).get("table") or []
+        return {"kind": "ata", "count": len(table)}
+    if protocol == "nvme":
+        return {"kind": "nvme", "count": len(smart.get("nvme_smart_health_information_log") or {})}
+    if protocol == "scsi" and smart:
+        keys = [k for k in smart if k.startswith("scsi_")]
+        return {"kind": "scsi", "count": len(keys)}
+    return {"kind": None, "count": 0}
+
+
+def drive_view(drive: dict[str, Any], verdict: dict[str, Any] | None) -> dict[str, Any]:
+    """What the page draws for one drive (spec section 4.7). Pure: reads only
+    its arguments and the reason table. A verdict of None (no rules) gives
+    the header "unknown" and no marks."""
+    drive = drive if isinstance(drive, dict) else {}
+    smart = _smart_data(drive)
+    protocol = _protocol(drive, smart)
+    state = (verdict or {}).get("state")
+    header = HEADER_BY_STATE.get(str(state), "unknown")
+    status = smart.get("smart_status")
+    health_failed = isinstance(status, dict) and status.get("passed") is False
+
+    if state == "UNSUPPORTED":
+        rows = [_ghost(key, name) for key, name in _MAIN_ROWS.get(protocol or "ata", _MAIN_ROWS["ata"])]
+    else:
+        rows = _data_rows(drive, smart, protocol)
+    by_key = {row["key"]: row for row in rows}
+    severity = (verdict or {}).get("severity")
+    for reason in (verdict or {}).get("reasons") or []:
+        found = classify_reason(reason)
+        if found is None:
+            rows.append(_row("other", str(reason), "",
+                             "crit" if severity == "critical" else "warn"))
+            continue
+        if found["key"] == "smart_status":
+            continue  # the header's Health FAILED says it
+        row = by_key.get(found["key"])
+        if row is None:
+            name = next((n for k, n, *_ in _ATA_ROWS if k == found["key"]), None) or next(
+                (n for k, n in _NVME_ROWS + _SCSI_ROWS if k == found["key"]), None)
+            if name is None:
+                dev = next((d for d in _DEVSTAT_ROWS.values() if d[2] == found["key"]), None)
+                name = dev[3] if dev else found["key"]
+            row = _row(found["key"], name, found["value"])
+            rows.append(row)
+            by_key[row["key"]] = row
+        if row["mark"] != "crit":  # a critical mark is never weakened
+            row["mark"] = found["mark"]
+        row["expect"] = found["expect"]
+
+    block = drive.get("device_statistics")
+    devstat = block.get("status") if isinstance(block, dict) else None
+    view = {
+        "header": header,
+        "health_failed": health_failed,
+        "protocol": protocol,
+        "stats": _stats(smart),
+        "rows": rows,
+        "volumes": _volumes(drive),
+        "devstat": devstat,
+        "devstat_reason": block.get("reason") if isinstance(block, dict) else None,
+        "report": _report(smart, protocol),
+        "can_save": state != "UNSUPPORTED" and bool(smart),
+    }
+    return view
+
+
+_NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven",
+                 "eight", "nine", "ten", "eleven", "twelve"]
+
+
+def _layout(vdev: Any, devices: list[dict[str, Any]]) -> str | None:
+    if not isinstance(vdev, dict):
+        return None
+    kind = str(vdev.get("type") or "").lower()
+    count = len(devices)
+    word = _NUMBER_WORDS[count] if count < len(_NUMBER_WORDS) else str(count)
+    if kind in ("disk", "file") or (not kind and count == 1):
+        return "single disk"
+    if kind in ("mirror", "raidz", "raidz1", "raidz2", "raidz3", "draid"):
+        return f"{word}-disk {kind}"
+    return f"{kind or 'stripe'} of {word} disks"
+
+
+def pool_view(pool: dict[str, Any], verdict: dict[str, Any] | None,
+              lab: dict[str, Any] | None = None) -> dict[str, Any]:
+    """What the page draws for one pool. The layout and every disk come only
+    from a replica's lab block; a real agent lists only problem vdevs."""
+    pool = pool if isinstance(pool, dict) else {}
+    lab = lab if isinstance(lab, dict) else {}
+    vanished = bool(lab.get("vanished"))
+    devices = [d for d in lab.get("devices") or [] if isinstance(d, dict)]
+    disks = None
+    if devices:
+        disks = []
+        for dev in devices:
+            errors = [_int(dev.get(k)) or 0 for k in ("read", "write", "cksum")]
+            bad = dev.get("state") != "ONLINE" or any(errors)
+            disks.append({"name": dev.get("name"), "state": dev.get("state"),
+                          "read": errors[0], "write": errors[1], "cksum": errors[2],
+                          "mark": "crit" if bad else None})
+    state = (verdict or {}).get("state")
+    header = "unknown" if vanished or state is None else ("attention" if state == "YES" else "ok")
+    return {
+        "header": header,
+        "layout": _layout(lab.get("vdev"), devices) if devices else None,
+        "state": pool.get("state"),
+        "disks": disks,
+        "vanished": vanished,
+    }
+
+
 # ── Supervisor and Home Assistant Core ──────────────────────────────────────
 
 class Supervisor:
@@ -208,13 +751,16 @@ class Supervisor:
         self._slug_failed_at: float | None = None
         self._ha_version: str | None = None
         self._ha_version_failed_at: float | None = None
+        self._network: dict[str, Any] | None = None
+        self._network_failed_at: float | None = None
+        self._installed_cache: tuple[float, bool | None] | None = None
 
     @property
     def available(self) -> bool:
         return bool(self.token)
 
     def call(
-        self, method: str, path: str, body: Any = None
+        self, method: str, path: str, body: Any = None, raw_text: bool = False
     ) -> tuple[int | None, Any]:
         """Return (HTTP status, parsed JSON or None). Status is None when the
         Supervisor could not be reached at all or there is no token."""
@@ -236,15 +782,15 @@ class Supervisor:
                 raw = err.read()
             except Exception:  # noqa: BLE001
                 raw = b""
-            log(f"Supervisor {method} {path}: HTTP {status}")
+            log(f"Supervisor {method} {path.split('?')[0]}: HTTP {status}")
         except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
             reason = getattr(err, "reason", err)
-            log(f"Supervisor {method} {path}: {type(err).__name__}: {reason}")
+            log(f"Supervisor {method} {path.split('?')[0]}: {type(err).__name__}: {reason}")
             return None, None
         try:
             parsed = json.loads(raw) if raw else None
         except ValueError:
-            parsed = None
+            parsed = raw.decode("utf-8", "replace") if raw_text else None
         return status, parsed
 
     def core(self, method: str, path: str, body: Any = None) -> tuple[int | None, Any]:
@@ -304,8 +850,148 @@ class Supervisor:
         self._ha_version_failed_at = time.monotonic()
         return None
 
+    def network(self) -> dict[str, Any] | None:
+        """The host's own block from the Supervisor's network info: the first
+        interface that is primary and connected with an IPv4 address, as
+        {"block", "address", "prefix", "source"}. Kept for the process life
+        once known; None when the Supervisor cannot tell."""
+        if self._network:
+            return self._network
+        if not self.available:
+            return None
+        failed = self._network_failed_at
+        if failed is not None and time.monotonic() - failed < HA_API_CACHE_SECONDS:
+            return None
+        status, info = self.call("GET", "/network/info")
+        data = info.get("data") if isinstance(info, dict) else None
+        interfaces = data.get("interfaces") if isinstance(data, dict) else None
+        if status == 200 and isinstance(interfaces, list):
+            for iface in interfaces:
+                if not (isinstance(iface, dict) and iface.get("primary") and iface.get("connected")):
+                    continue
+                ipv4 = iface.get("ipv4") if isinstance(iface.get("ipv4"), dict) else {}
+                for text in ipv4.get("address") or []:
+                    try:
+                        address = ipaddress.ip_interface(str(text))
+                    except ValueError:
+                        continue
+                    if address.version != 4:
+                        continue
+                    self._network = {
+                        "block": str(address.network),
+                        "address": str(address.ip),
+                        "prefix": address.network.prefixlen,
+                        "source": "supervisor",
+                    }
+                    return self._network
+        self._network_failed_at = time.monotonic()
+        return None
+
+    def entries(self) -> list[dict[str, Any]] | None:
+        """The integration's config entries; None when Core cannot answer."""
+        status, entries = self.core(
+            "GET", f"/config/config_entries/entry?domain={INTEGRATION_DOMAIN}"
+        )
+        if status != 200 or not isinstance(entries, list):
+            return None
+        return [
+            e for e in entries
+            if isinstance(e, dict) and e.get("domain", INTEGRATION_DOMAIN) == INTEGRATION_DOMAIN
+        ]
+
+    def integration_installed(self, entries: list[dict[str, Any]] | None = None) -> bool | None:
+        """Whether the integration is there: any entry, set up as a component,
+        or offering a config flow (installed through HACS, no entry yet).
+        None when Core cannot be reached. Cached HA_API_CACHE_SECONDS."""
+        cached = self._installed_cache
+        if entries is None and cached and time.monotonic() - cached[0] < HA_API_CACHE_SECONDS:
+            return cached[1]
+        if not self.available or not self.core_reachable():
+            self._installed_cache = (time.monotonic(), None)
+            return None
+        if entries is None:
+            entries = self.entries() or []
+        installed = bool(entries)
+        if not installed:
+            status, config = self.core("GET", "/config")
+            if status == 200 and isinstance(config, dict):
+                installed = INTEGRATION_DOMAIN in (config.get("components") or [])
+        if not installed:
+            status, handlers = self.core("GET", "/config/config_entries/flow_handlers")
+            if status == 200 and isinstance(handlers, list):
+                installed = INTEGRATION_DOMAIN in handlers
+        self._installed_cache = (time.monotonic(), installed)
+        return installed
+
+    def forget_installed(self) -> None:
+        self._installed_cache = None
+
+
+# ── Talking to agents ───────────────────────────────────────────────────────
+
+class AgentReply:
+    """One answer from an agent: status None when nothing answered."""
+
+    def __init__(self, status: int | None, body: Any = None, raw: bytes = b"",
+                 headers: dict[str, str] | None = None, error: str | None = None) -> None:
+        self.status = status
+        self.body = body
+        self.raw = raw
+        self.headers = headers or {}
+        self.error = error
+
+
+def agent_call(host: str, port: int, method: str, path: str, *, token: str = "",
+               body: Any = None, raw_body: bytes | None = None,
+               connect_timeout: float = 3.0, read_timeout: float = 5.0) -> AgentReply:
+    """One HTTP request to an agent (or the replica agent). Never raises.
+    The token, when given, goes in the Authorization header only."""
+    conn = http.client.HTTPConnection(host, port, timeout=connect_timeout)
+    try:
+        conn.connect()
+        if conn.sock is not None:
+            conn.sock.settimeout(read_timeout)
+        headers = {"Accept": "application/json"}
+        data = raw_body
+        if data is None and body is not None:
+            data = json.dumps(body).encode()
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        conn.request(method, path, body=data, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read()
+        reply_headers = {k.lower(): v for k, v in resp.getheaders()}
+        try:
+            parsed = json.loads(raw) if raw else None
+        except ValueError:
+            parsed = None
+        return AgentReply(resp.status, parsed, raw, reply_headers)
+    except (OSError, http.client.HTTPException, ValueError) as err:
+        return AgentReply(None, error=type(err).__name__)
+    finally:
+        conn.close()
+
 
 # ── Request handler ─────────────────────────────────────────────────────────
+
+class ApiError(Exception):
+    """An error answer: {"error": code, "message": text} with an HTTP status."""
+
+    def __init__(self, status: int, code: str, message: str | None = None,
+                 **extra: Any) -> None:
+        super().__init__(code)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.extra = extra
+
+
+# Path prefixes that belong to the proxy itself: anything under them that no
+# route matches is a JSON 404, never the page.
+_APP_PREFIXES = ("/app/", "/evaluate", "/fleet/", "/ha/", "/lab/", "/replicas")
+
 
 class ProxyHandler(BaseHTTPRequestHandler):
     """Serves static files, proxies API requests, answers the app routes."""
@@ -314,14 +1000,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
     mock_port: int = 9100
     token: str = ""
     app_version: str | None = None
-    mock_enabled: bool = False
     agent_host: str = DEFAULT_AGENT_HOST
     mdns_name: str | None = None
     rules: Rules = Rules(DEFAULT_RULES_DIR)
     supervisor: Supervisor = Supervisor("http://supervisor", "")
 
+    # The routes answered by the proxy itself: (method, path pattern, handler
+    # name). Path parameters are named groups, percent-decoded before use.
+    ROUTES: list[tuple[str, str, str]] = [
+        ("GET", r"/app/info", "_route_app_info"),
+        ("POST", r"/evaluate", "_route_evaluate"),
+        ("GET", r"/ha/status", "_route_ha_status"),
+        ("POST", r"/ha/connect", "_route_ha_connect"),
+        ("POST", r"/ha/disconnect", "_route_ha_disconnect"),
+        ("GET", r"/ha/verdict", "_route_ha_verdict"),
+    ]
+
     def log_message(self, format, *args):
-        """Send access logs to stdout for HA log viewer."""
+        """Send access logs to stdout for the app's log."""
         print(f"[webui] {self.address_string()} - {format % args}", flush=True)
 
     def do_GET(self):
@@ -339,33 +1035,46 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self._handle_request("PATCH")
 
-    # Routes answered by the proxy itself: path -> (method, handler name)
-    APP_ROUTES = {
-        "/app/info": ("GET", "_route_app_info"),
-        "/evaluate": ("POST", "_route_evaluate"),
-        "/lab/on": ("POST", "_route_lab_on"),
-        "/lab/off": ("POST", "_route_lab_off"),
-        "/ha/status": ("GET", "_route_ha_status"),
-        "/ha/connect": ("POST", "_route_ha_connect"),
-        "/ha/disconnect": ("POST", "_route_ha_disconnect"),
-        "/ha/verdict": ("GET", "_route_ha_verdict"),
-    }
+    @classmethod
+    def _compiled_routes(cls) -> list[tuple[str, re.Pattern[str], str]]:
+        compiled = cls.__dict__.get("_ROUTES_COMPILED")
+        if compiled is None:
+            compiled = [(m, re.compile(p + r"/?"), h) for m, p, h in cls.ROUTES]
+            cls._ROUTES_COMPILED = compiled
+        return compiled
+
+    def _match_route(self, method: str, path: str) -> tuple[str | None, dict[str, str], list[str]]:
+        allowed: list[str] = []
+        for route_method, pattern, handler in self._compiled_routes():
+            match = pattern.fullmatch(path)
+            if not match:
+                continue
+            if route_method == method:
+                params = {k: unquote(v) for k, v in match.groupdict().items()}
+                return handler, params, allowed
+            allowed.append(route_method)
+        return None, {}, allowed
 
     def _handle_request(self, method: str):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        route = self.APP_ROUTES.get(path.rstrip("/") or "/")
-        if route is not None:
-            allowed, handler_name = route
-            if method != allowed:
-                self._send_json(405, {"error": f"use {allowed}"})
-                return
+        handler_name, params, allowed = self._match_route(method, path)
+        if handler_name is not None:
             try:
-                getattr(self, handler_name)(parsed)
+                getattr(self, handler_name)(parsed, **params)
+            except ApiError as err:
+                self._send_error(err)
             except Exception as err:  # noqa: BLE001 -- answer, never crash the server
                 log(f"{path} failed: {type(err).__name__}: {err}")
-                self._send_json(500, {"error": "internal error"})
+                self._send_json(500, {"error": "internal_error", "message": None})
+            return
+        if allowed:
+            self._send_json(405, {"error": "method_not_allowed",
+                                  "message": f"use {' or '.join(sorted(set(allowed)))}"})
+            return
+        if path.startswith(_APP_PREFIXES):
+            self._send_json(404, {"error": "not_found", "message": None})
             return
 
         # Proxy /api/* to the real Go agent
@@ -373,11 +1082,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._proxy_request(method, "127.0.0.1", self.agent_port, self.path)
             return
 
-        # Proxy /mock/* to the Python mock agent
-        # Rewrite /mock/ -> /api/ because mock agent serves the same /api/* routes
+        # Proxy /mock/* to the replica agent. Rewrite /mock/ -> /api/ because
+        # the replica agent serves the same /api/* routes.
         if path.startswith("/mock/"):
             rewritten = self.path.replace("/mock/", "/api/", 1)
-            self._proxy_request(method, "127.0.0.1", self.mock_port, rewritten)
+            self._proxy_request(method, "127.0.0.1", self.mock_port, rewritten, inject_token=False)
             return
 
         # Serve static files (GET only for static)
@@ -389,118 +1098,106 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     # ── helpers ──
 
-    def _send_json(self, code: int, data: Any) -> None:
+    def _send_json(self, code: int, data: Any, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(data).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_json(self) -> tuple[Any, str | None]:
-        """Parse the request body. Returns (value, error message)."""
+    def _send_error(self, err: ApiError) -> None:
+        self._send_json(err.status, {"error": err.code, "message": err.message, **err.extra})
+
+    def _read_json(self, limit: int = MAX_BODY) -> Any:
+        """The request body as JSON; ApiError 400 when it is not."""
         try:
             length = int(self.headers.get("Content-Length", 0) or 0)
         except ValueError:
-            return None, "bad Content-Length"
-        if length > MAX_BODY:
-            return None, "body too large"
+            raise ApiError(400, "bad_request", "bad Content-Length") from None
+        if length > limit:
+            self.close_connection = True
+            raise ApiError(413, "too_large", "the request body is too large")
         raw = self.rfile.read(length) if length > 0 else b""
         if not raw:
-            return None, "empty body"
+            raise ApiError(400, "bad_request", "empty body")
         try:
-            return json.loads(raw), None
+            return json.loads(raw)
         except ValueError:
-            return None, "body is not JSON"
+            raise ApiError(400, "bad_request", "body is not JSON") from None
 
     def _target_port(self, target: str) -> int | None:
-        if target == "agent":
+        if target in ("agent", "self"):
             return self.agent_port
-        if target == "testlab":
+        if target in ("testlab", "replicas"):
             return self.mock_port
         return None
 
+    def _mock(self, method: str, path: str, body: Any = None, timeout: float = 5.0,
+              raw_body: bytes | None = None) -> AgentReply:
+        return agent_call("127.0.0.1", self.mock_port, method, path, body=body,
+                          raw_body=raw_body, connect_timeout=min(timeout, 2.0),
+                          read_timeout=timeout)
+
     # ── /app/info ──
 
+    def _replicas_info(self) -> dict[str, Any]:
+        reply = self._mock("GET", "/api/replicas", timeout=REPLICA_AGENT_TIMEOUT)
+        listing = reply.body if reply.status == 200 and isinstance(reply.body, dict) else None
+        if listing is None:
+            return {"agent": "down", "folder": None, "path": None, "shipped": None, "user": None}
+        folder = listing.get("folder") if isinstance(listing.get("folder"), dict) else {}
+        files = [f for f in listing.get("files") or [] if isinstance(f, dict) and f.get("valid")]
+        return {
+            "agent": "ok",
+            "folder": folder.get("status"),
+            "path": folder.get("path"),
+            "shipped": sum(1 for f in files if f.get("source") == "shipped"),
+            "user": sum(1 for f in files if f.get("source") == "user"),
+        }
+
     def _route_app_info(self, _parsed) -> None:
-        ha_api = self.supervisor.available and self.supervisor.core_reachable_cached()
+        sv = self.supervisor
+        ha_api = sv.available and sv.core_reachable_cached()
+        slug = sv.app_slug()
         self._send_json(200, {
             "app_version": self.app_version,
             "rules_version": self.rules.version,
             "agent_port": self.agent_port,
             "mock_port": self.mock_port,
-            "mock_enabled": self.mock_enabled,
-            "ha_api": ha_api,
             "hostname": self.agent_host,
-            "slug": self.supervisor.app_slug(),
+            "slug": slug,
             "mdns_name": self.mdns_name,
-            "ha_version": self.supervisor.ha_version(),
+            "ha_version": sv.ha_version(),
+            "ha_api": ha_api,
+            "supervisor": slug is not None,
+            "integration_installed": sv.integration_installed() if ha_api else None,
+            "network": sv.network(),
+            "replicas": self._replicas_info(),
+            "refresh_minutes": REFRESH_MINUTES,
         })
 
     # ── /evaluate ──
 
     def _route_evaluate(self, _parsed) -> None:
-        drive, error = self._read_json()
-        if error:
-            self._send_json(400, {"error": error})
-            return
-        if not isinstance(drive, dict):
-            self._send_json(400, {"error": "body must be a drive object"})
-            return
+        body = self._read_json()
+        if not isinstance(body, dict):
+            raise ApiError(400, "bad_request", "body must be a drive or {\"pool\": {...}}")
         if not self.rules.load():
-            self._send_json(503, {"error": "rules not available"})
+            raise ApiError(503, "rules_unavailable", "the integration rules are not loaded")
+        if "pool" in body and "smart_data" not in body:
+            pool = body["pool"]
+            if not isinstance(pool, dict):
+                raise ApiError(400, "bad_request", "pool must be an object")
+            if self.rules.pool_health is None:
+                raise ApiError(503, "rules_unavailable", "the pool rules are not loaded")
+            self._send_json(200, pool_verdict(pool, self.rules))
             return
-        self._send_json(200, self.rules.evaluate(drive))
-
-    # ── /lab/on, /lab/off ──
-
-    def _route_lab_on(self, _parsed) -> None:
-        self._set_lab(True)
-
-    def _route_lab_off(self, _parsed) -> None:
-        self._set_lab(False)
-
-    def _set_lab(self, enabled: bool) -> None:
-        sv = self.supervisor
-        if not sv.available:
-            self._send_json(503, {"error": "supervisor not available"})
-            return
-
-        # The options call replaces the whole options object, so start from
-        # the current one and change only mock_mode.
-        status, info = sv.call("GET", "/addons/self/info")
-        options = None
-        if status == 200 and isinstance(info, dict):
-            options = (info.get("data") or {}).get("options")
-        if not isinstance(options, dict):
-            self._send_json(502, {"error": "could not read the app options"})
-            return
-        options = {**options, "mock_mode": enabled}
-
-        status, reply = sv.call("POST", "/addons/self/options", {"options": options})
-        if status != 200:
-            message = reply.get("message") if isinstance(reply, dict) else None
-            self._send_json(502, {"error": message or "could not save the app options"})
-            return
-
-        # Answer first: the restart stops this process. The response is written
-        # and flushed before the restart is requested, from a separate thread
-        # after a short pause so ingress can deliver it. If the Supervisor were
-        # faster than that pause the page would see a dropped connection
-        # instead of the answer; it polls /api/health either way.
-        self._send_json(200, {"result": "restarting"})
-        try:
-            self.wfile.flush()
-        except OSError:
-            pass
-        log(f"Test Lab {'on' if enabled else 'off'}: restarting the app")
-
-        def restart() -> None:
-            time.sleep(RESTART_DELAY)
-            sv.call("POST", "/addons/self/restart")
-
-        threading.Thread(target=restart, daemon=True).start()
+        verdict = self.rules.evaluate(body)
+        self._send_json(200, {**verdict, "view": drive_view(body, verdict)})
 
     # ── /ha/status ──
 
@@ -606,10 +1303,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
     # ── /ha/connect ──
 
     def _route_ha_connect(self, _parsed) -> None:
-        body, error = self._read_json()
+        try:
+            body = self._read_json()
+        except ApiError:
+            body = None
         target = body.get("target") if isinstance(body, dict) else None
-        port = self._target_port(target) if isinstance(target, str) else None
-        if error or port is None:
+        port = self._target_port(target) if target in ("agent", "testlab") else None
+        if port is None:
             self._send_json(400, {"error": 'target must be "agent" or "testlab"'})
             return
 
@@ -637,8 +1337,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         flow_id = str(flow["flow_id"])
         flow_path = f"/config/config_entries/flow/{quote(flow_id, safe='')}"
-        # The Test Lab's mock agent is started without a token, so its entry
-        # carries none.
         status, step = sv.core("POST", flow_path, {
             "host": self.agent_host,
             "port": port,
@@ -679,9 +1377,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
     # ── /ha/disconnect ──
 
     def _route_ha_disconnect(self, _parsed) -> None:
-        body, error = self._read_json()
+        try:
+            body = self._read_json()
+        except ApiError:
+            body = None
         target = body.get("target") if isinstance(body, dict) else None
-        if error or target != "testlab":
+        if target != "testlab":
             self._send_json(400, {"error": "only the Test Lab can be disconnected here"})
             return
         status_now = self._ha_status()
@@ -704,8 +1405,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
     # ── /ha/verdict ──
 
     def _route_ha_verdict(self, parsed) -> None:
+        from urllib.parse import parse_qs
+
         serial = (parse_qs(parsed.query).get("serial") or [""])[0]
-        slug = slugify(serial)
+        slug = re.sub(r"[^a-z0-9]+", "_", str(serial).lower()).strip("_")
         if not slug:
             self._send_json(400, {"error": "serial is required"})
             return
@@ -723,8 +1426,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             and str(s.get("entity_id", "")).endswith("_attention_needed")
             and slug in str(s.get("entity_id", ""))
         ]
-        # Prefer an entity that currently has a value over one that is
-        # unavailable (for example a drive the agent no longer reports).
         matches.sort(key=lambda s: s.get("state") in ("unavailable", "unknown"))
         if not matches:
             self._send_json(200, {
@@ -744,7 +1445,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     # ── proxy and static files ──
 
-    def _proxy_request(self, method: str, host: str, port: int, path: str):
+    def _proxy_request(self, method: str, host: str, port: int, path: str,
+                       inject_token: bool = True):
         """Forward a request to a backend service and relay the response."""
         try:
             # Read request body if present
@@ -761,8 +1463,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             # Inject bearer token for ingress requests (HA's ingress proxy
             # doesn't know our token, so the web UI can't authenticate).
-            # This is safe -- only localhost can reach this proxy.
-            if self.token and "Authorization" not in headers:
+            # This is safe: only localhost can reach this proxy.
+            if inject_token and self.token and "Authorization" not in headers:
                 headers["Authorization"] = f"Bearer {self.token}"
 
             # Make the proxied request
@@ -789,8 +1491,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         except ConnectionRefusedError:
             self.send_error(502, f"Backend unavailable on port {port}")
-        except Exception as e:
-            self.send_error(502, f"Proxy error: {e}")
+        except Exception as e:  # noqa: BLE001
+            self.send_error(502, f"Proxy error: {type(e).__name__}")
 
     def _serve_static(self, path: str):
         """Serve a static file from STATIC_DIR."""
@@ -840,13 +1542,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="SMART Sniffer Web UI Proxy")
     parser.add_argument("--port", type=int, default=8099, help="Port to listen on")
-    parser.add_argument("--agent-port", type=int, default=9099, help="Real agent port")
-    parser.add_argument("--mock-port", type=int, default=9100, help="Mock agent port")
+    parser.add_argument("--agent-port", type=int, default=9099, help="This app's agent port")
+    parser.add_argument("--mock-port", type=int, default=9100, help="Replica agent port")
     parser.add_argument("--token", type=str, default="", help="Bearer token for agent auth")
     parser.add_argument("--app-version", type=str, default=os.environ.get("APP_VERSION") or None,
                         help="App version shown on the page (default: $APP_VERSION)")
-    parser.add_argument("--mock-enabled", type=str, default="false",
-                        help="Whether the Test Lab (mock agent) is on: true or false")
     parser.add_argument("--rules-dir", type=str, default=DEFAULT_RULES_DIR,
                         help="Directory holding smart_sniffer/attention.py; VERSION sits beside it")
     parser.add_argument("--supervisor-url", type=str, default="http://supervisor",
@@ -862,7 +1562,6 @@ def main():
     ProxyHandler.mock_port = args.mock_port
     ProxyHandler.token = args.token
     ProxyHandler.app_version = args.app_version
-    ProxyHandler.mock_enabled = parse_bool(args.mock_enabled)
     ProxyHandler.agent_host = args.agent_host.strip() or DEFAULT_AGENT_HOST
     ProxyHandler.mdns_name = args.mdns_name.strip() or None
     ProxyHandler.rules = Rules(args.rules_dir)
@@ -878,7 +1577,7 @@ def main():
     log(f"Integration rules: {ProxyHandler.rules.version or 'not found'}")
     log(f"Agent host for the integration: {ProxyHandler.agent_host}")
     if not ProxyHandler.supervisor.available:
-        log("No Supervisor token: Test Lab button and Home Assistant routes are off")
+        log("No Supervisor token: field agents cannot be stored and Home Assistant routes are off")
 
     try:
         server.serve_forever()
