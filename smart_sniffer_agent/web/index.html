@@ -4,1609 +4,390 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SMART Sniffer Control Center</title>
-<link rel="icon" href="data:,">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='6.5' cy='6.5' r='4.5' fill='none' stroke='%238f8f8f' stroke-width='1.8'/%3E%3Cpath d='M10 10l4.5 4.5' stroke='%238f8f8f' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="cc.css">
+<script>window.tailwind = { config: { corePlugins: { preflight: false } } };</script>
 <script src="tailwind.min.js"></script>
+<script>if (window.tailwind && tailwind.config) tailwind.config = { corePlugins: { preflight: false } };</script>
+<script src="cc.js" defer></script>
 <script src="alpine.min.js" defer></script>
-<style>
-  :root {
-    --bg: #000000;
-    --card: #0c0c0c;
-    --card-2: #121212;
-    --border: #262626;
-    --border-2: #3a3a3a;
-    --text: #ededed;
-    --text-2: #b4b4b4;
-    --muted: #7c7c7c;
-    --faint: #4a4a4a;
-    --amber: #f5a524;
-    --amber-dim: rgba(245,165,36,0.12);
-    --red: #ef4444;
-    --red-dim: rgba(239,68,68,0.12);
-    --mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
-    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
-    color-scheme: dark;
-  }
-
-  * { box-sizing: border-box; }
-  html { font-size: 15px; }
-  body {
-    margin: 0;
-    font-family: var(--sans);
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-    line-height: 1.45;
-  }
-  body::before {
-    content: '';
-    position: fixed; inset: 0;
-    background-image:
-      linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
-    background-size: 40px 40px;
-    pointer-events: none; z-index: 0;
-  }
-  [x-cloak] { display: none !important; }
-
-  .wrap { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 20px 24px 40px; }
-
-  a { color: var(--text); text-decoration: underline; text-decoration-color: var(--border-2); text-underline-offset: 3px; }
-  a:hover { text-decoration-color: var(--amber); }
-  .mono { font-family: var(--mono); }
-  .muted { color: var(--muted); }
-  .dim { color: var(--text-2); }
-  .small { font-size: 0.78rem; }
-  .tiny { font-size: 0.68rem; }
-  .sel { user-select: all; }
-  .amber { color: var(--amber); }
-  .red { color: var(--red); }
-  .nowrap { white-space: nowrap; }
-
-  /* Header */
-  .header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-            padding-bottom: 14px; margin-bottom: 26px; border-bottom: 1px solid var(--border); }
-  .brand { display: flex; align-items: center; gap: 12px; }
-  .brand h1 { font-family: var(--mono); font-size: 1.25rem; font-weight: 700; letter-spacing: 0.5px; margin: 0; }
-  .brand .sub { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; }
-  .versions { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
-  .versions b { color: var(--text-2); font-weight: 500; }
-
-  /* Sections */
-  section { margin-bottom: 34px; }
-  .section-title {
-    font-family: var(--mono); font-size: 0.78rem; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 2px; color: var(--text-2);
-    margin: 0 0 14px; display: flex; align-items: center; gap: 10px;
-  }
-  .section-title .line { flex: 1; height: 1px; background: var(--border); }
-  .section-title .wink { color: var(--amber); }
-
-  /* Cards */
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; }
-  .grid-2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); align-items: start; }
-  .grid-cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); align-items: start; }
-  .drive { border-left: 3px solid var(--border-2); position: relative; }
-  .drive.state-maybe { border-left-color: var(--amber); }
-  .drive.state-yes { border-left-color: var(--red); }
-  .drive.state-unsupported { border-left-style: dashed; }
-  .mock { border-style: dashed; border-left-style: solid; background:
-    repeating-linear-gradient(-45deg, var(--card), var(--card) 20px, #0f0f0f 20px, #0f0f0f 21px); }
-  .watermark { position: absolute; top: 9px; right: 14px; font-family: var(--mono); font-size: 0.58rem;
-               font-weight: 800; letter-spacing: 2px; color: rgba(255,255,255,0.12); pointer-events: none; }
-
-  .drive-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-  .model { font-weight: 600; font-size: 0.95rem; word-break: break-word; }
-  .ident { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); margin-top: 2px; word-break: break-all; }
-  .ident .serial { color: var(--text-2); }
-
-  .badge { display: inline-block; padding: 1px 7px; border-radius: 3px; border: 1px solid var(--border-2);
-           font-family: var(--mono); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.5px;
-           color: var(--text-2); text-transform: uppercase; white-space: nowrap; }
-
-  .att { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 3px;
-         font-family: var(--mono); font-size: 0.74rem; font-weight: 700; letter-spacing: 1px;
-         border: 1px solid var(--border-2); color: var(--text); white-space: nowrap; }
-  .att-no { border-color: var(--border-2); }
-  .att-maybe { border-color: var(--amber); color: var(--amber); background: var(--amber-dim); }
-  .att-yes { border-color: var(--red); color: var(--red); background: var(--red-dim); }
-  .att-unsupported { border-style: dashed; color: var(--muted); }
-  .att-unknown { color: var(--muted); }
-
-  .status-line { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 12px 0 8px; }
-  .reasons { margin: 6px 0 4px; padding: 0; list-style: none; font-size: 0.8rem; }
-  .reasons li { padding-left: 14px; position: relative; color: var(--text-2); margin: 2px 0; }
-  .reasons li::before { content: ''; position: absolute; left: 2px; top: 0.6em; width: 5px; height: 5px; border-radius: 1px; background: var(--muted); }
-  .reasons.sev-critical li::before { background: var(--red); }
-  .reasons.sev-warning li::before { background: var(--amber); }
-
-  .kv { display: grid; grid-template-columns: minmax(130px, auto) 1fr; gap: 3px 14px; font-size: 0.8rem; margin-top: 8px; }
-  .kv dt { color: var(--muted); }
-  .kv dd { margin: 0; font-family: var(--mono); font-size: 0.76rem; color: var(--text-2); word-break: break-word; }
-  .kv dd .note { font-family: var(--sans); color: var(--muted); font-size: 0.7rem; margin-left: 6px; }
-  .kv .lvl-crit, .kv .lvl-crit + dd { color: var(--red); }
-  .kv .lvl-warn, .kv .lvl-warn + dd { color: var(--amber); }
-  .stats { font-family: var(--mono); font-size: 0.78rem; color: var(--text-2); }
-  .stats .sep { color: var(--faint); margin: 0 6px; }
-  .rule { height: 1px; background: var(--border); margin: 12px 0 10px; }
-
-  .live { margin-top: 10px; padding: 7px 10px; border-radius: 4px; background: var(--card-2); border: 1px solid var(--border);
-          font-size: 0.78rem; }
-  .live b { font-family: var(--mono); letter-spacing: 0.5px; }
-
-  details.report { margin-top: 10px; }
-  details.report summary { cursor: pointer; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 1px;
-                           text-transform: uppercase; color: var(--muted); list-style: none; user-select: none; }
-  details.report summary::-webkit-details-marker { display: none; }
-  details.report summary::before { content: '+ '; color: var(--amber); }
-  details.report[open] summary::before { content: '- '; }
-  .table-wrap { overflow-x: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: 4px; }
-  table.attrs { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.7rem; }
-  table.attrs th { text-align: left; color: var(--muted); font-weight: 500; padding: 5px 8px; border-bottom: 1px solid var(--border); background: var(--card-2); }
-  table.attrs td { padding: 3px 8px; color: var(--text-2); border-bottom: 1px solid #161616; white-space: nowrap; }
-  table.attrs td.num { text-align: right; }
-
-  .foot-line { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 12px;
-               font-size: 0.7rem; color: var(--muted); font-family: var(--mono); }
-  .rules-line { margin-top: 12px; font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
-
-  /* Buttons and inputs */
-  .btn { cursor: pointer; border-radius: 4px; padding: 6px 14px; font-size: 0.8rem; font-weight: 600;
-         border: 1px solid var(--border-2); background: transparent; color: var(--text); transition: all 0.15s;
-         text-decoration: none; display: inline-block; font-family: var(--sans); line-height: 1.3; }
-  .btn:hover { border-color: var(--text-2); }
-  .btn:disabled { opacity: 0.45; cursor: default; }
-  .btn-primary { background: var(--text); color: #000; border-color: var(--text); }
-  .btn-primary:hover { background: #fff; border-color: #fff; }
-  .btn-amber { border-color: var(--amber); color: var(--amber); }
-  .btn-amber:hover { background: var(--amber); color: #000; }
-  .btn-sm { padding: 3px 10px; font-size: 0.72rem; }
-  .btn-quiet { border-color: transparent; color: var(--muted); }
-  .btn-quiet:hover { color: var(--text); border-color: var(--border-2); }
-  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-
-  .input, .select {
-    background: #000; color: var(--text); border: 1px solid var(--border-2); border-radius: 4px;
-    padding: 4px 8px; font-family: var(--mono); font-size: 0.78rem;
-  }
-  .input:focus, .select:focus { outline: none; border-color: var(--amber); }
-  .input-num { width: 92px; text-align: right; }
-  .select { font-family: var(--sans); padding: 5px 10px; font-size: 0.8rem; }
-
-  .attr-grid { display: grid; grid-template-columns: 1fr; gap: 2px; margin-top: 10px; }
-  .attr-row { display: grid; grid-template-columns: 1fr 92px 112px; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 4px; }
-  .attr-row:hover { background: rgba(255,255,255,0.03); }
-  .attr-label { font-size: 0.76rem; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .attr-hint { font-size: 0.64rem; color: var(--faint); white-space: nowrap; font-family: var(--mono); }
-  .attr-row.lvl-crit .attr-label { color: var(--red); font-weight: 600; }
-  .attr-row.lvl-warn .attr-label { color: var(--amber); font-weight: 600; }
-  .attr-row.lvl-crit .input { border-color: var(--red); }
-  .attr-row.lvl-warn .input { border-color: var(--amber); }
-  .subhead { font-family: var(--mono); font-size: 0.64rem; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin: 12px 0 2px 6px; }
-
-  .scenarios { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 2px; align-items: center; }
-  .scenarios .label { font-size: 0.7rem; color: var(--muted); margin-right: 2px; }
-
-  /* Home Assistant rows */
-  .ha-row { display: grid; grid-template-columns: 130px 1fr auto; gap: 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--border); }
-  .ha-row:first-child { border-top: none; padding-top: 2px; }
-  .ha-name { font-weight: 600; font-size: 0.88rem; }
-  .ha-where { font-family: var(--mono); font-size: 0.74rem; color: var(--text-2); word-break: break-all; }
-  .ha-state { font-size: 0.78rem; margin-top: 2px; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; background: var(--faint); }
-  .dot-on { background: var(--text); }
-  .dot-amber { background: var(--amber); }
-
-  ol.steps { margin: 8px 0 0; padding-left: 22px; font-size: 0.82rem; color: var(--text-2); list-style: decimal; }
-  ol.steps li::marker { color: var(--muted); font-family: var(--mono); font-size: 0.74rem; }
-  ol.steps li { margin: 4px 0; }
-  ol.steps code, .code { font-family: var(--mono); font-size: 0.76rem; color: var(--text); background: var(--card-2); border: 1px solid var(--border); padding: 0 5px; border-radius: 3px; }
-  details.manual summary { cursor: pointer; font-size: 0.82rem; color: var(--text); }
-  details.manual summary::marker { color: var(--amber); }
-
-  /* Test Lab */
-  .lab-head { position: relative; border: 1px dashed var(--border-2); border-radius: 8px; padding: 14px 18px; margin-bottom: 14px; overflow: hidden; }
-  .stamp {
-    position: absolute; top: 50%; right: 22px; transform: translateY(-50%) rotate(-8deg);
-    font-family: var(--mono); font-size: 1.35rem; font-weight: 900; letter-spacing: 4px;
-    color: rgba(245,165,36,0.5); border: 3px double rgba(245,165,36,0.45); padding: 2px 12px; border-radius: 4px;
-    pointer-events: none;
-  }
-  .lab-title { font-weight: 700; font-size: 0.95rem; }
-  .lab-sub { font-size: 0.78rem; color: var(--muted); margin-top: 2px; padding-right: 170px; }
-  .dossier p { font-size: 0.86rem; color: var(--text-2); margin: 0 0 12px; max-width: 760px; }
-  .figs { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); margin: 6px 0 16px; }
-  figure { margin: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card-2); }
-  figure img { display: block; width: 100%; height: auto; filter: grayscale(0.15); }
-  figcaption { font-size: 0.72rem; color: var(--muted); padding: 7px 10px; border-top: 1px solid var(--border); }
-  .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
-  .empty { border-style: dashed; text-align: center; color: var(--muted); font-size: 0.84rem; padding: 26px; }
-  .notice { font-size: 0.8rem; color: var(--text-2); padding: 10px 14px; border: 1px solid var(--border); border-left: 3px solid var(--amber); border-radius: 4px; background: var(--card); }
-  .notice.bad { border-color: rgba(245,165,36,0.35); border-left-color: var(--amber); }
-
-  .pool-dev { display: grid; grid-template-columns: 1fr 104px repeat(3, 66px); gap: 6px; align-items: center; padding: 3px 6px; font-size: 0.76rem; }
-  .pool-dev .input-num { width: 66px; }
-  .pool-dev.head { color: var(--muted); font-size: 0.64rem; font-family: var(--mono); letter-spacing: 1px; text-transform: uppercase; }
-
-  /* Footer */
-  footer { border-top: 1px solid var(--border); padding-top: 14px; display: flex; gap: 18px; flex-wrap: wrap;
-           font-size: 0.8rem; color: var(--muted); }
-  footer a { color: var(--text-2); }
-  footer .spacer { flex: 1; }
-
-  /* Overlay and toast */
-  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.86); z-index: 50; display: flex; align-items: center; justify-content: center; }
-  .overlay .box { border: 1px solid var(--border-2); background: var(--card); border-radius: 8px; padding: 24px 28px; text-align: center; max-width: 360px; }
-  .overlay .big { font-family: var(--mono); font-size: 0.95rem; }
-  .blink { animation: blink 1.2s steps(2, start) infinite; color: var(--amber); }
-  @keyframes blink { to { visibility: hidden; } }
-  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 40; max-width: min(560px, calc(100vw - 32px));
-           background: var(--card-2); border: 1px solid var(--border-2); border-left: 3px solid var(--text); border-radius: 4px;
-           padding: 9px 14px; font-size: 0.82rem; box-shadow: 0 6px 30px rgba(0,0,0,0.6); }
-  .toast.bad { border-left-color: var(--amber); }
-
-  @media (max-width: 760px) {
-    .wrap { padding: 14px 16px 30px; }
-    .grid-2, .grid-cards { grid-template-columns: 1fr; }
-    .ha-row { grid-template-columns: 1fr; gap: 6px; }
-    .lab-sub { padding-right: 0; }
-    .lab-head { display: flex; flex-direction: column; }
-    .stamp { position: static; order: -1; align-self: flex-end; transform: rotate(-6deg); font-size: 0.95rem; margin: 0 4px 8px 0; }
-    .kv { grid-template-columns: minmax(110px, auto) 1fr; }
-    .attr-row { grid-template-columns: 1fr 84px; }
-    .attr-row .attr-hint { grid-column: 1 / -1; margin-top: -2px; }
-    .pool-dev { grid-template-columns: 1fr 92px repeat(3, 52px); font-size: 0.7rem; }
-    .pool-dev .input-num { width: 52px; }
-  }
-</style>
 </head>
-<body>
+<body x-data="cc()">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="lock" viewBox="0 0 12 14"><rect x="1.5" y="6.2" width="9" height="6.8" rx="1"/><path d="M3.7 6.2V4.3a2.3 2.3 0 0 1 4.6 0v1.9"/></symbol>
+  <symbol id="exit" viewBox="0 0 14 14"><path d="M6.2 2.2H2.2v9.6h9.6V7.8"/><path d="M8.6 1.6h3.8v3.8M12.4 1.6 6.6 7.4"/></symbol>
+  <symbol id="eye" viewBox="0 0 16 16"><path d="M1.2 8C3 4.9 5.3 3.4 8 3.4s5 1.5 6.8 4.6C13 11.1 10.7 12.6 8 12.6S3 11.1 1.2 8Z"/><circle cx="8" cy="8" r="2.1"/></symbol>
+  <symbol id="eye-shut" viewBox="0 0 16 16"><path d="M1.2 8C3 4.9 5.3 3.4 8 3.4s5 1.5 6.8 4.6C13 11.1 10.7 12.6 8 12.6S3 11.1 1.2 8Z"/><path d="M2.6 13.4 13.4 2.6"/></symbol>
+  <symbol id="glass" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4.5 4.5"/></symbol>
+</svg>
 
-<div class="wrap" x-data="controlCenter()" x-init="init()" x-cloak>
+<!-- ═══ Partials, copied into the lists that use them by cc.js ═══ -->
 
-  <!-- ═══ Header ═══ -->
-  <header class="header">
-    <div class="brand">
-      <svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-        <circle cx="13" cy="13" r="8.5" stroke="#ededed" stroke-width="2.4"/>
-        <line x1="19.4" y1="19.4" x2="28" y2="28" stroke="#ededed" stroke-width="3.4" stroke-linecap="round"/>
-        <path d="M9 13.5h2l1.2-3 2 6 1.3-3H17" stroke="#f5a524" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
+<!-- A pool row, in a host card (h is the host) and on a pool replica (h is null). -->
+<template id="tpl-pool-row">
+  <details class="drive-row pool" :class="{ crit: poolBad(it) }" :open="isOpen(poolKey(h, it), !h)" @toggle="setOpen(poolKey(h, it), $el.open)">
+    <summary><span class="m"><span class="mn" x-text="'ZFS pool ' + it.pool.name"></span><template x-if="h && rowGlyph(h, it).kind === 'blue'"><a class="exit" :href="rowGlyph(h, it).href" target="_top" aria-label="Open this pool in Home Assistant" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template></span><span class="s"><span x-text="poolLayout(it) ? poolLayout(it) + ', ' : ''"></span><b x-show="poolBad(it)" x-text="poolState(it)"></b><span x-show="!poolBad(it)" x-text="poolState(it)"></span></span></summary>
+    <template x-if="isOpen(poolKey(h, it), !h)">
+      <div class="drive-more">
+        <div class="pool-disks" role="table" :aria-label="'Disks in pool ' + it.pool.name">
+          <div class="pd head" role="row"><span></span><span>Disk</span><span>State</span><span class="r">Read</span><span class="r">Write</span><span class="r">Cksum</span></div>
+          <template x-for="d in poolDisks(it)" :key="d.name">
+            <div class="pd" :class="{ crit: d.bad }" role="row"><span :class="d.bad ? 'mk crit' : ''"></span><span class="n" x-text="d.name"></span><span x-text="d.state"></span><span class="r" x-text="d.read"></span><span class="r" x-text="d.write"></span><span class="r" x-text="d.cksum"></span></div>
+          </template>
+        </div>
+        <p class="pool-foot" x-show="poolFoot(it)" x-text="poolFoot(it)"></p>
+      </div>
+    </template>
+  </details>
+</template>
+
+<!-- A drive card: Case file (it._src 'self') and Replicas (it._src 'replicas'). -->
+<template id="tpl-drive">
+  <article class="card" :class="{ replica: it._src === 'replicas' }">
+    <div class="case-top">
       <div>
-        <h1>SMART Sniffer</h1>
-        <div class="sub">Control Center</div>
+        <div class="model"><template x-if="it.type === 'pool'"><span>ZFS pool <span class="mono" x-text="it.pool.name"></span></span></template><template x-if="it.type !== 'pool'"><span x-text="title(it)"></span></template><template x-if="it._src === 'replicas'"><span> <span class="tag">replica</span></span></template><template x-if="cardGlyph(it).kind === 'blue'"><a class="exit" :href="cardGlyph(it).href" target="_top" :aria-label="it._src === 'replicas' ? 'Open this replica in Home Assistant' : 'Open this drive in Home Assistant'" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template><template x-if="cardGlyph(it).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking(cardAskKey(it)) ? 'true' : 'false'" :aria-label="it._src === 'replicas' ? 'Not in Home Assistant yet. Add this replica' : 'Not in Home Assistant yet. Add this machine\'s drives'" title="Not in Home Assistant yet" @click="askCard(it)"><svg aria-hidden="true"><use href="#exit"/></svg></button></template></div>
+        <template x-if="it.type === 'drive'">
+          <div class="ident"><span class="serial sel" x-text="it.drive.serial"></span><span x-text="it.drive.device_path"></span><span class="proto" x-show="proto(it.drive)" x-text="proto(it.drive)"></span></div>
+        </template>
+        <template x-if="it.type === 'pool'">
+          <div class="ident"><span>Replica pool</span><span class="proto">ZFS</span></div>
+        </template>
+        <div class="hd">
+          <template x-if="hdr(it) === 'attention'"><span class="hd-att">Attention</span></template>
+          <template x-if="hdr(it) === 'attention' && failed(it)"><span class="hd-fail">Health <b>FAILED</b></span></template>
+          <template x-if="hdr(it) === 'maybe'"><span class="hd-maybe">Maybe</span></template>
+          <template x-if="hdr(it) === 'ok'"><span class="hd-ok">Health OK</span></template>
+          <template x-if="hdr(it) === 'unknown'"><span class="hd-unk"><span class="mk unk"></span>Health not known</span></template>
+        </div>
+        <template x-if="unsupportedNote(it)"><p class="case-note">The agent can see this drive, but it gives no SMART health data to watch. Virtual disks and some USB bridges do this.</p></template>
+        <template x-if="devstatNote(it)"><p class="case-note ds">The first time, Home Assistant also sends a one-time note: First reading from this drive's Device Statistics.</p></template>
+        <template x-if="it.type === 'pool' && vanished(it)"><p class="case-note">Not served to Home Assistant, which reports this pool as missing.</p></template>
+        <template x-if="it.type === 'drive' && hdr(it) !== 'unknown'">
+          <div class="stats"><template x-if="typeof stats(it).temp_c === 'number'"><span><b x-text="stats(it).temp_c"></b> C</span></template><template x-if="typeof stats(it).power_on_hours === 'number'"><span><b x-text="num(stats(it).power_on_hours)"></b> h</span></template><template x-if="typeof stats(it).power_cycles === 'number'"><span><b x-text="num(stats(it).power_cycles)"></b> cycles</span></template></div>
+        </template>
       </div>
+      <img class="lens" src="img/casefile-lens-ink.png" alt="" width="132" height="132">
     </div>
-    <div class="versions">
-      <template x-if="appInfo?.app_version">
-        <span>app <b x-text="appInfo.app_version"></b><span class="muted"> &middot; </span></span>
+    <template x-if="asking(cardAskKey(it))">
+      <div class="ha-ask flat" role="group" aria-label="Confirm"><span x-text="ui.confirm.text"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.confirm.busy" @click="confirmAdd()">Add</button><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Cancel</button></span><span class="ask-err" x-show="ui.confirm.err" x-text="ui.confirm.err"></span></div>
+    </template>
+    <template x-if="it.type === 'drive'">
+      <dl class="kv">
+        <template x-for="r in rows(it)" :key="r.key + r.name">
+          <div><dt :class="r.mark" x-text="r.name"></dt><dd><span x-text="r.value"></span><template x-if="r.expect && (r.mark === 'crit' || r.mark === 'warn')"><span class="exp" x-text="', ' + r.expect"></span></template><template x-if="r.note"><span class="note" x-text="r.note"></span></template></dd></div>
+        </template>
+        <span class="group"></span>
+        <div><dt>Data Written</dt><dd><template x-if="vol(it, 'written')"><span><span x-text="tb(vol(it, 'written').bytes)"></span><span class="note" x-text="volNote(vol(it, 'written'), it._src === 'replicas')"></span></span></template><template x-if="!vol(it, 'written')"><span class="muted">this drive does not report it</span></template></dd></div>
+        <template x-if="it._src !== 'replicas' || vol(it, 'read')">
+          <div><dt>Data Read</dt><dd><template x-if="vol(it, 'read')"><span><span x-text="tb(vol(it, 'read').bytes)"></span><span class="note" x-text="volNote(vol(it, 'read'), it._src === 'replicas')"></span></span></template><template x-if="!vol(it, 'read')"><span class="muted">this drive does not report it</span></template></dd></div>
+        </template>
+        <div><dt>Device Statistics</dt><dd x-text="devstatText(it)"></dd></div>
+      </dl>
+    </template>
+    <template x-if="it.type === 'pool'">
+      <div class="host-body" x-data="{ h: null }">
+        <template x-if="true" data-use="tpl-pool-row"></template>
+      </div>
+    </template>
+    <details class="report" :open="isOpen('rep-report:' + it._src + ':' + it.id)" @toggle="setOpen('rep-report:' + it._src + ':' + it.id, $el.open)">
+      <summary>Field report <span class="dim" x-text="reportSummary(it)"></span></summary>
+      <template x-if="isOpen('rep-report:' + it._src + ':' + it.id) && reportKind(it) === 'ata'">
+        <div>
+          <div class="table-wrap">
+            <table class="attrs">
+              <thead><tr><th class="g"></th><th class="num">ID</th><th>Name</th><th class="num">Value</th><th class="num">Worst</th><th class="num">Thresh</th><th class="num">Raw</th></tr></thead>
+              <tbody>
+                <template x-for="a in ataTable(it)" :key="a.id">
+                  <tr :class="{ hit: a.mark }"><td class="g"><span class="mk" :class="a.mark" x-show="a.mark"></span></td><td class="num" x-text="a.id"></td><td x-text="a.name"></td><td class="num" x-text="a.value"></td><td class="num" x-text="a.worst"></td><td class="num" x-text="a.thresh"></td><td class="num"><template x-if="it._src !== 'replicas'"><span x-text="a.raw"></span></template><template x-if="it._src === 'replicas'"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(it, 'ata', a.name, $event.target.value)"></template></td></tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <template x-if="devstatTable(it).length">
+            <div class="table-wrap">
+              <table class="attrs">
+                <thead><tr><th class="g"></th><th class="num">Page</th><th>Device Statistics</th><th class="num">Value</th></tr></thead>
+                <tbody>
+                  <template x-for="e in devstatTable(it)" :key="e.key">
+                    <tr :class="{ hit: e.mark }"><td class="g"><span class="mk" :class="e.mark" x-show="e.mark"></span></td><td class="num" x-text="e.page"></td><td x-text="e.name"></td><td class="num"><template x-if="!(it._src === 'replicas' && e.editable)"><span x-text="e.value"></span></template><template x-if="it._src === 'replicas' && e.editable"><input class="input raw-in" :value="e.value" inputmode="numeric" :aria-label="'Value of ' + e.name" @change="editRaw(it, 'devstat', null, $event.target.value)"></template></td></tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
       </template>
-      <span x-show="agent.online">agent <b x-text="agent.version || '?'"></b></span>
-      <span x-show="!agent.online && agent.checked" class="amber">agent not answering</span>
-      <span x-show="!agent.checked">agent <b>...</b></span>
-    </div>
-  </header>
-
-  <!-- ═══ Case file: your Home Assistant drive ═══ -->
-  <section>
-    <h2 class="section-title"><span><span class="wink">Case file:</span> your Home Assistant drive</span><span class="line"></span></h2>
-
-    <template x-if="!agent.checked">
-      <div class="card muted small">Asking the agent...</div>
+      <template x-if="isOpen('rep-report:' + it._src + ':' + it.id) && reportKind(it) === 'nvme'">
+        <div class="table-wrap">
+          <table class="attrs">
+            <thead><tr><th class="g"></th><th>Field</th><th class="num">Value</th></tr></thead>
+            <tbody>
+              <template x-for="f in nvmeTable(it)" :key="f.name">
+                <tr :class="{ hit: f.mark }"><td class="g"><span class="mk" :class="f.mark" x-show="f.mark"></span></td><td x-text="f.name"></td><td class="num"><template x-if="!(it._src === 'replicas' && f.editable)"><span x-text="f.value"></span></template><template x-if="it._src === 'replicas' && f.editable"><input class="input raw-in" :value="f.value" inputmode="numeric" :aria-label="'Value of ' + f.name" @change="editRaw(it, 'nvme', f.name, $event.target.value)"></template></td></tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </template>
+      <template x-if="isOpen('rep-report:' + it._src + ':' + it.id) && reportKind(it) === 'pool'">
+        <div class="table-wrap">
+          <table class="attrs">
+            <thead><tr><th class="g"></th><th>Pool or disk</th><th>State</th><th class="num">Read</th><th class="num">Write</th><th class="num">Cksum</th></tr></thead>
+            <tbody>
+              <tr><td class="g"></td><td x-text="it.pool.name"></td><td><input class="input state-in" :value="poolState(it)" aria-label="Pool state" @change="editPool(it, null, 'state', $event.target.value)"></td><td></td><td></td><td></td></tr>
+              <template x-for="d in poolDisks(it)" :key="d.name">
+                <tr :class="{ hit: d.bad }"><td class="g"><span class="mk crit" x-show="d.bad"></span></td><td x-text="d.name"></td><td><input class="input state-in" :value="d.state" :aria-label="'State of ' + d.name" @change="editPool(it, d.name, 'state', $event.target.value)"></td><td class="num"><input class="input raw-in" :value="d.read" inputmode="numeric" :aria-label="'Read errors of ' + d.name" @change="editPool(it, d.name, 'read', $event.target.value)"></td><td class="num"><input class="input raw-in" :value="d.write" inputmode="numeric" :aria-label="'Write errors of ' + d.name" @change="editPool(it, d.name, 'write', $event.target.value)"></td><td class="num"><input class="input raw-in" :value="d.cksum" inputmode="numeric" :aria-label="'Checksum errors of ' + d.name" @change="editPool(it, d.name, 'cksum', $event.target.value)"></td></tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </template>
+    </details>
+    <template x-if="it._src === 'self'">
+      <div class="foot"><span x-text="'last read ' + ago(readAt(it))"></span><template x-if="canSave(it)"><span class="foot-act"><span class="act-note" x-show="ui.note['save:self:' + it.id]" x-text="ui.note['save:self:' + it.id]"></span><button class="btn btn-sm btn-quiet" type="button" :disabled="!!ui.busy['save:self:' + it.id]" @click="saveReplica('self', it, 'save:self:' + it.id)">Save as replica</button></span></template></div>
     </template>
-
-    <template x-if="agent.checked && !agent.online">
-      <div class="notice bad">
-        The drive agent is not answering. The app may still be starting; this page keeps trying.
-        If it stays like this, check the <a :href="appPage('logs')" target="_top">Mission Log</a>.
+    <template x-if="it._src === 'replicas'">
+      <div class="scen-bar">
+        <span class="label" x-show="scenOptions(it).length">Scenario</span>
+        <select class="select" aria-label="Scenario" x-show="scenOptions(it).length" @change="ui.scen[it.id] = $event.target.value">
+          <template x-for="o in scenOptions(it)" :key="o.id"><option :value="o.id" x-text="o.label" :selected="o.id === scenSel(it)"></option></template>
+        </select>
+        <button class="btn btn-sm" type="button" x-show="scenOptions(it).length" :disabled="!!ui.busy['scen:' + it.id]" @click="applyScenario(it)">Apply</button>
+        <span class="spacer"></span>
+        <span class="when" x-text="'read ' + ago(readAt(it))"></span>
+        <button class="btn btn-sm btn-quiet" type="button" @click="download(it)">Download</button>
+        <button class="btn btn-sm btn-quiet" type="button" @click="removeReplica(it)">Remove</button>
       </div>
     </template>
+  </article>
+</template>
 
-    <template x-if="agent.online && !agent.drivesLoaded">
-      <div class="card muted small">Reading drives...</div>
-    </template>
-
-    <template x-if="agent.online && agent.drivesLoaded && realDrives.length === 0">
-      <div class="notice">
-        No drives readable. If the app log says <span class="mono">DRIVE ACCESS BLOCKED</span>, turn off Protection Mode and restart the app.
-        <a :href="appPage('info')" target="_top">Open the app's info page</a>
-      </div>
-    </template>
-
-    <div class="grid-2" x-show="agent.online && realDrives.length">
-      <template x-for="drive in realDrives" :key="drive.id">
-        <article class="card drive" :class="'state-' + attClass('real', drive)">
-          <div class="drive-head">
-            <div style="min-width:0">
-              <div class="model" x-text="drive.model || 'Unknown drive'"></div>
-              <div class="ident"><span class="serial sel" x-text="drive.serial || 'no serial'"></span> &middot; <span x-text="drive.device_path || ''"></span></div>
-            </div>
-            <span class="badge" x-text="drive.protocol || '?'"></span>
-          </div>
-
-          <div class="status-line">
-            <span class="att" x-show="!rulesMissing" :class="'att-' + attClass('real', drive)" x-text="'ATTENTION: ' + attState('real', drive)"></span>
-            <span class="small muted mono" x-show="rulesMissing">rules unavailable</span>
-            <span class="small">Health <b class="mono" :class="healthText(drive) === 'FAILED' ? 'red' : ''" x-text="healthText(drive)"></b></span>
-          </div>
-          <template x-if="attState('real', drive) === 'UNSUPPORTED'">
-            <div class="small" style="margin-top:10px">
-              <span class="muted">Home Assistant will show:</span>
-              <span class="dim" x-text="evalOf('real', drive).reasons_text || 'No usable SMART data'"></span>
-              <div class="tiny muted" style="margin-top:4px">The agent can see this drive, but it gives no SMART health data to watch. Virtual disks and some USB bridges do this.</div>
-            </div>
-          </template>
-          <template x-if="drive.readable === false">
-            <div class="small muted">Not readable right now. The values below are the last ones the agent saw, if any.</div>
-          </template>
-          <template x-if="evalOf('real', drive)?.reasons?.length">
-            <ul class="reasons" :class="'sev-' + evalOf('real', drive).severity">
-              <template x-for="r in evalOf('real', drive).reasons" :key="r"><li x-text="r"></li></template>
-            </ul>
-          </template>
-          <template x-if="evalOf('real', drive)?.accepted?.length">
-            <div class="tiny muted" x-text="'Accepted: ' + evalOf('real', drive).accepted.join('; ')"></div>
-          </template>
-
-          <div class="stats" style="margin-top:8px" x-show="hasStats(drive)">
-            <span x-text="tempText(drive)"></span><span class="sep">&middot;</span><span x-text="pohText(drive)"></span><span class="sep">&middot;</span><span x-text="cyclesText(drive)"></span>
-          </div>
-
+<!-- A drive row in a host card, with its cause under it while closed. Needs h and it. -->
+<template id="tpl-host-row">
+  <div class="rw">
+    <details class="drive-row" :class="rowClass(it)" :open="isOpen(rowKey(h, it))" @toggle="setOpen(rowKey(h, it), $el.open)">
+      <summary><span class="m"><span class="mn" x-text="it.drive.model"></span><template x-if="rowGlyph(h, it).kind === 'blue'"><a class="exit" :href="rowGlyph(h, it).href" target="_top" aria-label="Open this drive in Home Assistant" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template></span><span class="s"><span x-text="it.drive.serial"></span><span class="xs"><i x-text="tempText(it)"></i><i x-show="writtenText(it)" x-text="writtenText(it)"></i></span></span><span class="t r" x-text="tempText(it)"></span><span class="w r" x-text="writtenText(it)"></span></summary>
+      <template x-if="isOpen(rowKey(h, it))">
+        <div class="drive-more">
           <dl class="kv">
-            <template x-for="w in watchedRows('real', drive)" :key="w.label">
-              <div style="display:contents">
-                <dt :class="'lvl-' + w.level" x-text="w.label"></dt>
-                <dd x-text="w.value"></dd>
-              </div>
+            <template x-for="r in rows(it)" :key="r.key + r.name">
+              <div><dt :class="r.mark" x-text="r.name"></dt><dd><span x-text="r.value"></span><template x-if="r.expect && (r.mark === 'crit' || r.mark === 'warn')"><span class="exp" x-text="', ' + r.expect"></span></template><template x-if="r.note"><span class="note" x-text="r.note"></span></template></dd></div>
             </template>
-            <template x-for="v in volumeRows(drive)" :key="v.label">
-              <div style="display:contents">
-                <dt x-text="v.label"></dt>
-                <dd><span :class="v.omitted ? 'muted' : ''" x-text="v.value"></span><span class="note" x-text="v.note"></span></dd>
-              </div>
-            </template>
-            <template x-if="drive.device_statistics">
-              <div style="display:contents">
-                <dt>Device Statistics</dt>
-                <dd x-text="devstatText(drive)"></dd>
-              </div>
-            </template>
+            <template x-if="powerOn(it)"><div><dt>Power on</dt><dd x-text="powerOn(it)"></dd></div></template>
+            <div><dt>Data Read</dt><dd><template x-if="vol(it, 'read')"><span><span x-text="tb(vol(it, 'read').bytes)"></span><span class="note" x-text="volNote(vol(it, 'read'), false)"></span></span></template><template x-if="!vol(it, 'read')"><span class="muted">this drive does not report it</span></template></dd></div>
           </dl>
-
-          <template x-if="liveFor('real', drive)">
-            <div class="live" x-html="liveHtml('real', drive)"></div>
+          <template x-if="canSave(it) && status(h) === 'ok'">
+            <div class="row-act"><span class="act-note" x-show="ui.note['save:' + rowKey(h, it)]" x-text="ui.note['save:' + rowKey(h, it)]"></span><button class="btn btn-sm btn-quiet" type="button" :disabled="!!ui.busy['save:' + rowKey(h, it)]" @click="saveReplica(h.id, it, 'save:' + rowKey(h, it))">Save as replica</button></div>
           </template>
+        </div>
+      </template>
+    </details>
+    <template x-if="marked(it).length && !isOpen(rowKey(h, it))">
+      <div class="row-cause"><dl class="kv"><template x-for="r in marked(it)" :key="r.key"><div><dt :class="r.mark" x-text="r.name"></dt><dd><span x-text="r.value"></span><template x-if="r.expect"><span class="exp" x-text="', ' + r.expect"></span></template></dd></div></template></dl></div>
+    </template>
+  </div>
+</template>
 
-          <details class="report">
-            <summary>Field report: all attributes</summary>
-            <div class="table-wrap" x-html="fieldReportHtml(drive)"></div>
-          </details>
+<!-- ═══ The page ═══ -->
+<main class="page">
+  <header class="app-head">
+    <div class="brand">
+      <img class="mark" src="img/mark.png" alt="" width="42" height="42" onerror="this.hidden=true;this.nextElementSibling.hidden=false">
+      <svg class="mark glass" hidden aria-hidden="true"><use href="#glass"/></svg>
+      <img class="wordmark" src="img/wordmark.png" alt="SMART Sniffer" width="252" height="27">
+      <span class="page-name">Control Center</span>
+    </div>
+    <div class="versions"><span x-show="info && info.app_version">app <b x-text="info && info.app_version"></b></span><span x-show="agentVersion">agent <b x-text="agentVersion"></b></span><span x-show="!agentVersion && agentDown">agent not answering</span></div>
+  </header>
+  <p class="app-tag">Drive health for this machine and your field agents, complete on its own; the SMART Sniffer integration adds entities, history, notifications and automations in Home Assistant.</p>
 
-          <div class="foot-line">
-            <span x-text="lastReadText(drive)"></span>
+  <!-- ═══ Case file ═══ -->
+  <section class="sec" aria-labelledby="h-case">
+    <div class="sec-head"><h2 id="h-case">Case file</h2><span class="hatch"></span></div>
+    <p class="sec-sub">Every drive this app's own agent reports.</p>
+    <template x-if="agentDown">
+      <div class="grid-2">
+        <article class="card down">
+          <div class="case-top">
+            <div>
+              <div class="model">This app's agent is not answering</div>
+              <p class="down-msg">The app may still be starting. This page asks again every 8 seconds.
+                If it stays like this, read the <a :href="appPage('logs')" target="_top">Mission Log</a>.</p>
+              <div class="hd"><span class="hd-unk"><span class="mk unk"></span>Health not known</span></div>
+            </div>
+            <img class="lens off" src="img/casefile-lens-ink.png" alt="" width="132" height="132">
           </div>
+          <dl class="kv">
+            <div><dt>Drives last seen</dt><dd x-text="lastSeenNames"></dd></div>
+            <div><dt>Agent address</dt><dd x-text="agentAddress"></dd></div>
+          </dl>
+          <div class="foot"><span x-text="selfLastAnswer ? 'last answer ' + ago(selfLastAnswer) : 'no answer yet'"></span><span x-text="countdown"></span></div>
+        </article>
+      </div>
+    </template>
+    <template x-if="!agentDown && selfLoaded && !selfItems.length">
+      <p class="empty-line">No drives readable. If the <a :href="appPage('logs')" target="_top">Mission Log</a> says DRIVE ACCESS BLOCKED, turn off Protection Mode on the <a :href="appPage('info')" target="_top">app's info page</a> and restart the app.</p>
+    </template>
+    <div class="grid-2" x-show="!agentDown && selfItems.length">
+      <template x-for="it in selfItems" :key="it.id" data-use="tpl-drive"></template>
+    </div>
+    <p class="rules-line" x-show="rulesLine" x-text="rulesLine"></p>
+  </section>
+
+  <!-- ═══ Field agents ═══ -->
+  <section class="sec" aria-labelledby="h-field">
+    <div class="sec-head"><h2 id="h-field">Field agents</h2><span class="hatch"></span>
+      <div class="sec-tools">
+        <button class="btn btn-sm" type="button" x-show="hosts.length" @click="refresh()">Refresh</button>
+        <button class="btn btn-sm eye-btn" type="button" :aria-pressed="showHidden ? 'true' : 'false'" :disabled="!hiddenCount" :aria-label="showHidden ? 'Hidden cards shown, ' + hiddenCount : hiddenCount + ' hidden, press to see them'" title="Hidden cards" @click="toggleShowHidden()"><svg class="eye-g" aria-hidden="true" x-show="!showHidden"><use href="#eye-shut"/></svg><svg class="eye-g" aria-hidden="true" x-show="showHidden" style="display:none"><use href="#eye"/></svg><span x-text="hiddenCount">0</span></button>
+      </div>
+    </div>
+    <p class="sec-sub">Agents on your other machines. Nothing on the network is scanned until you ask.</p>
+    <p class="sec-err" x-show="hideErr || hostsErr" x-text="hideErr || hostsErr" role="alert"></p>
+    <div class="grid-2">
+      <template x-for="h in visibleHosts" :key="h.id">
+        <article class="card" :class="hostClass(h)">
+          <div class="host-head">
+            <img class="agent" src="img/field-agent.png" alt="" width="44">
+            <div>
+              <div class="host-name"><span x-text="hostName(h)"></span><template x-if="hostGlyph(h).kind === 'blue'"><a class="exit" :href="hostGlyph(h).href" target="_top" :aria-label="'Open ' + hostName(h) + ' in the SMART Sniffer integration'" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template><template x-if="hostGlyph(h).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking('host:' + h.id) ? 'true' : 'false'" :aria-label="'Not in Home Assistant yet. Add ' + hostName(h)" title="Not in Home Assistant yet" @click="ask('host:' + h.id, h.id, hostAskText(h))"><svg aria-hidden="true"><use href="#exit"/></svg></button></template></div>
+              <div class="host-meta"><span class="addr"><span x-text="h.address + ':' + h.port"></span><template x-if="h.has_password && !pending(h)"><button class="lock-btn" type="button" aria-label="Password saved. Change it" title="Password saved. Click to change it" @click="ui.pwOpen[h.id] = !ui.pwOpen[h.id]; ui.pwState[h.id] = null"><svg class="lock" aria-hidden="true"><use href="#lock"/></svg></button></template></span><span x-show="osName(h)" x-text="osName(h)"></span><span x-show="agentVer(h)" x-text="'agent ' + agentVer(h)"></span></div>
+            </div>
+            <div class="host-side"><div class="hd" style="margin:0">
+              <template x-if="hostHeader(h) === 'attention'"><span class="hd-att">Attention</span></template>
+              <template x-if="hostHeader(h) === 'maybe'"><span class="hd-maybe">Maybe</span></template>
+              <template x-if="hostHeader(h) === 'ok'"><span class="hd-ok">Health OK</span></template>
+              <template x-if="hostHeader(h) === 'unknown'"><span class="hd-unk"><span class="mk unk"></span>Health not known</span></template>
+            </div></div>
+          </div>
+          <template x-if="asking('host:' + h.id)">
+            <div class="ha-ask" role="group" aria-label="Confirm"><span x-text="ui.confirm.text"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.confirm.busy" @click="confirmAdd()">Add</button><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Cancel</button></span><span class="ask-err" x-show="ui.confirm.err" x-text="ui.confirm.err"></span></div>
+          </template>
+          <template x-if="status(h) !== 'unreachable'">
+            <div class="host-stats">
+              <template x-if="hostDrives(h) !== null"><span><b x-text="hostDrives(h)"></b><span x-text="hostDrives(h) === 1 ? 'drive' : 'drives'"></span></span></template>
+              <template x-if="pending(h)"><span>drives show after the password</span></template>
+              <template x-if="status(h) === 'ok'"><span><b x-text="hostPools(h)"></b><span x-text="hostPools(h) === 1 ? 'pool' : 'pools'"></span></span></template>
+              <template x-if="status(h) === 'ok' && h.hidden && h.hidden_since"><span x-text="'hidden ' + ago(h.hidden_since)"></span></template>
+              <template x-if="status(h) === 'ok' && !h.hidden && uptime(h)"><span>up <b x-text="uptime(h).n"></b><span x-text="uptime(h).unit"></span></span></template>
+              <template x-if="status(h) === 'ok' && showCounts(h) && data(h).summary.attention"><span><b x-text="data(h).summary.attention"></b>Attention</span></template>
+              <template x-if="status(h) === 'ok' && showCounts(h) && data(h).summary.maybe"><span><b x-text="data(h).summary.maybe"></b>Maybe</span></template>
+            </div>
+          </template>
+          <template x-if="pending(h) && !pwRefused(h)"><p class="host-msg"><b>This agent wants a password.</b></p></template>
+          <template x-if="pwShown(h) && pwRefused(h)"><p class="host-msg"><b>That password was refused.</b> Check it and try again.</p></template>
+          <template x-if="pwShown(h) && pwMessage(h)"><p class="host-msg" x-text="pwMessage(h)"></p></template>
+          <template x-if="status(h) === 'unreachable'"><p class="host-msg">Not answering. <b x-text="data(h).last_answer ? 'Last seen ' + ago(data(h).last_answer) + '.' : 'Not seen yet.'"></b> <span x-show="(data(h).items || []).length">The rows are what it said then.</span></p></template>
+          <template x-if="pwShown(h)">
+            <div>
+              <div class="pass">
+                <input class="input" :class="{ bad: pwRefused(h) }" type="password" placeholder="password" aria-label="Agent password" autocomplete="off" x-model="ui.pw[h.id]" @keydown.enter="authenticate(h)">
+                <button class="btn btn-sm btn-primary" type="button" :disabled="!!ui.busy['pw:' + h.id]" @click="authenticate(h)">Authenticate</button>
+                <template x-if="!pending(h)"><button class="btn btn-sm btn-quiet" type="button" @click="ui.pwOpen[h.id] = false; ui.pwState[h.id] = null">Cancel</button></template>
+              </div>
+              <p class="pass-help">It is the <span class="mono">token:</span> line in the agent's config file on that machine.</p>
+            </div>
+          </template>
+          <template x-if="(status(h) === 'ok' || status(h) === 'unreachable') && sortedRows(h).length">
+            <div class="host-body">
+              <div class="drive-cols"><span></span><span x-text="hasPools(h) ? 'Drive or pool' : 'Drive'"></span><span>Serial</span><span class="r">Temp</span><span class="r">Written</span></div>
+              <template x-for="it in showRows(h)" :key="it.id">
+                <div class="rw">
+                  <template x-if="it.type === 'pool'" data-use="tpl-pool-row"></template>
+                  <template x-if="it.type === 'drive'" data-use="tpl-host-row"></template>
+                </div>
+              </template>
+              <template x-if="folded(h).length"><div class="more-rows"><button class="btn btn-sm" type="button" @click="ui.more[h.id] = true" x-text="'and ' + folded(h).length + ' more'"></button><span class="dim" x-text="foldText(h)"></span></div></template>
+            </div>
+          </template>
+          <div class="foot"><span x-text="hostFoot(h)"></span><template x-if="!h.hidden"><button class="eye" type="button" aria-label="Hide this card" title="Hide this card" @click="toggleHidden(h)"><svg aria-hidden="true"><use href="#eye"/></svg></button></template><template x-if="h.hidden"><button class="eye" type="button" aria-label="Hidden. Show this card again" title="Hidden, click to un-hide" @click="toggleHidden(h)"><svg aria-hidden="true"><use href="#eye-shut"/></svg></button></template></div>
         </article>
       </template>
-    </div>
 
-    <div class="rules-line" x-show="rulesVersion || rulesMissing">
-      <span x-show="rulesVersion && !rulesMissing" x-text="'rules from integration ' + rulesVersion"></span>
-      <span x-show="rulesMissing">Rules unavailable. The integration's rules are not in this build, so Attention is not shown here.</span>
+      <!-- The + card: one for the page, always last. -->
+      <template x-if="!add.open">
+        <button class="card ghost" type="button" aria-expanded="false" aria-label="Add field agents and replicas" @click="openAdd()">
+          <span class="plus" aria-hidden="true">+</span>
+          <span class="ghost-sub">Field agents and replicas.</span>
+        </button>
+      </template>
+      <template x-if="add.open">
+        <div class="card ghost-open" role="region" aria-label="Add">
+          <div class="add-head"><button class="plus-close" type="button" aria-label="Close" title="Close" aria-expanded="true" @click="closeAdd()">+</button><h3>Add</h3></div>
+          <div class="add-line">
+            <span class="pair"><span class="lbl net">Network:</span><input class="input" x-model="add.block" @input="fieldsChanged()" @keydown.enter="scan()" aria-label="Network block" spellcheck="false" autocomplete="off"></span>
+            <span class="pair"><span class="lbl">Port</span><input class="input port" x-model="add.port" @input="fieldsChanged()" @keydown.enter="scan()" aria-label="Port" inputmode="numeric" autocomplete="off"></span>
+            <button class="btn btn-sm" type="button" @click="scan()" x-text="scanLabel"></button>
+            <template x-if="add.scan">
+              <span class="scan-prog" role="status"><span class="bar" aria-hidden="true"><i :style="'width:' + scanPct + '%'"></i></span><span class="scan-of" x-show="add.scan.state === 'running'" x-text="num(add.scan.probed) + ' of ' + num(add.scan.total)"></span><span class="found"><b x-text="foundCount"></b><small>found</small></span></span>
+            </template>
+            <template x-if="add.wide">
+              <span class="scan-wide" role="alert"><span x-text="'That is ' + num(add.wide.addresses) + ' addresses.'"></span><button class="btn btn-sm" type="button" @click="useSuggest()" x-text="'Use ' + add.wide.suggest"></button></span>
+            </template>
+          </div>
+          <template x-if="add.error"><p class="scan-none" role="alert" x-text="add.error"></p></template>
+          <template x-if="pickRows.length">
+            <div class="pick" role="group" aria-label="Agents that answered">
+              <div class="pick-head"><span></span><span>Host</span><span>Address</span><span>Agent</span><span>Drives</span><span></span></div>
+              <template x-for="r in pickRows" :key="r.id">
+                <label class="pick-row" :class="{ on: !r.added && add.ticks[r.id], done: r.added }"><input class="tick" type="checkbox" :checked="!r.added && !!add.ticks[r.id]" :disabled="r.added" @change="add.ticks[r.id] = $event.target.checked"><span class="h" x-text="r.added ? r.hostname + ', already a field agent' : r.hostname"></span><span class="a" x-text="r.address + ':' + r.port"></span><span class="v" x-text="'agent ' + r.version"></span><span class="d" x-text="driveCount(r.drives)"></span><span class="k"><template x-if="r.auth === 'password'"><svg class="lock" role="img" aria-label="wants a password"><use href="#lock"/></svg></template></span></label>
+              </template>
+            </div>
+          </template>
+          <template x-if="scanNone && !add.manualRows.length">
+            <p class="scan-none">None answered on <span class="mono" x-text="add.scan.block"></span>, port <span class="mono" x-text="add.scan.port"></span>.</p>
+          </template>
+          <div class="add-div">Add by hand</div>
+          <div class="add-line">
+            <span class="pair"><span class="lbl">Host or IP</span><input class="input host" placeholder="nas.lan or 10.0.20.14" aria-label="Host or IP" x-model="add.manualHost" @keydown.enter="check()" spellcheck="false" autocomplete="off"></span>
+            <span class="pair"><span class="lbl">Port</span><input class="input port" x-model="add.manualPort" aria-label="Port" inputmode="numeric" autocomplete="off"></span>
+            <button class="btn btn-sm" type="button" :disabled="add.checking" @click="check()">Check</button>
+          </div>
+          <template x-if="add.manualNone">
+            <p class="scan-none">Nothing answered on <span class="mono" x-text="add.manualNone.host"></span>, port <span class="mono" x-text="add.manualNone.port"></span>.</p>
+          </template>
+          <div class="add-div">Replicas</div>
+          <div class="replica-pick" role="group" aria-label="Replicas">
+            <template x-for="f in pickFiles" :key="f.id">
+              <label :class="{ on: add.repTicks[f.id] }"><input class="tick" type="checkbox" :checked="!!add.repTicks[f.id]" @change="add.repTicks[f.id] = $event.target.checked"><span x-text="f.name"></span></label>
+            </template>
+            <div class="replica-up"><span x-text="folderOk ? 'Upload a replica' : 'Your replica folder is not available.'"></span><button class="btn btn-sm" type="button" :disabled="!folderOk || add.uploading" @click="$refs.upfile.click()">Choose file</button><span class="ext">.json</span><input type="file" accept=".json,application/json" hidden aria-label="Upload a replica" x-ref="upfile" @change="upload($event)"><span class="up-msg" x-show="add.upMsg" x-text="add.upMsg" role="alert"></span></div>
+          </div>
+          <div class="add-foot"><template x-if="tickedLock"><span><svg class="lock" aria-hidden="true"><use href="#lock"/></svg> wants a password, asked for on its card after you add it</span></template><template x-if="add.err"><span class="add-err" role="alert" x-text="add.err"></span></template><button class="btn btn-primary" type="button" :disabled="!tickCount || add.busy" @click="addTicked()" x-text="tickCount ? 'Add ' + tickCount : 'Add'"></button></div>
+        </div>
+      </template>
     </div>
   </section>
 
-  <!-- ═══ Home Assistant ═══ -->
-  <section>
-    <h2 class="section-title"><span>Home Assistant</span><span class="line"></span></h2>
-
-    <template x-if="haMode === 'loading'">
-      <div class="card small muted">Checking Home Assistant...</div>
-    </template>
-
-    <!-- Core API not reachable: manual steps only -->
-    <template x-if="haMode === 'unreachable'">
-      <div class="card">
-        <div class="small dim">This app cannot reach Home Assistant's API, so the buttons are off. You can add both agents by hand.</div>
-        <details class="manual" style="margin-top:10px">
-          <summary>Add them by hand</summary>
-          <ol class="steps">
-            <li>Install the SMART Sniffer integration from HACS, if you have not.</li>
-            <li>Go to <b>Settings &gt; Devices &amp; Services &gt; Add Integration &gt; SMART Sniffer</b>.</li>
-            <li>Drive Agent: host <code class="sel" x-text="hostName"></code>, port <code x-text="agentPort"></code>.</li>
-            <li>Test Lab, only while it is on: same host, port <code x-text="mockPort"></code>. Add it as a second entry.</li>
-          </ol>
-        </details>
+  <!-- ═══ Replicas ═══ -->
+  <section class="sec" aria-labelledby="h-rep">
+    <div class="sec-head"><h2 id="h-rep">Replicas</h2><span class="hatch"></span></div>
+    <p class="sec-sub">Fake drives for testing Home Assistant. Nothing here touches a real drive.</p>
+    <template x-if="replicasLoaded && !repItems.length">
+      <div class="replica-empty">
+        <img src="img/spy-head.png" alt="" width="120">
+        <p x-text="repFailed ? 'The replica agent is not answering. The Mission Log may say why.' : 'No replicas yet. Add one with +.'"></p>
       </div>
     </template>
-
-    <!-- Reachable, integration not loaded -->
-    <template x-if="haMode === 'no_integration'">
-      <div class="card">
-        <div style="font-weight:600; font-size:0.95rem; margin-bottom:6px">Want alerts, history and automations?</div>
-        <p class="small dim" style="margin:0 0 6px; max-width:760px">
-          The integration turns these readings into Home Assistant entities, notifies you when a drive needs attention,
-          keeps history, and adds remote machines.
-        </p>
-        <ol class="steps">
-          <li>Install <a href="https://hacs.xyz" target="_blank" rel="noopener">HACS</a> if you don't have it.</li>
-          <li>In HACS, open the three-dot menu &gt; <b>Custom repositories</b> and add <code class="sel">https://github.com/DAB-LABS/smart-sniffer</code> with category <b>Integration</b>.</li>
-          <li>Search for <b>SMART Sniffer</b>, download it, and restart Home Assistant. Your drive is found on its own.</li>
-        </ol>
-        <div class="ha-row" style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px">
-          <div class="ha-name">Test Lab</div>
-          <div>
-            <div class="ha-where" x-text="'port ' + mockPort"></div>
-            <div class="ha-state"><span class="dot" :class="labOn ? 'dot-on' : ''"></span><span x-text="labOn ? 'Running' : 'Off'"></span></div>
-          </div>
-          <div class="btn-row">
-            <button class="btn btn-sm" x-show="labKnown && !labOn" @click="labPower(true)" :disabled="!!(busy.lab)">Turn on</button>
-          </div>
-        </div>
-      </div>
-    </template>
-
-    <!-- Reachable, integration loaded -->
-    <template x-if="haMode === 'loaded'">
-      <div class="card">
-        <div class="ha-row">
-          <div class="ha-name">Drive Agent</div>
-          <div>
-            <div class="ha-where"><span class="sel" x-text="hostName + ':' + agentPort"></span><span class="muted" x-show="mdnsName" x-text="' \u00b7 mDNS ' + mdnsName"></span></div>
-            <div class="ha-state">
-              <span class="dot" :class="agentConnected ? (entryOk(agentTarget) ? 'dot-on' : 'dot-amber') : ''"></span>
-              <span x-text="agentConnected ? 'Connected' : 'Not connected'"></span>
-              <span class="muted" x-show="agentConnected && !entryOk(agentTarget)" x-text="'(' + entryStateText(agentTarget) + ')'"></span>
-            </div>
-          </div>
-          <div class="btn-row">
-            <button class="btn btn-sm" x-show="!agentConnected" @click="connect('agent')" :disabled="!!(busy.agent)">Connect</button>
-          </div>
-        </div>
-        <div class="ha-row">
-          <div class="ha-name">Test Lab</div>
-          <div>
-            <div class="ha-where"><span class="sel" x-text="hostName + ':' + mockPort"></span></div>
-            <div class="ha-state">
-              <span class="dot" :class="labConnected ? (entryOk(labTarget) ? 'dot-on' : 'dot-amber') : (labOn ? 'dot-amber' : '')"></span>
-              <span x-text="labStateText"></span>
-              <span class="muted" x-show="labConnected && !entryOk(labTarget) && labOn" x-text="'(' + entryStateText(labTarget) + ')'"></span>
-            </div>
-          </div>
-          <div class="btn-row">
-            <button class="btn btn-sm" x-show="labKnown && !labOn" @click="labPower(true)" :disabled="!!(busy.lab)">Turn on</button>
-            <button class="btn btn-sm" x-show="labOn && !labConnected" @click="connect('testlab')" :disabled="!!(busy.testlab)">Connect</button>
-            <a class="btn btn-sm" x-show="labConnected" href="/config/integrations/integration/smart_sniffer" target="_top">Open in Home Assistant</a>
-            <button class="btn btn-sm" x-show="labConnected" @click="disconnectLab()" :disabled="!!(busy.testlab)">Disconnect</button>
-          </div>
-        </div>
-      </div>
-    </template>
-  </section>
-
-  <!-- ═══ Test Lab ═══ -->
-  <section>
-    <h2 class="section-title"><span>Test Lab</span><span class="line"></span></h2>
-
-    <div class="lab-head">
-      <div class="lab-title">Simulated drives for testing the integration</div>
-      <div class="lab-sub" x-text="labHeadText"></div>
-      <div class="stamp">CLASSIFIED</div>
-    </div>
-
-    <template x-if="!labKnown">
-      <div class="card small muted">Checking the Test Lab...</div>
-    </template>
-
-    <!-- Off -->
-    <template x-if="labKnown && !labOn">
-      <div class="card dossier">
-        <p>
-          The Test Lab runs a second, simulated agent inside this app on port <span class="mono" x-text="mockPort"></span>.
-          It serves fake drives with the same API as a real agent, so the integration treats them as real.
-          Change a drive's attributes here, or push a scenario button, and watch Home Assistant react:
-          Attention Needed goes to MAYBE or YES, a notification fires, the drive's icon changes,
-          the pool's Problem sensor turns on. Nothing touches your real drive.
-          Turn it off and disconnect it when you are done.
-        </p>
-        <div class="figs">
-          <figure x-data="{ ok: true }" x-show="ok">
-            <img src="img/testlab-integration.png" alt="The SMART Sniffer integration page in Home Assistant with the Test Lab entry and its simulated drives" loading="lazy" @error="ok = false">
-            <figcaption>The Test Lab entry in Home Assistant, with its simulated drives.</figcaption>
-          </figure>
-          <figure x-data="{ ok: true }" x-show="ok">
-            <img src="img/testlab-failing.png" alt="A simulated drive's device page after the Failing scenario, showing Attention YES and a notification" loading="lazy" @error="ok = false">
-            <figcaption>A simulated drive after Failing: Attention YES, the red icon, the notification.</figcaption>
-          </figure>
-        </div>
-        <template x-if="labTarget?.entry_id">
-          <div class="notice" style="margin-bottom:12px">
-            The Test Lab is off but still added in Home Assistant, so its drives show as unavailable there.
-            <button class="btn btn-sm btn-quiet" @click="disconnectLab()" :disabled="!!(busy.testlab)">Disconnect</button>
-          </div>
-        </template>
-        <button class="btn btn-primary" @click="labPower(true)" :disabled="!!(busy.lab)">Turn on the Test Lab</button>
-        <span class="small muted" style="margin-left:8px">The app restarts, about 20 seconds.</span>
-      </div>
-    </template>
-
-    <!-- On -->
-    <template x-if="labKnown && labOn">
+    <template x-if="repItems.length">
       <div>
-        <div class="toolbar">
-          <div class="btn-row">
-            <template x-if="!labConnected && haMode === 'loaded'">
-              <button class="btn btn-primary" @click="connect('testlab')" :disabled="!!(busy.testlab || !lab.online)">Connect to Home Assistant</button>
-            </template>
-            <template x-if="labConnected">
-              <a class="btn btn-primary" href="/config/integrations/integration/smart_sniffer" target="_top">Open in Home Assistant</a>
-            </template>
-            <template x-if="labConnected">
-              <button class="btn" @click="disconnectLab()" :disabled="!!(busy.testlab)">Disconnect</button>
-            </template>
-            <button class="btn btn-quiet" @click="labPower(false)" :disabled="!!(busy.lab)">Turn off the Test Lab</button>
-          </div>
-          <div class="btn-row">
-            <select class="select" x-model="newMockPreset" aria-label="Preset">
-              <template x-for="p in mockPresets" :key="p[0]">
-                <option :value="p[0]" x-text="p[1]" :selected="p[0] === newMockPreset"></option>
-              </template>
-            </select>
-            <button class="btn btn-amber" @click="addMockDrive()" :disabled="!!(busy.add || !lab.online)">Add drive</button>
-          </div>
+        <div class="toolbar"><span class="replica-count" x-text="plural(repItems.length, 'replica', 'replicas')"></span></div>
+        <div class="grid-2">
+          <template x-for="it in repItems" :key="it.id" data-use="tpl-drive"></template>
         </div>
-
-        <template x-if="!labConnected && haMode === 'unreachable'">
-          <div class="notice" style="margin-bottom:14px">
-            Add the Test Lab by hand: <b>Settings &gt; Devices &amp; Services &gt; Add Integration &gt; SMART Sniffer</b>,
-            host <span class="code sel" x-text="hostName"></span>, port <span class="code" x-text="mockPort"></span>.
-          </div>
-        </template>
-        <template x-if="!labConnected && haMode === 'no_integration'">
-          <div class="notice" style="margin-bottom:14px">
-            Install the integration (see Home Assistant above) to watch these drives there. Until then you can still see what it would say.
-          </div>
-        </template>
-
-        <template x-if="lab.checked && !lab.online">
-          <div class="notice bad" style="margin-bottom:14px">
-            The Test Lab is on but its agent is not answering yet. It may still be starting.
-            If this stays, check the <a :href="appPage('logs')" target="_top">Mission Log</a>.
-          </div>
-        </template>
-
-        <template x-if="lab.online && lab.drivesLoaded && mockDrives.length === 0 && poolCards.length === 0">
-          <div class="card empty">No test drives. Pick a preset above and add it.</div>
-        </template>
-
-        <div class="grid-cards" x-show="lab.online">
-          <!-- Mock drive cards -->
-          <template x-for="drive in mockDrives" :key="drive.id">
-            <article class="card drive mock" :class="'state-' + attClass('mock', drive)">
-              <div class="watermark">SIMULATED</div>
-              <div class="drive-head" style="padding-right:76px">
-                <div style="min-width:0">
-                  <div class="model" x-text="drive.model"></div>
-                  <div class="ident"><span class="serial sel" x-text="drive.serial"></span> &middot; <span x-text="drive.device_path || ''"></span></div>
-                </div>
-              </div>
-              <div class="status-line">
-                <span class="badge" x-text="drive.protocol"></span>
-                <span class="att" x-show="!rulesMissing" :class="'att-' + attClass('mock', drive)" x-text="'ATTENTION: ' + attState('mock', drive)"></span>
-                <span class="small muted mono" x-show="rulesMissing">rules unavailable</span>
-                <label class="small muted" x-show="hasSmart(drive)">SMART
-                  <select class="select" style="padding:2px 6px; font-size:0.74rem; margin-left:4px"
-                          :value="smartPassed(drive) ? 'PASSED' : 'FAILED'"
-                          @change="patchSmart(drive, { smart_passed: $event.target.value === 'PASSED' })">
-                    <option value="PASSED">PASSED</option>
-                    <option value="FAILED">FAILED</option>
-                  </select>
-                </label>
-              </div>
-
-              <template x-if="scenarioKind(drive)">
-                <div class="scenarios">
-                  <span class="label">Scenario</span>
-                  <button class="btn btn-sm" @click="runScenario(drive, 'healthy')" :disabled="!!(busy['s:' + drive.id])">Healthy</button>
-                  <button class="btn btn-sm" @click="runScenario(drive, 'early')" :disabled="!!(busy['s:' + drive.id])">Early warning</button>
-                  <button class="btn btn-sm" @click="runScenario(drive, 'failing')" :disabled="!!(busy['s:' + drive.id])">Failing</button>
-                  <button class="btn btn-sm" @click="runScenario(drive, 'dying')" :disabled="!!(busy['s:' + drive.id])">Dying</button>
-                </div>
-              </template>
-
-              <template x-if="evalOf('mock', drive)">
-                <div class="small" style="margin-top:10px">
-                  <span class="muted">Home Assistant will show:</span>
-                  <span :class="sevClass(evalOf('mock', drive).severity)" x-text="evalOf('mock', drive).reasons_text"></span>
-                </div>
-              </template>
-              <template x-if="liveFor('mock', drive)">
-                <div class="live" x-html="liveHtml('mock', drive)"></div>
-              </template>
-
-              <div class="attr-grid">
-                <template x-for="a in mockAttrs(drive).filter((r) => !r.more)" :key="a.key">
-                  <div class="attr-row" :class="a.level ? 'lvl-' + a.level : ''">
-                    <span class="attr-label" :title="a.key" x-text="a.label"></span>
-                    <input type="number" class="input input-num" placeholder="n/a" :value="a.value" :step="a.step || 1" :aria-label="a.label"
-                           @change="editAttr(drive, a, $event.target.value)">
-                    <span class="attr-hint" x-text="a.hint"></span>
-                  </div>
-                </template>
-              </div>
-              <template x-if="mockAttrs(drive).some((r) => r.more)">
-                <details class="report">
-                  <summary x-text="'Other attributes (' + mockAttrs(drive).filter((r) => r.more).length + ')'"></summary>
-                  <div class="attr-grid">
-                    <template x-for="a in mockAttrs(drive).filter((r) => r.more)" :key="a.key">
-                      <div class="attr-row">
-                        <span class="attr-label" :title="a.key" x-text="a.label"></span>
-                        <input type="number" class="input input-num" placeholder="n/a" :value="a.value" :aria-label="a.label"
-                               @change="editAttr(drive, a, $event.target.value)">
-                        <span class="attr-hint"></span>
-                      </div>
-                    </template>
-                  </div>
-                </details>
-              </template>
-              <template x-if="!mockAttrs(drive).length">
-                <div class="small muted" style="margin-top:10px">No SMART attributes to edit. This preset shows what Home Assistant does with a drive it cannot read.</div>
-              </template>
-
-              <dl class="kv" style="margin-top:10px">
-                <template x-for="v in mockVolumeRows(drive)" :key="v.label">
-                  <div style="display:contents">
-                    <dt x-text="v.label"></dt>
-                    <dd><span :class="v.omitted ? 'muted' : ''" x-text="v.value"></span><span class="note" x-text="v.note"></span></dd>
-                  </div>
-                </template>
-                <template x-if="drive.device_statistics">
-                  <div style="display:contents">
-                    <dt>Device Statistics</dt>
-                    <dd x-text="devstatText(drive)"></dd>
-                  </div>
-                </template>
-              </dl>
-
-              <div class="foot-line">
-                <span x-text="lastReadText(drive)"></span>
-                <button class="btn btn-sm btn-quiet" @click="removeMockDrive(drive)">Remove</button>
-              </div>
-            </article>
-          </template>
-
-          <!-- Pool cards -->
-          <template x-for="pool in poolCards" :key="pool.name">
-            <article class="card drive mock" :class="(pool.vanished || pool.state !== 'ONLINE') ? 'state-maybe' : ''">
-              <div class="watermark">SIMULATED</div>
-              <div class="drive-head" style="padding-right:76px">
-                <div>
-                  <div class="model">ZFS pool <span class="mono" x-text="pool.name"></span></div>
-                  <div class="ident" x-text="pool.vanished ? 'gone from the agent’s pool list' : poolScrubText(pool)"></div>
-                </div>
-              </div>
-              <div class="status-line">
-                <span class="badge">ZFS</span>
-                <template x-if="!pool.vanished">
-                  <label class="small muted">State
-                    <select class="select" style="padding:2px 6px; font-size:0.74rem; margin-left:4px"
-                            :value="pool.state" @change="patchPool(pool, { state: $event.target.value })">
-                      <option value="ONLINE">ONLINE</option>
-                      <option value="DEGRADED">DEGRADED</option>
-                      <option value="FAULTED">FAULTED</option>
-                    </select>
-                  </label>
-                </template>
-                <template x-if="pool.vanished">
-                  <span class="att att-maybe">VANISHED</span>
-                </template>
-              </div>
-              <div class="scenarios">
-                <span class="label">Scenario</span>
-                <button class="btn btn-sm" @click="poolScenario(pool, 'healthy')" :disabled="!!(pool.vanished || busy['p:' + pool.name])">Healthy</button>
-                <button class="btn btn-sm" @click="poolScenario(pool, 'degrade')" :disabled="!!(pool.vanished || busy['p:' + pool.name])">Degrade</button>
-                <button class="btn btn-sm" x-show="!pool.vanished" @click="poolScenario(pool, 'vanish')" :disabled="!!(busy['p:' + pool.name])">Vanish</button>
-                <button class="btn btn-sm btn-amber" x-show="pool.vanished" @click="poolScenario(pool, 'restore')" :disabled="!!(busy['p:' + pool.name])">Restore</button>
-              </div>
-              <div class="small" style="margin-top:10px" x-show="pool.vanished">
-                <span class="muted">Home Assistant will show:</span> this pool as missing.
-              </div>
-              <template x-if="!pool.vanished && poolDevices(pool).length">
-                <div style="margin-top:10px">
-                  <div class="pool-dev head"><span>Disk</span><span>State</span><span>Read</span><span>Write</span><span>Cksum</span></div>
-                  <template x-for="dev in poolDevices(pool)" :key="dev.name">
-                    <div class="pool-dev">
-                      <span class="mono" x-text="dev.name"></span>
-                      <select class="select" style="padding:2px 4px; font-size:0.7rem" :value="dev.state"
-                              :class="dev.state !== 'ONLINE' ? 'amber' : ''"
-                              @change="patchPoolDevice(pool, dev, 'state', $event.target.value)">
-                        <template x-for="s in ['ONLINE','DEGRADED','FAULTED','OFFLINE','UNAVAIL']" :key="s">
-                          <option :value="s" x-text="s" :selected="s === dev.state"></option>
-                        </template>
-                      </select>
-                      <input type="number" min="0" class="input input-num" :value="dev.read" aria-label="Read errors" @change="patchPoolDevice(pool, dev, 'read', $event.target.value)">
-                      <input type="number" min="0" class="input input-num" :value="dev.write" aria-label="Write errors" @change="patchPoolDevice(pool, dev, 'write', $event.target.value)">
-                      <input type="number" min="0" class="input input-num" :value="dev.cksum" aria-label="Checksum errors" @change="patchPoolDevice(pool, dev, 'cksum', $event.target.value)">
-                    </div>
-                  </template>
-                </div>
-              </template>
-            </article>
-          </template>
-        </div>
-
       </div>
     </template>
   </section>
 
-  <!-- ═══ Footer ═══ -->
-  <footer>
+  <footer class="app-foot">
     <a :href="appPage('logs')" target="_top">Mission Log</a>
     <a :href="appPage('config')" target="_top">App configuration</a>
-    <a x-show="haMode === 'loaded'" href="/config/integrations/integration/smart_sniffer" target="_top">Integration</a>
+    <a x-show="integrationInstalled" :href="integrationUrl" target="_top">Integration</a>
     <a href="https://github.com/DAB-LABS/smart-sniffer-app" target="_blank" rel="noopener">GitHub</a>
     <span class="spacer"></span>
-    <span class="mono tiny">DAB-LABS</span>
+    <span class="mono" style="font-size:0.72rem">DAB-LABS</span>
   </footer>
-
-  <!-- Restart overlay -->
-  <div class="overlay" x-show="restarting" x-transition.opacity>
-    <div class="box">
-      <div class="big">Restarting the app, about 20 seconds<span class="blink">_</span></div>
-      <div class="small muted" style="margin-top:8px" x-text="restartNote"></div>
-    </div>
-  </div>
-
-  <!-- Toast -->
-  <div class="toast" :class="toast.bad ? 'bad' : ''" x-show="toast.text" x-transition.opacity x-text="toast.text" role="status"></div>
-</div>
-
-<script>
-// Display names for the integration's labels and raw smartctl names. Used only to
-// line rows up with the reasons /evaluate returns; the rules live in the integration.
-const ATA_LABELS = {
-  Reallocated_Sector_Ct: 'Reallocated Sector Count',
-  Retired_Block_Count: 'Reallocated Sector Count',
-  Current_Pending_Sector: 'Current Pending Sector Count',
-  Current_Pending_Sector_Ct: 'Current Pending Sector Count',
-  Total_Pending_Sectors: 'Current Pending Sector Count',
-  Offline_Uncorrectable: 'Offline Uncorrectable Errors',
-  Reported_Uncorrect: 'Reported Uncorrectable Errors',
-  Uncorrectable_Error_Cnt: 'Uncorrectable Error Count',
-  Total_Offl_Uncorrectabl: 'Total Offline Uncorrectable',
-  Reallocated_Event_Count: 'Reallocated Event Count',
-  Spin_Retry_Count: 'Spin Retry Count',
-  Command_Timeout: 'Command Timeout',
-  Wear_Leveling_Count: 'SSD Wear Percent Used',
-  Media_Wearout_Indicator: 'SSD Wear Percent Used',
-  SSD_Life_Left: 'SSD Wear Percent Used',
-  Remaining_Lifetime_Perc: 'SSD Wear Percent Used',
-  Percent_Lifetime_Remain: 'SSD Wear Percent Used',
-  Perc_Rated_Life_Remain: 'SSD Wear Percent Used',
-  Percent_Life_Remaining: 'SSD Wear Percent Used',
-};
-const NVME_LABELS = {
-  critical_warning: 'NVMe critical warning',
-  media_errors: 'NVMe Media Errors',
-  available_spare: 'NVMe Spare Warn Below',
-  percentage_used: 'SSD Wear Percent Used',
-};
-// Reasons of these kinds are warnings (MAYBE) even when the drive is at YES for something else.
-const WARNING_LABELS = new Set(['Reallocated Event Count', 'Spin Retry Count', 'Command Timeout',
-  'SSD Wear Percent Used', 'NVMe Spare Warn Below']);
-const READING_NAMES = {
-  'NVMe Spare Warn Below': 'Available spare',
-  'SSD Wear Percent Used': 'Wear used',
-  'NVMe Media Errors': 'Media errors',
-};
-const PERCENT_LABELS = new Set(['NVMe Spare Warn Below', 'SSD Wear Percent Used']);
-
-// Mock editor hints. Defaults only; thresholds raised in Home Assistant are not seen here.
-const ATA_HINTS = {
-  'Reallocated Sector Count': '1+ is YES', 'Current Pending Sector Count': '1+ is YES',
-  'Offline Uncorrectable Errors': '1+ is YES', 'Reported Uncorrectable Errors': '1+ is YES',
-  'Uncorrectable Error Count': '1+ is YES', 'Total Offline Uncorrectable': '1+ is YES',
-  'Reallocated Event Count': '1+ is MAYBE', 'Spin Retry Count': '1+ is MAYBE',
-  'Command Timeout': 'over 100 is MAYBE',
-};
-// Shown first on a mock ATA card, with the watched attributes; the rest fold away.
-const MAIN_ATA = new Set(['Temperature_Celsius', 'Airflow_Temperature_Cel', 'Power_On_Hours', 'Power_Cycle_Count']);
-const NVME_FIELDS = [
-  ['critical_warning', 'Critical warning', 'not 0 is YES'],
-  ['media_errors', 'Media errors', '1+ is YES'],
-  ['available_spare', 'Available spare %', 'under 20 is MAYBE'],
-  ['available_spare_threshold', 'Spare threshold %', "at or under is YES"],
-  ['percentage_used', 'Percentage used %', '90+ is MAYBE'],
-  ['temperature', 'Temperature (C)', ''],
-  ['power_on_hours', 'Power-on hours', ''],
-  ['power_cycles', 'Power cycles', ''],
-];
-
-const SCENARIOS = {
-  ata: {
-    healthy: { Reallocated_Sector_Ct: 0, Current_Pending_Sector: 0, Offline_Uncorrectable: 0,
-               Reported_Uncorrect: 0, Reallocated_Event_Count: 0, Spin_Retry_Count: 0,
-               Command_Timeout: 0, smart_passed: true },
-    early:   { Reallocated_Event_Count: 1, Command_Timeout: 120 },
-    failing: { Reallocated_Sector_Ct: 24, Current_Pending_Sector: 3, Reported_Uncorrect: 1 },
-    dying:   { Reallocated_Sector_Ct: 24, Current_Pending_Sector: 3, Reported_Uncorrect: 1, smart_passed: false },
-  },
-  nvme: {
-    healthy: { critical_warning: 0, media_errors: 0, available_spare: 100, smart_passed: true },
-    early:   { available_spare: 15 },
-    failing: { media_errors: 2 },
-    dying:   { media_errors: 2, critical_warning: 4 },
-  },
-};
-
-function controlCenter() {
-  return {
-    appInfo: null,
-    agent: { online: false, checked: false, version: null, drivesLoaded: false },
-    lab: { online: false, checked: false, drivesLoaded: false },
-    realDrives: [],
-    mockDrives: [],
-    pools: [],
-    vanishedPools: [],
-    evals: {},
-    verdicts: {},
-    rulesVersion: null,
-    rulesMissing: false,
-    ha: null,
-    haChecked: false,
-    now: Date.now(),
-    busy: {},
-    toast: { text: '', bad: false },
-    toastTimer: null,
-    restarting: false,
-    restartNote: '',
-    newMockPreset: 'sata_hdd',
-    pollingAgent: false,
-    pollingMock: false,
-
-    mockPresets: [
-      ['sata_hdd',         'SATA HDD (Seagate Barracuda 2TB)'],
-      ['sata_ssd',         'SATA SSD (Samsung 870 EVO 500GB)'],
-      ['nvme',             'NVMe SSD (Samsung 980 PRO 1TB)'],
-      ['nvme_usb',         'NVMe USB-C enclosure (Sabrent)'],
-      ['usb_blocked',      'USB external, SMART blocked (WD Elements)'],
-      ['virtual_disk',     'Virtual disk (QEMU VirtIO)'],
-      ['sas_enterprise',   'Enterprise SAS (Seagate Exos 10E2400)'],
-      ['sata_hdd_devstat', 'SATA HDD with Device Statistics (WDC Ultrastar 14TB)'],
-      ['zfs_pool',         'ZFS pool (two-disk mirror)'],
-    ],
-
-    // ── Setup ──────────────────────────────────────────────────────
-    init() {
-      try {
-        const saved = JSON.parse(localStorage.getItem('ss.vanishedPools') || '[]');
-        if (Array.isArray(saved)) this.vanishedPools = saved;
-      } catch (e) { /* storage may be blocked */ }
-      setInterval(() => { this.now = Date.now(); }, 1000);
-      this.loadAppInfo().then(() => this.pollMock());
-      this.pollAgent();
-      this.pollHa();
-      setInterval(() => this.pollAgent(), 8000);
-      setInterval(() => this.pollMock(), 6000);
-      setInterval(() => this.pollHa(), 15000);
-    },
-
-    // HA ingress serves the page at /api/hassio_ingress/<token>/, so every
-    // request is relative to the page's own directory.
-    get baseUrl() {
-      const path = window.location.pathname;
-      return path.endsWith('/') ? path : path.substring(0, path.lastIndexOf('/') + 1);
-    },
-
-    async request(url, opts = {}) {
-      try {
-        const init = { method: opts.method || 'GET', headers: {} };
-        if (opts.body !== undefined) {
-          init.headers['Content-Type'] = 'application/json';
-          init.body = JSON.stringify(opts.body);
-        }
-        const resp = await fetch(this.baseUrl + url, init);
-        let data = null;
-        try { data = await resp.json(); } catch (e) { data = null; }
-        return { ok: resp.ok, status: resp.status, data };
-      } catch (e) {
-        return { ok: false, status: 0, data: null };
-      }
-    },
-
-    async fetchJSON(url) {
-      const r = await this.request(url);
-      return r.ok ? r.data : null;
-    },
-
-    showToast(text, bad = false) {
-      this.toast = { text, bad };
-      clearTimeout(this.toastTimer);
-      this.toastTimer = setTimeout(() => { this.toast = { text: '', bad: false }; }, bad ? 9000 : 5000);
-    },
-
-    // ── App info ───────────────────────────────────────────────────
-    async loadAppInfo() {
-      const info = await this.fetchJSON('app/info');
-      if (info) {
-        this.appInfo = info;
-        if (info.rules_version && !this.rulesVersion) this.rulesVersion = info.rules_version;
-      }
-    },
-
-    get agentPort() { return this.appInfo?.agent_port || this.ha?.targets?.agent?.port || 9099; },
-    get mockPort() { return this.appInfo?.mock_port || this.ha?.targets?.testlab?.port || 9100; },
-    // The app's identity comes from app/info: run.sh hands the proxy the
-    // container hostname and the mDNS name, the Supervisor gives the slug. A
-    // local install is local_smart_sniffer_agent / local-smart-sniffer-agent.
-    get mdnsName() { return this.appInfo?.mdns_name || ''; },
-    get hostName() { return this.appInfo?.hostname || this.ha?.targets?.agent?.host || '...'; },
-    get appSlug() { return this.appInfo?.slug || null; },
-    // Home Assistant 2026 moved the app pages from /hassio/addon/<slug>/... to
-    // /config/app/<slug>/..., and the old paths answer 404 on a full page load,
-    // which is what these target="_top" links do. app/info carries Home
-    // Assistant's version: before 2026 the old paths, otherwise (and when the
-    // version is unknown) the new ones.
-    get haLegacyPaths() {
-      const m = /^(\d{4})\./.exec(String(this.appInfo?.ha_version || ''));
-      return !!m && Number(m[1]) < 2026;
-    },
-    // The app's own pages in Home Assistant (config, logs, info). Without a
-    // slug, the list of installed apps, where this one is a click away.
-    appPage(page) {
-      const legacy = this.haLegacyPaths;
-      if (!this.appSlug) return legacy ? '/hassio/dashboard' : '/config/apps';
-      const slug = encodeURIComponent(this.appSlug);
-      return legacy ? `/hassio/addon/${slug}/${page}` : `/config/app/${slug}/${page}`;
-    },
-
-    // ── Real agent ─────────────────────────────────────────────────
-    async pollAgent() {
-      if (this.pollingAgent) return;
-      this.pollingAgent = true;
-      try {
-        const health = await this.fetchJSON('api/health');
-        this.agent.checked = true;
-        if (!health) {
-          this.agent.online = false;
-          return;
-        }
-        this.agent.online = true;
-        this.agent.version = health.version || null;
-        const list = await this.fetchJSON('api/drives');
-        if (!Array.isArray(list)) return;
-        const detailed = await Promise.all(list.map(async (d) => (await this.fetchJSON(`api/drives/${encodeURIComponent(d.id)}`)) || d));
-        await Promise.all(detailed.map((d) => this.evaluate('real', d)));
-        this.realDrives = detailed;
-        this.agent.drivesLoaded = true;
-        if (this.agentConnected) await Promise.all(detailed.map((d) => this.loadVerdict(d)));
-      } finally {
-        this.pollingAgent = false;
-      }
-    },
-
-    // ── Test Lab (mock agent) ──────────────────────────────────────
-    // Known once app/info answers, or the mock has been asked directly.
-    get labKnown() { return !!this.appInfo || this.lab.checked; },
-
-    get labOn() {
-      if (this.appInfo && typeof this.appInfo.mock_enabled === 'boolean') return this.appInfo.mock_enabled;
-      return this.lab.online;
-    },
-
-    async pollMock(force = false) {
-      if (this.pollingMock && !force) return;
-      if (this.appInfo && this.appInfo.mock_enabled === false) {
-        this.lab.online = false;
-        this.lab.checked = true;
-        this.mockDrives = [];
-        return;
-      }
-      this.pollingMock = true;
-      try {
-        const health = await this.fetchJSON('mock/health');
-        this.lab.checked = true;
-        if (!health) {
-          this.lab.online = false;
-          this.mockDrives = [];
-          return;
-        }
-        this.lab.online = true;
-        const [list, pools] = await Promise.all([this.fetchJSON('mock/drives'), this.fetchJSON('mock/pools')]);
-        if (Array.isArray(pools)) this.setPools(pools);
-        if (!Array.isArray(list)) return;
-        const detailed = await Promise.all(list.map(async (d) => (await this.fetchJSON(`mock/drives/${encodeURIComponent(d.id)}`)) || d));
-        await Promise.all(detailed.map((d) => this.evaluate('mock', d)));
-        this.mockDrives = detailed;
-        this.lab.drivesLoaded = true;
-        if (this.labConnected) await Promise.all(detailed.map((d) => this.loadVerdict(d)));
-      } finally {
-        this.pollingMock = false;
-      }
-    },
-
-    setPools(pools) {
-      this.pools = pools;
-      const listed = new Set(pools.map((p) => p.name));
-      const keep = this.vanishedPools.filter((n) => !listed.has(n));
-      if (keep.length !== this.vanishedPools.length) this.saveVanished(keep);
-    },
-
-    saveVanished(names) {
-      this.vanishedPools = names;
-      try { localStorage.setItem('ss.vanishedPools', JSON.stringify(names)); } catch (e) { /* ignore */ }
-    },
-
-    get poolCards() {
-      const cards = this.pools.map((p) => Object.assign({}, p, { vanished: false }));
-      for (const name of this.vanishedPools) {
-        if (!cards.some((c) => c.name === name)) cards.push({ name, vanished: true, state: 'MISSING' });
-      }
-      return cards;
-    },
-
-    async addMockDrive() {
-      this.busy.add = true;
-      const preset = this.newMockPreset;
-      const r = await this.request('mock/drives', { method: 'POST', body: { preset } });
-      this.busy.add = false;
-      if (!r.ok) {
-        this.showToast(`Could not add the drive (${r.status || 'no answer'}).`, true);
-        return;
-      }
-      await this.pollMock(true);
-    },
-
-    async removeMockDrive(drive) {
-      if (!confirm(`Remove simulated drive "${drive.model}"?`)) return;
-      const r = await this.request(`mock/drives/${encodeURIComponent(drive.id)}`, { method: 'DELETE' });
-      if (!r.ok) this.showToast('Could not remove the drive.', true);
-      await this.pollMock(true);
-    },
-
-    async patchSmart(drive, updates) {
-      const r = await this.request(`mock/drives/${encodeURIComponent(drive.id)}/smart`, { method: 'PATCH', body: updates });
-      if (!r.ok) this.showToast('The Test Lab did not take that change.', true);
-      return r.ok;
-    },
-
-    async editAttr(drive, a, raw) {
-      const id = encodeURIComponent(drive.id);
-      // A cleared box is not a 0; put the current value back.
-      if (String(raw).trim() === '') {
-        await this.pollMock(true);
-        return;
-      }
-      let r;
-      if (a.kind === 'devstat') {
-        r = await this.request(`mock/drives/${id}/devstat`, { method: 'PATCH', body: { reported_uncorrectable: parseInt(raw, 10) || 0 } });
-      } else if (a.kind === 'writes') {
-        r = await this.request(`mock/drives/${id}/derived`, { method: 'PATCH', body: { host_writes_tb: Math.max(0, parseFloat(raw) || 0) } });
-      } else {
-        r = await this.request(`mock/drives/${id}/smart`, { method: 'PATCH', body: { [a.key]: parseInt(raw, 10) || 0 } });
-      }
-      if (!r.ok) this.showToast('The Test Lab did not take that change.', true);
-      await this.pollMock(true);
-    },
-
-    scenarioKind(drive) {
-      const sd = drive.smart_data || {};
-      if (sd.nvme_smart_health_information_log) return 'nvme';
-      if ((sd.ata_smart_attributes?.table || []).length) return 'ata';
-      return null;
-    },
-
-    isDevstatPreset(drive) {
-      return drive.device_statistics?.status === 'present' && this.devstatUncEntry(drive) !== null;
-    },
-
-    async runScenario(drive, name) {
-      const kind = this.scenarioKind(drive);
-      if (!kind) return;
-      const key = 's:' + drive.id;
-      this.busy[key] = true;
-      try {
-        const set = Object.assign({}, SCENARIOS[kind][name]);
-        const devstat = this.isDevstatPreset(drive);
-        let unc = null;
-        if (devstat) {
-          // The Device Statistics drive fails through its log page, not the attribute table.
-          // Every scenario sets the count, so each one is a known state.
-          unc = (name === 'failing' || name === 'dying') ? 18 : 0;
-          if (unc) for (const k of ['Reallocated_Sector_Ct', 'Current_Pending_Sector', 'Reported_Uncorrect']) delete set[k];
-        }
-        if (kind === 'ata') {
-          // Each scenario is a known set: start from Healthy, then apply.
-          const base = name === 'healthy' ? {} : Object.assign({}, SCENARIOS.ata.healthy);
-          if (devstat && name !== 'healthy') base.smart_passed = name !== 'dying';
-          const present = new Set((drive.smart_data.ata_smart_attributes.table || []).map((a) => a.name));
-          const merged = Object.assign(base, set);
-          for (const k of Object.keys(merged)) if (k !== 'smart_passed' && !present.has(k)) delete merged[k];
-          await this.patchSmart(drive, merged);
-        } else {
-          const base = name === 'healthy' ? {} : Object.assign({}, SCENARIOS.nvme.healthy);
-          await this.patchSmart(drive, Object.assign(base, set));
-        }
-        if (unc !== null) {
-          await this.request(`mock/drives/${encodeURIComponent(drive.id)}/devstat`, { method: 'PATCH', body: { reported_uncorrectable: unc } });
-        }
-      } finally {
-        this.busy[key] = false;
-      }
-      await this.pollMock(true);
-    },
-
-    async patchPool(pool, body) {
-      const r = await this.request(`mock/pools/${encodeURIComponent(pool.name)}`, { method: 'PATCH', body });
-      if (!r.ok) this.showToast('The Test Lab did not take that change.', true);
-      await this.pollMock(true);
-    },
-
-    // The agent's pool payload lists only the vdevs with a problem. The mock may add
-    // a full "devices" list; without it, the preset's two disks are sda and sdb.
-    poolDevices(pool) {
-      if (Array.isArray(pool.devices) && pool.devices.length) return pool.devices;
-      const byName = {};
-      for (const name of ['sda', 'sdb']) byName[name] = { name, state: 'ONLINE', read: 0, write: 0, cksum: 0 };
-      for (const v of pool.problem_vdevs || []) {
-        if (v.type !== 'disk') continue;
-        byName[v.name] = { name: v.name, state: v.state, read: v.read_errors || 0, write: v.write_errors || 0, cksum: v.checksum_errors || 0 };
-      }
-      return Object.values(byName);
-    },
-
-    async patchPoolDevice(pool, dev, field, raw) {
-      const devices = this.poolDevices(pool).map((d) => {
-        const copy = { name: d.name, state: d.state, read: d.read, write: d.write, cksum: d.cksum };
-        if (d.name === dev.name) copy[field] = field === 'state' ? raw : Math.max(0, parseInt(raw, 10) || 0);
-        return copy;
-      });
-      await this.patchPool(pool, { devices });
-    },
-
-    async poolScenario(pool, name) {
-      const key = 'p:' + pool.name;
-      this.busy[key] = true;
-      try {
-        const name_ = encodeURIComponent(pool.name);
-        if (name === 'vanish' || name === 'restore') {
-          const r = await this.request(`mock/pools/${name_}/${name}`, { method: 'POST' });
-          if (!r.ok) { this.showToast('The Test Lab did not take that change.', true); return; }
-          if (name === 'vanish') this.saveVanished([...new Set([...this.vanishedPools, pool.name])]);
-          else this.saveVanished(this.vanishedPools.filter((n) => n !== pool.name));
-        } else {
-          const devices = this.poolDevices(pool).map((d, i) => ({
-            name: d.name,
-            state: name === 'degrade' && i === 0 ? 'FAULTED' : 'ONLINE',
-            read: name === 'degrade' && i === 0 ? 12 : 0, write: 0, cksum: 0,
-          }));
-          const r = await this.request(`mock/pools/${name_}`, { method: 'PATCH',
-            body: { state: name === 'degrade' ? 'DEGRADED' : 'ONLINE', devices } });
-          if (!r.ok) this.showToast('The Test Lab did not take that change.', true);
-        }
-      } finally {
-        this.busy[key] = false;
-      }
-      await this.pollMock(true);
-    },
-
-    poolScrubText(pool) {
-      if (pool.scrub_in_progress) return 'scrub in progress';
-      if (!pool.last_scrub_end) return 'never scrubbed';
-      return 'last scrub ' + this.agoText(pool.last_scrub_end);
-    },
-
-    // ── Turn the Test Lab on and off ───────────────────────────────
-    async labPower(on) {
-      this.busy.lab = true;
-      const r = await this.request(on ? 'lab/on' : 'lab/off', { method: 'POST' });
-      this.busy.lab = false;
-      if (!r.ok || r.data?.result !== 'restarting') {
-        this.showToast(r.data?.message || `The app could not ${on ? 'turn on' : 'turn off'} the Test Lab (${r.status || 'no answer'}). Use App configuration instead.`, true);
-        return;
-      }
-      this.waitForRestart();
-    },
-
-    async waitForRestart() {
-      this.restarting = true;
-      this.restartNote = 'Waiting for the app to stop.';
-      const started = Date.now();
-      let sawDown = false;
-      await new Promise((res) => setTimeout(res, 3000));
-      for (;;) {
-        const elapsed = Date.now() - started;
-        const health = await this.request('api/health');
-        const info = health.ok ? health : await this.request('app/info');
-        if (!health.ok && !info.ok) {
-          sawDown = true;
-          this.restartNote = 'Waiting for the app to come back.';
-        } else if (sawDown || elapsed > 30000) {
-          this.restartNote = 'Back. Reloading.';
-          window.location.reload();
-          return;
-        }
-        if (elapsed > 120000) {
-          window.location.reload();
-          return;
-        }
-        await new Promise((res) => setTimeout(res, 2000));
-      }
-    },
-
-    // ── Home Assistant ─────────────────────────────────────────────
-    async pollHa() {
-      const r = await this.request('ha/status');
-      this.haChecked = true;
-      this.ha = r.ok && r.data ? r.data : { reachable: false, integration_loaded: false, targets: {} };
-    },
-
-    get haMode() {
-      if (!this.haChecked) return 'loading';
-      if (!this.ha?.reachable) return 'unreachable';
-      return this.ha.integration_loaded ? 'loaded' : 'no_integration';
-    },
-    get agentTarget() { return this.ha?.targets?.agent || null; },
-    get labTarget() { return this.ha?.targets?.testlab || null; },
-    get agentConnected() { return this.haMode === 'loaded' && !!this.agentTarget?.entry_id; },
-    get labConnected() { return this.haMode === 'loaded' && !!this.labTarget?.entry_id; },
-
-    entryOk(t) { return !t?.state || t.state === 'loaded'; },
-    entryStateText(t) { return (t?.state || '').replace(/_/g, ' '); },
-
-    get labStateText() {
-      if (!this.labOn) return this.labConnected ? 'Off, still added in Home Assistant' : 'Off';
-      if (this.labConnected) return 'Connected';
-      return 'Running, not connected';
-    },
-
-    get labHeadText() {
-      if (!this.labKnown) return '';
-      if (!this.labOn) return 'Off.';
-      if (this.labConnected) return 'On and connected. Change a drive here and watch Home Assistant react.';
-      return `On, port ${this.mockPort}. Change a drive here and watch Home Assistant react. Nothing touches your real drive.`;
-    },
-
-    async connect(target) {
-      this.busy[target] = true;
-      const r = await this.request('ha/connect', { method: 'POST', body: { target } });
-      this.busy[target] = false;
-      const result = r.data?.result;
-      const name = target === 'testlab' ? 'Test Lab' : 'Drive Agent';
-      if (r.ok && result === 'created') {
-        this.showToast(`${name} added to Home Assistant. Its drives show up there in a few seconds.`);
-      } else if (result === 'already_connected') {
-        this.showToast(`${name} was already connected.`);
-      } else {
-        this.showToast(`Could not connect the ${name}. ${this.connectErrorText(target, r)}`, true);
-      }
-      await this.pollHa();
-    },
-
-    connectErrorText(target, r) {
-      const code = r.data?.message || r.data?.error || '';
-      switch (code) {
-        case 'unreachable': return 'The app cannot reach Home Assistant right now.';
-        case 'integration_not_loaded': return 'The SMART Sniffer integration is not installed.';
-        case 'flow_failed': return 'Home Assistant did not finish adding it. Try again, or add it by hand.';
-        case 'cannot_connect':
-          return target === 'testlab'
-            ? 'Home Assistant could not reach it. Is the Test Lab running?'
-            : 'Home Assistant could not reach the agent. Check the Mission Log.';
-        case 'invalid_auth': return 'The agent turned down the token.';
-        default:
-          if (code) return `Home Assistant said: ${String(code).replace(/_/g, ' ')}.`;
-          return r.status ? `The app answered ${r.status}.` : 'The app did not answer.';
-      }
-    },
-
-    async disconnectLab() {
-      if (!confirm('Remove the Test Lab entry and its mock devices from Home Assistant?')) return;
-      this.busy.testlab = true;
-      const r = await this.request('ha/disconnect', { method: 'POST', body: { target: 'testlab' } });
-      this.busy.testlab = false;
-      if (r.ok && r.data?.result === 'removed') {
-        this.showToast('Test Lab removed from Home Assistant.');
-        this.verdicts = {};
-      } else if (r.ok && r.data?.result === 'not_connected') {
-        this.showToast('The Test Lab was not connected.');
-      } else {
-        const code = r.data?.message || '';
-        const why = code === 'unreachable' ? ' The app cannot reach Home Assistant right now.'
-          : (code ? ` Home Assistant said: ${String(code).replace(/_/g, ' ')}.` : '');
-        this.showToast(`Could not disconnect the Test Lab.${why}`, true);
-      }
-      await this.pollHa();
-    },
-
-    async loadVerdict(drive) {
-      if (!drive.serial) return;
-      const v = await this.fetchJSON(`ha/verdict?serial=${encodeURIComponent(drive.serial)}`);
-      this.verdicts[drive.serial] = v || { found: false, error: true };
-    },
-
-    liveFor(kind, drive) {
-      const connected = kind === 'mock' ? this.labConnected : this.agentConnected;
-      if (!connected || !drive.serial) return null;
-      return this.verdicts[drive.serial] || null;
-    },
-
-    liveHtml(kind, drive) {
-      const v = this.liveFor(kind, drive);
-      if (!v) return '';
-      if (v.error) return '<span class="muted">Home Assistant did not answer.</span>';
-      if (!v.found) return '<span class="muted">Home Assistant has not picked this drive up yet.</span>';
-      const cls = v.state === 'YES' ? 'red' : (v.state === 'MAYBE' ? 'amber' : '');
-      let html = `<span class="muted">Home Assistant says:</span> <b class="${cls}">${this.esc(v.state || 'unknown')}</b>`;
-      const local = this.evalOf(kind, drive);
-      if (local && v.state && local.state !== v.state) {
-        html += ' <span class="muted tiny">Differs from the reading above: Home Assistant\'s own thresholds and held readings win.</span>';
-      }
-      return html;
-    },
-
-    // ── Verdicts from the integration's rules ──────────────────────
-    async evaluate(kind, drive) {
-      const r = await this.request('evaluate', { method: 'POST', body: drive });
-      const key = kind + ':' + drive.id;
-      if (r.status === 503) {
-        this.rulesMissing = true;
-        delete this.evals[key];
-        return;
-      }
-      if (!r.ok || !r.data) return;
-      this.rulesMissing = false;
-      if (r.data.rules_version) this.rulesVersion = r.data.rules_version;
-      this.evals[key] = r.data;
-    },
-
-    evalOf(kind, drive) { return this.evals[kind + ':' + drive.id] || null; },
-    attState(kind, drive) { return this.evalOf(kind, drive)?.state || '?'; },
-    attClass(kind, drive) {
-      const s = this.evalOf(kind, drive)?.state;
-      return s ? s.toLowerCase() : 'unknown';
-    },
-    sevClass(sev) { return sev === 'critical' ? 'red' : (sev === 'warning' ? 'amber' : 'dim'); },
-
-    reasonMatches(label, reason) {
-      const r = reason.toLowerCase();
-      if (label === 'NVMe Spare Warn Below') return r.includes('available spare');
-      if (label === 'SSD Wear Percent Used') return r.includes('wear at');
-      return r.startsWith(label.toLowerCase());
-    },
-
-    levelFor(ev, label) {
-      if (!ev || !label || !(ev.reasons || []).length) return '';
-      const reason = ev.reasons.find((r) => this.reasonMatches(label, r));
-      if (!reason) return '';
-      if (ev.state === 'MAYBE') return 'warn';
-      if (label === 'NVMe Spare Warn Below' && reason.includes('at or below')) return 'crit';
-      return WARNING_LABELS.has(label) ? 'warn' : 'crit';
-    },
-
-    // ── Drive readings ─────────────────────────────────────────────
-    sd(drive) { return drive.smart_data || {}; },
-    nvmeLog(drive) { return this.sd(drive).nvme_smart_health_information_log || null; },
-    ataTable(drive) { return this.sd(drive).ata_smart_attributes?.table || []; },
-    ataRaw(drive, names) {
-      for (const a of this.ataTable(drive)) if (names.includes(a.name)) return a.raw?.value;
-      return undefined;
-    },
-    hasSmart(drive) { return !!(this.nvmeLog(drive) || this.ataTable(drive).length); },
-    smartPassed(drive) { return this.sd(drive).smart_status?.passed ?? true; },
-
-    healthText(drive) {
-      const p = this.sd(drive).smart_status?.passed;
-      if (p === true) return 'OK';
-      if (p === false) return 'FAILED';
-      return 'not reported';
-    },
-    // A missing reading is null or undefined and shows as n/a, never as 0.
-    isNum(n) { return typeof n === 'number' && Number.isFinite(n); },
-    fmtNum(n) { return this.isNum(n) ? n.toLocaleString('en-US') : 'n/a'; },
-    firstNum(values) { return values.find((v) => this.isNum(v)) ?? null; },
-    tempC(drive) {
-      const raw = this.ataRaw(drive, ['Temperature_Celsius', 'Airflow_Temperature_Cel', 'Temperature_Internal']);
-      // smartctl writes 0 for a drive with no temperature to give (a SCSI
-      // virtual disk: "Current Drive Temperature: 0 C"), so 0 is not a reading.
-      const t = [this.sd(drive).temperature?.current, this.nvmeLog(drive)?.temperature,
-                 this.isNum(raw) ? raw & 0xff : null].find((v) => this.isNum(v) && v !== 0);
-      return t ?? null;
-    },
-    pohValue(drive) {
-      return this.firstNum([this.sd(drive).power_on_time?.hours, this.nvmeLog(drive)?.power_on_hours,
-                            this.ataRaw(drive, ['Power_On_Hours'])]);
-    },
-    cyclesValue(drive) {
-      return this.firstNum([this.sd(drive).power_cycle_count, this.nvmeLog(drive)?.power_cycles,
-                            this.ataRaw(drive, ['Power_Cycle_Count'])]);
-    },
-    tempText(drive) {
-      const t = this.tempC(drive);
-      return t === null ? 'temp n/a' : `${t} °C`;
-    },
-    pohText(drive) {
-      const h = this.pohValue(drive);
-      return h === null ? 'hours n/a' : `${this.fmtNum(h)} h`;
-    },
-    cyclesText(drive) {
-      const c = this.cyclesValue(drive);
-      return c === null ? 'cycles n/a' : `${this.fmtNum(c)} cycles`;
-    },
-    // No temperature, hours or cycles at all: the stats line would say n/a three times.
-    hasStats(drive) {
-      return this.tempC(drive) !== null || this.pohValue(drive) !== null || this.cyclesValue(drive) !== null;
-    },
-
-    watchedRows(kind, drive) {
-      const ev = this.evalOf(kind, drive);
-      const rows = [];
-      const log = this.nvmeLog(drive);
-      if (log && log.critical_warning != null) {
-        const cw = Number(log.critical_warning) || 0;
-        rows.push({ label: 'Critical warning', value: '0x' + cw.toString(16).padStart(2, '0'),
-                    level: this.levelFor(ev, 'NVMe critical warning') });
-      }
-      // The readings come from the integration's rules. Without them, show the
-      // same counters as smartctl reports them, uncoloured.
-      const readings = ev?.readings || this.rawReadings(drive);
-      for (const [label, value] of Object.entries(readings)) {
-        rows.push({ label: READING_NAMES[label] || label,
-                    value: PERCENT_LABELS.has(label) && this.isNum(value) ? `${value}%` : this.fmtNum(value),
-                    level: this.levelFor(ev, label) });
-      }
-      return rows;
-    },
-
-    rawReadings(drive) {
-      const out = {};
-      const log = this.nvmeLog(drive);
-      if (log) {
-        if (log.media_errors != null) out['NVMe Media Errors'] = log.media_errors;
-        if (log.available_spare != null) out['NVMe Spare Warn Below'] = log.available_spare;
-        if (log.percentage_used != null) out['SSD Wear Percent Used'] = log.percentage_used;
-        return out;
-      }
-      for (const a of this.ataTable(drive)) {
-        const label = ATA_LABELS[a.name];
-        if (!label || label in out) continue;
-        if (label === 'SSD Wear Percent Used') {
-          if (a.value != null) out[label] = Math.max(0, 100 - a.value);
-        } else if (typeof a.raw?.value === 'number') {
-          out[label] = a.raw.value;
-        }
-      }
-      return out;
-    },
-
-    tb(bytes) { return (bytes / 1e12).toFixed(2) + ' TB'; },
-    sourceText(v) {
-      if (!v) return '';
-      if (v.source === 'nvme') return 'NVMe log';
-      if (v.source === 'ata_device_statistics') return 'Device Statistics';
-      if (v.source === 'ata_attribute') return v.attribute_id ? `attribute ${v.attribute_id}` : 'attribute';
-      return (v.source || '').replace(/_/g, ' ');
-    },
-    omitText(reason) {
-      const known = {
-        no_source: 'this drive does not report it',
-        device_statistics_unavailable: 'Device Statistics could not be read',
-        device_statistics_off: 'Device Statistics are off',
-        not_applicable: 'not applicable',
-      };
-      return known[reason] || String(reason).replace(/_/g, ' ');
-    },
-    volumeRows(drive) {
-      const d = drive.derived;
-      if (!d) return [];
-      const rows = [];
-      for (const [key, label] of [['host_writes', 'Data Written'], ['host_reads', 'Data Read']]) {
-        if (d[key] && d[key].bytes != null) {
-          rows.push({ label, value: this.tb(d[key].bytes), note: this.sourceText(d[key]), omitted: false });
-        } else if (d[key + '_omitted']) {
-          rows.push({ label, value: this.omitText(d[key + '_omitted']), note: '', omitted: true });
-        }
-      }
-      return rows;
-    },
-    devstatText(drive) {
-      const ds = drive.device_statistics || {};
-      const reason = ds.reason ? String(ds.reason).replace(/_/g, ' ') : '';
-      switch (ds.status) {
-        case 'present': return ds.complete === false ? 'present, partial read' : 'present';
-        case 'absent': return 'absent';
-        case 'off': return reason ? `off (${reason})` : 'off';
-        case 'not_applicable': return `not applicable (${drive.protocol || 'this drive'})`;
-        case 'unavailable': return reason ? `unavailable: ${reason}` : 'unavailable';
-        default: return ds.status || 'not reported';
-      }
-    },
-    devstatUncEntry(drive) {
-      for (const page of drive.device_statistics?.pages || []) {
-        for (const e of page.table || []) if (/Reported Uncorrectable/i.test(e.name || '')) return e;
-      }
-      return null;
-    },
-    devstatUnc(drive) {
-      const v = this.devstatUncEntry(drive)?.value;
-      return this.isNum(v) ? v : null;
-    },
-
-    agoText(ts) {
-      const t = Date.parse(ts);
-      if (Number.isNaN(t)) return 'at an unknown time';
-      const s = Math.max(0, Math.round((this.now - t) / 1000));
-      if (s < 90) return `${s} s ago`;
-      const m = Math.round(s / 60);
-      if (m < 90) return `${m} min ago`;
-      const h = Math.round(m / 60);
-      if (h < 48) return `${h} h ago`;
-      return `${Math.round(h / 24)} days ago`;
-    },
-    lastReadText(drive) {
-      if (!drive.last_updated) return '';
-      if (drive.in_standby) {
-        const when = new Date(drive.last_updated).toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' });
-        return `asleep (standby), data as of ${when}, ${this.agoText(drive.last_updated)}`;
-      }
-      return 'last read ' + this.agoText(drive.last_updated);
-    },
-
-    esc(s) {
-      return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    },
-    fieldReportHtml(drive) {
-      const table = this.ataTable(drive);
-      const log = this.nvmeLog(drive);
-      if (table.length) {
-        const rows = table.map((a) => `<tr><td class="num">${this.esc(a.id)}</td><td>${this.esc(a.name)}</td>` +
-          `<td class="num">${this.esc(a.value)}</td><td class="num">${this.esc(a.worst)}</td><td class="num">${this.esc(a.thresh)}</td>` +
-          `<td>${this.esc(a.raw?.string ?? a.raw?.value)}</td></tr>`).join('');
-        return `<table class="attrs"><thead><tr><th>ID</th><th>Name</th><th>Value</th><th>Worst</th><th>Thresh</th><th>Raw</th></tr></thead><tbody>${rows}</tbody></table>`;
-      }
-      if (log) {
-        const rows = Object.entries(log).map(([k, v]) => `<tr><td>${this.esc(k)}</td><td class="num">${this.esc(typeof v === 'object' ? JSON.stringify(v) : v)}</td></tr>`).join('');
-        return `<table class="attrs"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table>`;
-      }
-      return '<div class="small muted" style="padding:8px">No attributes reported.</div>';
-    },
-
-    // ── Mock editor rows ───────────────────────────────────────────
-    writesEditable(drive) { return !!this.scenarioKind(drive); },
-    mockVolumeRows(drive) {
-      // Data Written is an input on editable presets, so it is not repeated here.
-      return this.volumeRows(drive).filter((v) => !(v.label === 'Data Written' && this.writesEditable(drive)));
-    },
-
-    mockAttrs(drive) {
-      const ev = this.evalOf('mock', drive);
-      const rows = [];
-      const log = this.nvmeLog(drive);
-      if (log) {
-        for (const [key, label, hint] of NVME_FIELDS) {
-          if (log[key] == null) continue;
-          rows.push({ key, label, hint, value: log[key], level: this.levelFor(ev, NVME_LABELS[key]) });
-        }
-      } else {
-        for (const a of this.ataTable(drive)) {
-          const lab = ATA_LABELS[a.name];
-          rows.push({ key: a.name, label: a.name.replace(/_/g, ' '), hint: (lab && ATA_HINTS[lab]) || '',
-                      value: a.raw?.value ?? null, level: this.levelFor(ev, lab),
-                      more: !lab && !MAIN_ATA.has(a.name) });
-        }
-      }
-      if (this.devstatUncEntry(drive)) {
-        rows.push({ key: 'devstat:reported_uncorrectable', kind: 'devstat', label: 'Reported Uncorrectable (Device Statistics)',
-                    hint: '1+ is YES', value: this.devstatUnc(drive), level: this.levelFor(ev, 'Reported Uncorrectable Errors') });
-      }
-      if (this.writesEditable(drive)) {
-        const bytes = drive.derived?.host_writes?.bytes;
-        rows.push({ key: 'derived:host_writes_tb', kind: 'writes', label: 'Data Written (TB)', hint: this.sourceText(drive.derived?.host_writes) || 'not reported',
-                    value: bytes != null ? (bytes / 1e12).toFixed(2) : '', step: 0.01, level: '' });
-      }
-      return rows;
-    },
-  };
-}
-</script>
-
+</main>
 </body>
 </html>
