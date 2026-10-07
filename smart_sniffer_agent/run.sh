@@ -4,19 +4,24 @@
 # ==============================================================================
 set -e
 
-APP_VERSION="0.2.12"
+APP_VERSION="0.3.0"
 
 # ── Read configuration ───────────────────────────────────────────────────────
 PORT=$(bashio::config 'port')
 TOKEN=$(bashio::config 'token')
 SCAN_INTERVAL=$(bashio::config 'scan_interval')
-MOCK_MODE=$(bashio::config 'mock_mode')
 MOCK_PORT=$(bashio::config 'mock_port')
 INGRESS_PORT=8099
 
+# Replica files: the shipped ones are in the image, the user's own in /share
+# so they survive updates and can be dropped in over Samba or SSH.
+SHIPPED_REPLICAS="/opt/replicas"
+USER_REPLICAS="/share/smart-sniffer/replicas"
+
 # ── Validate configuration ───────────────────────────────────────────────────
-if bashio::var.true "${MOCK_MODE}" && [ "${PORT}" = "${MOCK_PORT}" ]; then
-    bashio::log.fatal "Mock port (${MOCK_PORT}) cannot be the same as agent port (${PORT})"
+# The replica agent always runs, so the two ports must always differ.
+if [ "${PORT}" = "${MOCK_PORT}" ]; then
+    bashio::log.fatal "Replica agent port (${MOCK_PORT}) cannot be the same as agent port (${PORT})"
     bashio::exit.nok
 fi
 
@@ -167,27 +172,36 @@ fi
 /usr/bin/smartha-agent ${AGENT_ARGS} &
 AGENT_PID=$!
 
-# ── Start the mock agent (if enabled) ───────────────────────────────────────
-MOCK_PID=""
-MOCK_STATUS="disabled"
-MOCK_DRIVE_COUNT="0"
-
-if bashio::var.true "${MOCK_MODE}"; then
-    bashio::log.info "Starting mock agent on port ${MOCK_PORT}..."
-    # The mock comes from the smart-sniffer release (see the Dockerfile).
-    # Pass --data-dir only when that version supports it, so an older mock
-    # still starts (its drives then live in memory and reset on restart).
-    MOCK_ARGS="--port=${MOCK_PORT} --preload sata_hdd,sata_ssd,nvme,usb_blocked"
-    if python3 /opt/mock-agent.py --help 2>&1 | grep -q -- "--data-dir"; then
-        MOCK_ARGS="${MOCK_ARGS} --data-dir /data"
-    else
-        bashio::log.warning "Mock agent does not support --data-dir. Mock drive edits will not survive a restart."
-    fi
-    python3 /opt/mock-agent.py ${MOCK_ARGS} &
-    MOCK_PID=$!
-    MOCK_STATUS="enabled on port ${MOCK_PORT}"
-    MOCK_DRIVE_COUNT="4"  # preloaded count
+# ── Start the replica agent ──────────────────────────────────────────────────
+# The replica agent serves the replicas (drives that are not real) to the
+# Control Center and, once added, to the integration. It always runs. It is
+# started with --no-mdns: advertising it would show every user a discovered
+# card for a fake agent.
+if ! mkdir -p "${USER_REPLICAS}" 2>/dev/null; then
+    bashio::log.warning "Cannot create ${USER_REPLICAS}. Is /share mounted? Saving and uploading replicas is off."
 fi
+
+bashio::log.info "Starting the replica agent on port ${MOCK_PORT}..."
+# The replica agent comes from the smart-sniffer release (see the
+# Dockerfile). Each option is passed only when that version supports it, so
+# an older one still starts.
+MOCK_HELP="$(python3 /opt/mock-agent.py --help 2>&1 || true)"
+MOCK_ARGS="--port=${MOCK_PORT} --no-mdns"
+if echo "${MOCK_HELP}" | grep -q -- "--data-dir"; then
+    MOCK_ARGS="${MOCK_ARGS} --data-dir /data"
+else
+    bashio::log.warning "Replica agent does not support --data-dir. Replica edits will not survive a restart."
+fi
+if echo "${MOCK_HELP}" | grep -q -- "--user-replicas"; then
+    MOCK_ARGS="${MOCK_ARGS} --replicas ${SHIPPED_REPLICAS} --user-replicas ${USER_REPLICAS}"
+else
+    bashio::log.warning "Replica agent does not read replica files. Starting it with its built-in drives."
+    MOCK_ARGS="${MOCK_ARGS} --preload sata_hdd,sata_ssd,nvme,usb_blocked"
+fi
+python3 /opt/mock-agent.py ${MOCK_ARGS} &
+MOCK_PID=$!
+SHIPPED_COUNT=$(find "${SHIPPED_REPLICAS}" -maxdepth 1 -name '*.json' ! -name 'scenarios.json' 2>/dev/null | wc -l)
+USER_COUNT=$(find "${USER_REPLICAS}" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
 
 # ── Start the web UI proxy server ────────────────────────────────────────────
 bashio::log.info "Starting web UI proxy on port ${INGRESS_PORT}..."
@@ -196,10 +210,10 @@ bashio::log.info "Starting web UI proxy on port ${INGRESS_PORT}..."
 # proxy inherits it; it is never passed on the command line.
 # The container's hostname is the name the integration connects to: the
 # app's slug with dashes, for example local-smart-sniffer-agent when the app
-# is installed as a local app. The page shows it and Connect uses it.
+# is installed as a local app. The page shows it and Add uses it.
 AGENT_HOST="$(hostname 2>/dev/null || true)"
 PROXY_ARGS="--port=${INGRESS_PORT} --agent-port=${PORT} --mock-port=${MOCK_PORT}"
-PROXY_ARGS="${PROXY_ARGS} --app-version=${APP_VERSION} --mock-enabled=${MOCK_MODE}"
+PROXY_ARGS="${PROXY_ARGS} --app-version=${APP_VERSION} --data-dir=/data"
 if [ -n "${AGENT_HOST}" ]; then
     PROXY_ARGS="${PROXY_ARGS} --agent-host=${AGENT_HOST}"
 else
@@ -220,7 +234,7 @@ bashio::log.info "Agent: running on port ${PORT}"
 bashio::log.info "Integration host: ${AGENT_HOST:-unknown}:${PORT}"
 bashio::log.info "mDNS: ${MDNS_NAME:-default (container hostname)}"
 bashio::log.info "Auth: ${AUTH_STATUS}"
-bashio::log.info "Mock: ${MOCK_STATUS}"
+bashio::log.info "Replicas: agent on port ${MOCK_PORT}, ${SHIPPED_COUNT} shipped, ${USER_COUNT} in ${USER_REPLICAS}"
 bashio::log.info "Integration rules: $(cat /opt/ssrules/VERSION 2>/dev/null || echo 'not found')"
 bashio::log.info "Web UI: http://localhost:${INGRESS_PORT} (via ingress)"
 bashio::log.info "Drives detected: ${DRIVE_COUNT:-0}"
@@ -241,11 +255,11 @@ wait_and_monitor() {
             bashio::exit.nok
         fi
 
-        # Check mock agent only if it was started
-        if bashio::var.true "${MOCK_MODE}" && [ -n "${MOCK_PID}" ]; then
+        # The replica agent: log and carry on, the real agent matters more
+        if [ -n "${MOCK_PID}" ]; then
             if ! kill -0 "${MOCK_PID}" 2>/dev/null; then
-                bashio::log.warning "Mock agent (PID ${MOCK_PID}) has died. Mock drives will be unavailable."
-                bashio::log.warning "The real agent continues to run. Restart the app to restore mock mode."
+                bashio::log.warning "Replica agent (PID ${MOCK_PID}) has died. Replicas will be unavailable."
+                bashio::log.warning "The real agent continues to run. Restart the app to restore the replicas."
                 MOCK_PID=""  # Stop checking
             fi
         fi
