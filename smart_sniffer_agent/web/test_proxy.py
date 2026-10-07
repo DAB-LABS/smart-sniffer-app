@@ -37,7 +37,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import pytest
 
@@ -219,21 +219,103 @@ class FakeSupervisor(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
 
-class FakeAgent(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def do_GET(self):
-        if self.path == "/api/health":
-            _json_reply(self, 200, {"status": "ok", "version": "0.8.0"})
-        elif self.path == "/api/drives":
-            _json_reply(self, 200, [{"id": "nvme0", "model": "Fixture NVMe"}])
-        else:
-            _json_reply(self, 404, {"error": "not found"})
+APP_TOKEN = "app-token-123"  # this app's agent token (the token option)
+FIELD_PASSWORD = "fieldpass"
 
 
-def _serve(handler) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+def simple_drive(drive_id: str, serial: str, attrs: dict[str, int] | None = None,
+                 passed: bool = True, smart: bool = True) -> dict[str, Any]:
+    """An ATA drive as the agent's /api/drives/{id} returns it."""
+    table = [
+        {"id": i, "name": n, "value": 100, "worst": 100, "thresh": 0,
+         "raw": {"value": (attrs or {}).get(n, 0), "string": str((attrs or {}).get(n, 0))}}
+        for i, n in ((5, "Reallocated_Sector_Ct"), (188, "Command_Timeout"),
+                     (197, "Current_Pending_Sector"))
+    ]
+    return {
+        "id": drive_id, "device_path": f"/dev/{drive_id}", "model": f"Model {drive_id}",
+        "serial": serial, "protocol": "ATA", "readable": True,
+        "smart_data": {
+            "smart_status": {"passed": passed}, "temperature": {"current": 35},
+            "power_on_time": {"hours": 1000}, "power_cycle_count": 10,
+            "ata_smart_attributes": {"table": table},
+        } if smart else {},
+    }
+
+
+class AgentState:
+    """A fake agent: what it answers and what it was asked.
+
+    mode: "agent" (an agent; a token makes it want a password), "404",
+    "notagent" (a JSON answer that is not an agent), "slow" (answers after
+    3 s), "broken" (HTTP 500)."""
+
+    def __init__(self, mode: str = "agent", token: str = "", hostname: str | None = None,
+                 drives: list[dict[str, Any]] | None = None,
+                 pools: list[dict[str, Any]] | None = None, version: str = "0.8.1") -> None:
+        self.mode = mode
+        self.token = token
+        self.hostname = hostname
+        self.drives = drives if drives is not None else [simple_drive("sda", "SER-A")]
+        self.pools = pools  # None: /api/pools not advertised
+        self.version = version
+        self.requests: list[tuple[str, str, str | None]] = []
+
+
+def agent_handler(state: AgentState):
+    class FakeAgent(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            state.requests.append(("GET", self.path, self.headers.get("Authorization")))
+            if state.mode == "slow":
+                time.sleep(3)
+                _json_reply(self, 200, {})
+                return
+            if state.mode == "404":
+                _json_reply(self, 404, {"error": "not found"})
+                return
+            if state.mode == "notagent":
+                _json_reply(self, 200, {"status": "ok", "app": "printer"})
+                return
+            if state.mode == "broken":
+                _json_reply(self, 500, {"error": "boom"})
+                return
+            if self.path == "/api/health":
+                endpoints = ["/api/health", "/api/drives", "/api/drives/{id}"]
+                if state.pools is not None:
+                    endpoints.append("/api/pools")
+                health = {"status": "ok", "version": state.version, "os": "linux",
+                          "uptime_seconds": 3542400, "endpoints": endpoints,
+                          "drives": len(state.drives), "filesystems": 0}
+                if state.hostname:
+                    health["hostname"] = state.hostname
+                _json_reply(self, 200, health)
+                return
+            if state.token and self.headers.get("Authorization") != f"Bearer {state.token}":
+                _json_reply(self, 401, {"error": "unauthorized"})
+                return
+            if self.path == "/api/drives":
+                _json_reply(self, 200, [{k: d[k] for k in ("id", "device_path", "model", "serial",
+                                                           "protocol", "readable")}
+                                        for d in state.drives])
+            elif self.path.startswith("/api/drives/"):
+                found = [d for d in state.drives if d["id"] == self.path.rsplit("/", 1)[1]]
+                _json_reply(self, 200 if found else 404, found[0] if found else {"error": "nf"})
+            elif self.path == "/api/pools" and state.pools is not None:
+                _json_reply(self, 200, state.pools)
+            else:
+                _json_reply(self, 404, {"error": "not found"})
+
+    return FakeAgent
+
+
+SELF_AGENT = AgentState(token=APP_TOKEN)
+
+
+def _serve(handler, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -276,7 +358,7 @@ class Proxy:
 @pytest.fixture(scope="session")
 def backends():
     supervisor = _serve(FakeSupervisor)
-    agent = _serve(FakeAgent)
+    agent = _serve(agent_handler(SELF_AGENT))
     yield supervisor, agent
     supervisor.shutdown()
     agent.shutdown()
@@ -355,7 +437,14 @@ def _wait_for_port(port: int, proc: subprocess.Popen) -> None:
 
 
 @pytest.fixture(scope="session")
-def proxy(backends, mock_agent):
+def data_dir():
+    path = Path(tempfile.mkdtemp(prefix="ss-data-"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def proxy(backends, mock_agent, data_dir):
     supervisor, agent = backends
     agent_port = agent.server_address[1]
     mock_port = mock_agent["port"] if mock_agent else _free_port()
@@ -367,17 +456,22 @@ def proxy(backends, mock_agent):
         f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
         f"--agent-host={AGENT_HOST}",
         f"--mdns-name={MDNS_NAME}",
+        f"--token={APP_TOKEN}",
+        f"--data-dir={data_dir}",
     ], TOKEN)
     client.agent_port = agent_port  # type: ignore[attr-defined]
     client.mock_port = mock_port  # type: ignore[attr-defined]
     yield client
-    # The Supervisor token must never reach the log.
-    assert TOKEN not in _stop_proxy(proc)
+    # The Supervisor token and stored passwords must never reach the log.
+    output = _stop_proxy(proc)
+    assert TOKEN not in output
+    assert FIELD_PASSWORD not in output and "wrong-pass" not in output
 
 
 @pytest.fixture(autouse=True)
 def fresh_state():
     STATE.reset()
+    SELF_AGENT.__init__(token=APP_TOKEN)
     yield
 
 
@@ -910,6 +1004,447 @@ def test_removed_routes_are_404(proxy, method, path):
     assert status == 404 and body["error"] == "not_found"
     assert not STATE.restarted.is_set()
     assert not any(c[1] == "/addons/self/options" for c in STATE.calls)
+
+
+# ── Field agents ────────────────────────────────────────────────────────────
+#
+# Fake agents on loopback addresses, all on one port, so a scan of
+# 127.0.0.0/29 finds them. 127.0.0.1 is this app's own address (the fake
+# Supervisor's network info says so) and must be skipped.
+
+FIELD = {
+    "127.0.0.1": AgentState(hostname="own-host"),
+    "127.0.0.2": AgentState(hostname="office-nuc",
+                            drives=[simple_drive("sda", "NUC-1"), simple_drive("sdb", "NUC-2")]),
+    "127.0.0.3": AgentState(token=FIELD_PASSWORD, hostname="backup-pi"),
+    "127.0.0.4": AgentState(mode="404"),
+    "127.0.0.5": AgentState(mode="notagent"),
+    # 127.0.0.6: nothing listens
+}
+
+
+@pytest.fixture(scope="session")
+def field():
+    """Start the fake field agents; returns their common port."""
+    for _ in range(20):
+        port = _free_port()
+        servers = []
+        try:
+            for address, state in FIELD.items():
+                servers.append(_serve(agent_handler(state), address, port))
+        except OSError:
+            for server in servers:
+                server.shutdown()
+            continue
+        break
+    else:
+        pytest.skip("no common free port on the loopback addresses")
+    yield port
+    for server in servers:
+        server.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def fresh_field():
+    for address, state in FIELD.items():
+        state.requests.clear()
+        state.mode = "agent" if address not in ("127.0.0.4", "127.0.0.5") else state.mode
+        state.pools = None
+        if address == "127.0.0.3":
+            state.token = FIELD_PASSWORD
+    yield
+
+
+def _wait_scan(proxy, scan_id: str, timeout: float = 15) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while True:
+        status, body = proxy.get(f"/fleet/scan/{scan_id}")
+        assert status == 200
+        if body["state"] != "running" or time.monotonic() > deadline:
+            return body
+        time.sleep(0.1)
+
+
+def _store(*hosts: dict[str, Any]) -> None:
+    STATE.options["hosts"] = [dict(h) for h in hosts]
+
+
+def _option_writes() -> list[Any]:
+    return [c[2] for c in STATE.calls if c[1] == "/addons/self/options"]
+
+
+def _refresh_hosts(proxy) -> list[dict[str, Any]]:
+    status, body = proxy.get("/fleet/hosts")
+    assert status == 200
+    return body["hosts"]
+
+
+def test_scan_finds_agents(proxy, field):
+    _store({"address": "127.0.0.3", "port": field, "password": FIELD_PASSWORD})
+    _refresh_hosts(proxy)
+    status, started = proxy.post("/fleet/scan", {"block": "127.0.0.0/29", "port": field})
+    assert status == 202
+    assert started["total"] == 6
+    body = _wait_scan(proxy, started["scan_id"])
+    assert body["state"] == "done"
+    assert body["probed"] == body["total"] == 6
+    assert body["block"] == "127.0.0.0/29" and body["port"] == field
+    assert body["finished_at"] and body["started_at"]
+    rows = {row["address"]: row for row in body["found"]}
+    assert set(rows) == {"127.0.0.2", "127.0.0.3"}  # not own, not 404, not the printer
+    assert rows["127.0.0.2"] == {
+        "id": f"127.0.0.2:{field}", "address": "127.0.0.2", "port": field,
+        "hostname": "office-nuc", "version": "0.8.1", "drives": 2, "pools": 0,
+        "auth": "open", "added": False,
+    }
+    assert rows["127.0.0.3"]["auth"] == "password"
+    assert rows["127.0.0.3"]["added"] is True
+    assert rows["127.0.0.3"]["drives"] == 1  # from health; the list wants a password
+    # Only GET /api/health and GET /api/drives, never with credentials.
+    for state in FIELD.values():
+        for method, path, auth in state.requests:
+            assert method == "GET" and path in ("/api/health", "/api/drives")
+            assert auth is None
+    assert FIELD["127.0.0.1"].requests == []
+
+
+@pytest.mark.parametrize("block,total", [
+    ("127.0.0.0/24", 254), ("127.0.0.9", 1), ("127.0.0.9/32", 1), ("127.0.0.0/22", 1022),
+])
+def test_scan_blocks_accepted(proxy, block, total):
+    status, body = proxy.post("/fleet/scan", {"block": block, "port": _free_port()})
+    assert status == 202 and body["total"] == total
+    proxy.request("DELETE", f"/fleet/scan/{body['scan_id']}")
+
+
+def test_scan_too_wide(proxy):
+    STATE.calls.clear()
+    status, body = proxy.post("/fleet/scan", {"block": "10.0.0.0/21", "port": 9099})
+    assert status == 422
+    assert body["error"] == "too_wide"
+    assert body["addresses"] == 2046
+    assert body["suggest"] == "127.0.0.0/24"  # the /24 holding this app's address
+    status, body = proxy.post("/fleet/scan", {"block": "10.0.0.0/16", "port": 9099})
+    assert body["addresses"] == 65534
+
+
+@pytest.mark.parametrize("body,code", [
+    ({"block": "nonsense", "port": 9099}, "bad_block"),
+    ({"block": "fe80::/120", "port": 9099}, "bad_block"),
+    ({"block": "", "port": 9099}, "bad_block"),
+    ({"block": "10.0.0.0/24", "port": 0}, "bad_port"),
+    ({"block": "10.0.0.0/24", "port": "x"}, "bad_port"),
+])
+def test_scan_bad_input(proxy, body, code):
+    status, reply = proxy.post("/fleet/scan", body)
+    assert status == 400 and reply["error"] == code
+
+
+def test_new_scan_cancels_old_and_delete(proxy):
+    slow = [_serve(agent_handler(AgentState(mode="slow")), f"127.0.1.{i}", 0) for i in (1,)]
+    port = slow[0].server_address[1]
+    try:
+        _, first = proxy.post("/fleet/scan", {"block": "127.0.1.0/30", "port": port})
+        _, second = proxy.post("/fleet/scan", {"block": "127.0.1.0/30", "port": port})
+        status, body = proxy.get(f"/fleet/scan/{first['scan_id']}")
+        assert status == 200 and body["state"] == "cancelled"
+        status, body = proxy.request("DELETE", f"/fleet/scan/{second['scan_id']}")
+        assert status == 200 and body == {"state": "cancelled"}
+        assert proxy.get(f"/fleet/scan/{second['scan_id']}")[1]["state"] == "cancelled"
+    finally:
+        for server in slow:
+            server.shutdown()
+    assert proxy.get("/fleet/scan/nope")[0] == 404
+    assert proxy.request("DELETE", "/fleet/scan/nope")[0] == 404
+
+
+def test_scan_expires(mod):
+    import ipaddress as ip
+
+    scans = mod.ScanManager()
+    scan = mod.Scan("abc", ip.ip_network("127.0.9.0/30"), 1)
+    scans.scans["abc"] = scan
+    scan.finish("done")
+    assert scans.get("abc") is scan
+    scan.finished_mono -= mod.SCAN_KEEP_SECONDS + 1
+    assert scans.get("abc") is None
+
+
+def test_probe_address_and_name(proxy, field):
+    status, row = proxy.post("/fleet/probe", {"host": "127.0.0.2", "port": field})
+    assert status == 200
+    assert row["hostname"] == "office-nuc" and row["auth"] == "open" and row["added"] is False
+    status, row = proxy.post("/fleet/probe", {"host": "localhost", "port": field})
+    assert status == 200
+    assert row["address"] == "localhost"  # what was typed
+    assert row["id"] == f"localhost:{field}"
+    assert row["hostname"] == "own-host"
+    status, row = proxy.post("/fleet/probe", {"host": "127.0.0.3", "port": field})
+    assert row["auth"] == "password"
+
+
+def test_probe_failures(proxy, field):
+    assert proxy.post("/fleet/probe", {"host": "127.0.0.6", "port": field})[1]["error"] == "not_answering"
+    assert proxy.post("/fleet/probe", {"host": "127.0.0.6", "port": field})[0] == 504
+    status, body = proxy.post("/fleet/probe", {"host": "127.0.0.4", "port": field})
+    assert status == 404 and body["error"] == "not_an_agent"
+    status, body = proxy.post("/fleet/probe", {"host": "127.0.0.5", "port": field})
+    assert status == 404 and body["error"] == "not_an_agent"
+    status, body = proxy.post("/fleet/probe", {"host": "no-such-host.invalid", "port": field})
+    assert status == 400 and body["error"] == "cannot_resolve"
+    status, body = proxy.post("/fleet/probe", {"host": "bad host!", "port": field})
+    assert status == 400 and body["error"] == "bad_request"
+
+
+def test_hosts_add_one_write(proxy, field):
+    STATE.options["token"] = "agent-secret"
+    _store({"address": "nas.lan", "port": 9099, "password": "keep-me"})
+    STATE.calls.clear()
+    status, body = proxy.post("/fleet/hosts", {"hosts": [
+        {"address": "127.0.0.2", "port": field},
+        {"address": "Office-NUC.lan", "port": 9099},
+        {"address": "NAS.lan", "port": 9099},
+    ]})
+    assert status == 201
+    assert [h["id"] for h in body["added"]] == [f"127.0.0.2:{field}", "office-nuc.lan:9099"]
+    assert body["skipped"] == [{"address": "nas.lan", "port": 9099, "reason": "already_added"}]
+    assert body["added"][0] == {
+        "id": f"127.0.0.2:{field}", "address": "127.0.0.2", "port": field,
+        "has_password": False, "hidden": False, "hidden_since": None,
+        "added_at": body["added"][0]["added_at"],
+    }
+    assert body["added"][0]["added_at"].endswith("Z")
+    writes = _option_writes()
+    assert len(writes) == 1
+    # The whole options object goes back, with only hosts changed.
+    assert writes[0] == {"options": {
+        "port": 9099, "token": "agent-secret", "scan_interval": 60, "mock_port": 9100,
+        "hosts": [{"address": "nas.lan", "port": 9099, "password": "keep-me"},
+                  {"address": "127.0.0.2", "port": field},
+                  {"address": "office-nuc.lan", "port": 9099}],
+    }}
+    assert not STATE.restarted.is_set()
+    assert not any("restart" in c[1] for c in STATE.calls)
+    # No password in any answer.
+    hosts = _refresh_hosts(proxy)
+    assert "keep-me" not in json.dumps(hosts)
+    assert [h["has_password"] for h in hosts] == [True, False, False]
+
+
+def test_hosts_add_only_duplicates_writes_nothing(proxy):
+    _store({"address": "nas.lan", "port": 9099})
+    STATE.calls.clear()
+    status, body = proxy.post("/fleet/hosts", {"hosts": [{"address": "nas.lan", "port": 9099}]})
+    assert status == 201 and body["added"] == [] and len(body["skipped"]) == 1
+    assert _option_writes() == []
+
+
+@pytest.mark.parametrize("hosts", [
+    [{"address": "not a host", "port": 9099}],
+    [{"address": "10.0.0.300", "port": 9099}],
+    [{"address": "nas.lan", "port": 70000}],
+    [],
+])
+def test_hosts_add_bad_input(proxy, hosts):
+    status, body = proxy.post("/fleet/hosts", {"hosts": hosts})
+    assert status == 400 and body["error"] == "bad_request"
+    assert _option_writes() == []
+
+
+def test_hosts_supervisor_refuses(proxy):
+    STATE.options_status = 400
+    status, body = proxy.post("/fleet/hosts", {"hosts": [{"address": "nas.lan", "port": 9099}]})
+    assert status == 502
+    assert body == {"error": "supervisor_failed",
+                    "message": "Option 'hosts' does not match the schema"}
+
+
+def test_hosts_without_supervisor(backends):
+    proc, client = _start_proxy([
+        f"--supervisor-url=http://127.0.0.1:{backends[0].server_address[1]}",
+        "--data-dir=",
+    ], "")
+    try:
+        assert client.get("/fleet/hosts")[1]["error"] == "supervisor_unavailable"
+        status, body = client.post("/fleet/hosts", {"hosts": [{"address": "nas.lan", "port": 1}]})
+        assert status == 503 and body["error"] == "supervisor_unavailable"
+    finally:
+        _stop_proxy(proc)
+
+
+def test_patch_password(proxy, field):
+    key = f"127.0.0.3:{field}"
+    _store({"address": "127.0.0.3", "port": field})
+    STATE.calls.clear()
+    status, body = proxy.request("PATCH", f"/fleet/hosts/{quote(key, safe='')}",
+                                 {"password": "wrong-pass"})
+    assert status == 422 and body["error"] == "password_refused"
+    assert _option_writes() == []
+    status, body = proxy.request("PATCH", f"/fleet/hosts/{quote(key, safe='')}",
+                                 {"password": FIELD_PASSWORD})
+    assert status == 200
+    assert body["host"]["has_password"] is True
+    assert FIELD_PASSWORD not in json.dumps(body)
+    assert _option_writes() == [{"options": {**STATE.options}}]
+    assert STATE.options["hosts"] == [{"address": "127.0.0.3", "port": field,
+                                       "password": FIELD_PASSWORD}]
+    # The check sent the password to that agent only, as a bearer token.
+    assert ("GET", "/api/drives", f"Bearer {FIELD_PASSWORD}") in FIELD["127.0.0.3"].requests
+    # An empty string clears it.
+    status, body = proxy.request("PATCH", f"/fleet/hosts/{quote(key, safe='')}", {"password": ""})
+    assert status == 200 and body["host"]["has_password"] is False
+    assert STATE.options["hosts"] == [{"address": "127.0.0.3", "port": field}]
+
+
+def test_patch_password_not_answering(proxy, field):
+    _store({"address": "127.0.0.6", "port": field})
+    status, body = proxy.request("PATCH", f"/fleet/hosts/127.0.0.6:{field}", {"password": "x"})
+    assert status == 504 and body["error"] == "not_answering"
+    assert _option_writes() == []
+
+
+def test_patch_hidden(proxy):
+    _store({"address": "nas.lan", "port": 9099})
+    STATE.calls.clear()
+    status, body = proxy.request("PATCH", "/fleet/hosts/nas.lan%3A9099", {"hidden": True})
+    assert status == 200
+    assert body["host"]["hidden"] is True and body["host"]["hidden_since"].endswith("Z")
+    assert len(_option_writes()) == 1
+    assert STATE.options["hosts"] == [{"address": "nas.lan", "port": 9099, "hidden": True}]
+    assert _refresh_hosts(proxy)[0]["hidden_since"] == body["host"]["hidden_since"]
+    status, body = proxy.request("PATCH", "/fleet/hosts/nas.lan%3A9099", {"hidden": False})
+    assert status == 200 and body["host"]["hidden"] is False
+    assert body["host"]["hidden_since"] is None
+    assert len(_option_writes()) == 2
+
+
+def test_patch_and_delete_unknown(proxy):
+    assert proxy.request("PATCH", "/fleet/hosts/nope:1", {"hidden": True})[0] == 404
+    assert proxy.request("DELETE", "/fleet/hosts/nope:1")[0] == 404
+    assert proxy.request("PATCH", "/fleet/hosts/nope:1", {})[0] == 400
+
+
+def test_delete_host(proxy, field, data_dir):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "ok"
+    cache = json.loads((data_dir / "fleet-cache.json").read_text(encoding="utf-8"))
+    assert key in cache["hosts"]
+    STATE.calls.clear()
+    status, body = proxy.request("DELETE", f"/fleet/hosts/{key}")
+    assert status == 200 and body == {"removed": key}
+    assert len(_option_writes()) == 1 and STATE.options["hosts"] == []
+    cache = json.loads((data_dir / "fleet-cache.json").read_text(encoding="utf-8"))
+    assert key not in cache["hosts"]
+
+
+@needs_rules
+def test_drives_self_uses_app_token(proxy):
+    SELF_AGENT.drives = [simple_drive("sda", "SELF-1", {"Reallocated_Sector_Ct": 4})]
+    status, body = proxy.get("/fleet/hosts/self/drives")
+    assert status == 200
+    assert body["kind"] == "self" and body["status"] == "ok" and body["stale"] is False
+    assert body["agent"]["hostname"] == AGENT_HOST
+    assert body["agent"]["version"] == "0.8.1"
+    assert body["summary"] == {"header": "attention", "attention": 1, "maybe": 0,
+                               "unsupported": 0, "drives": 1, "pools": 0}
+    item = body["items"][0]
+    assert item["type"] == "drive" and item["id"] == "sda"
+    assert item["verdict"]["state"] == "YES"
+    assert item["view"]["rows"][0]["mark"] == "crit"
+    assert "_devstat" not in item["drive"]
+    assert body["pools_status"] == "none"
+    assert ("GET", "/api/drives", f"Bearer {APP_TOKEN}") in SELF_AGENT.requests
+    assert ("GET", "/api/drives/sda", f"Bearer {APP_TOKEN}") in SELF_AGENT.requests
+
+
+@needs_rules
+def test_drives_field_with_password_and_pools(proxy, field):
+    key = f"127.0.0.3:{field}"
+    pools = json.loads((FIXTURES / "pools" / "degraded-faulted.json").read_text(encoding="utf-8"))
+    FIELD["127.0.0.3"].pools = pools[:1]
+    _store({"address": "127.0.0.3", "port": field, "password": FIELD_PASSWORD})
+    _refresh_hosts(proxy)
+    status, body = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert status == 200 and body["status"] == "ok" and body["kind"] == "field"
+    assert body["agent"]["hostname"] == "backup-pi"
+    assert body["pools_status"] == "ok"
+    pool = body["items"][-1]
+    assert pool["type"] == "pool" and pool["id"] == "pool.tank"
+    assert pool["verdict"]["state"] == "YES"
+    assert pool["view"]["layout"] is None and pool["view"]["header"] == "attention"
+    assert body["summary"]["header"] == "attention" and body["summary"]["pools"] == 1
+    assert all(auth == f"Bearer {FIELD_PASSWORD}" for m, p, auth in FIELD["127.0.0.3"].requests
+               if p != "/api/health")
+
+
+@needs_rules
+def test_drives_pools_only_when_advertised(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    status, body = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert status == 200 and body["pools_status"] == "none"
+    assert not any(p == "/api/pools" for _, p, _ in FIELD["127.0.0.2"].requests)
+    assert body["summary"]["header"] == "ok"
+
+
+@needs_rules
+def test_drives_password_needed_and_refused(proxy, field):
+    key = f"127.0.0.3:{field}"
+    _store({"address": "127.0.0.3", "port": field})
+    _refresh_hosts(proxy)
+    status, body = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert status == 200 and body["status"] == "password_needed"
+    assert body["summary"]["header"] == "unknown"
+    _store({"address": "127.0.0.3", "port": field, "password": "wrong-pass"})
+    _refresh_hosts(proxy)
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "password_refused"
+
+
+@needs_rules
+def test_drives_unreachable_serves_cache(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    _, good = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert good["status"] == "ok"
+    FIELD["127.0.0.2"].mode = "broken"
+    status, body = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert status == 200
+    assert body["status"] == "unreachable" and body["stale"] is True
+    assert body["last_answer"] == good["last_answer"]
+    assert [i["id"] for i in body["items"]] == ["sda", "sdb"]
+    assert all(i["stale"] is True for i in body["items"])
+    assert body["summary"]["header"] == "unknown"
+    assert body["agent"]["hostname"] == "office-nuc"
+
+
+def test_drives_unknown_host(proxy):
+    status, body = proxy.get("/fleet/hosts/10.9.9.9:9099/drives")
+    assert status == 404 and body["error"] == "not_found"
+
+
+def _item(state: str | None, kind: str = "drive", vanished: bool = False) -> dict[str, Any]:
+    return {"type": kind, "verdict": {"state": state} if state else None,
+            "view": {"vanished": vanished}}
+
+
+@pytest.mark.parametrize("states,ok,header", [
+    ([_item("YES"), _item("NO")], True, "attention"),
+    ([_item("NO"), _item("NO", "pool")], True, "ok"),
+    ([_item("NO"), _item("YES", "pool")], True, "attention"),
+    ([_item("MAYBE"), _item("NO")], True, "maybe"),
+    ([_item("MAYBE"), _item("YES")], True, "attention"),
+    ([_item("UNSUPPORTED"), _item("NO")], True, "ok"),
+    ([_item("UNSUPPORTED"), _item("UNSUPPORTED")], True, "unknown"),
+    ([], True, "unknown"),
+    ([_item("YES")], False, "unknown"),
+    ([_item("NO"), _item("YES", "pool", vanished=True)], True, "ok"),
+])
+def test_summary_header(mod, states, ok, header):
+    assert mod.summarize(states, ok)["header"] == header
 
 
 # ── /ha/status ──────────────────────────────────────────────────────────────

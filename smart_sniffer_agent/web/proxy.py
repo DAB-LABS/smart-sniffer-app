@@ -43,6 +43,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import ModuleType
 from typing import Any
@@ -85,6 +86,18 @@ def log(message: str) -> None:
 
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class ApiError(Exception):
+    """An error answer: {"error": code, "message": text} with an HTTP status."""
+
+    def __init__(self, status: int, code: str, message: str | None = None,
+                 **extra: Any) -> None:
+        super().__init__(code)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.extra = extra
 
 
 # ── Integration rules ───────────────────────────────────────────────────────
@@ -974,19 +987,472 @@ def agent_call(host: str, port: int, method: str, path: str, *, token: str = "",
         conn.close()
 
 
+# ── Field agents: addresses, probing and the scan ───────────────────────────
+
+SCAN_WORKERS = 64
+SCAN_CONNECT_TIMEOUT = 0.4
+SCAN_READ_TIMEOUT = 1.0
+PROBE_TIMEOUT = 3.0
+SCAN_KEEP_SECONDS = 600  # a finished scan can be read for 10 minutes
+MIN_SCAN_PREFIX = 22  # wider blocks are refused with a suggestion
+LOOKUP_BUDGET = 1.0  # seconds for one reverse or forward name lookup
+RESERVED_HOST_IDS = ("self", "replicas")
+
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+
+
+def valid_address(text: Any) -> str | None:
+    """An IPv4 literal or a host name, lower-cased; None when it is neither."""
+    if not isinstance(text, str):
+        return None
+    text = text.strip().lower()
+    try:
+        return str(ipaddress.IPv4Address(text))
+    except ValueError:
+        pass
+    if re.fullmatch(r"[0-9.]+", text):
+        return None  # looks like an address but is not one
+    return text if _HOSTNAME_RE.match(text) else None
+
+
+def valid_port(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, int) and 1 <= value <= 65535:
+        return value
+    return None
+
+
+def host_id(address: str, port: int) -> str:
+    return f"{address.lower()}:{port}"
+
+
+def _with_budget(func, *args, budget: float = LOOKUP_BUDGET) -> Any:
+    """Run a blocking lookup in a thread; None when it takes longer than the
+    budget or fails."""
+    box: list[Any] = []
+
+    def run() -> None:
+        try:
+            box.append(func(*args))
+        except (OSError, UnicodeError, ValueError):
+            pass
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(budget)
+    return box[0] if box else None
+
+
+def resolve_ipv4(name: str, budget: float = LOOKUP_BUDGET) -> str | None:
+    """The first IPv4 address of a name (or the literal itself)."""
+    try:
+        return str(ipaddress.IPv4Address(name))
+    except ValueError:
+        pass
+    infos = _with_budget(socket.getaddrinfo, name, None, socket.AF_INET, socket.SOCK_STREAM,
+                         budget=budget)
+    for info in infos or []:
+        return str(info[4][0])
+    return None
+
+
+def reverse_name(address: str) -> str | None:
+    """A short host name for an address, within the lookup budget."""
+    found = _with_budget(socket.gethostbyaddr, address)
+    if not found:
+        return None
+    name = str(found[0]).split(".")[0]
+    return name or None
+
+
+def _is_agent_health(reply: AgentReply) -> bool:
+    body = reply.body
+    return (
+        reply.status == 200
+        and isinstance(body, dict)
+        and isinstance(body.get("version"), str)
+        and isinstance(body.get("endpoints"), list)
+        and "/api/drives" in body["endpoints"]
+    )
+
+
+def _wants_password(reply: AgentReply) -> bool:
+    """A 401 with the agent's own body. The real agent leaves /api/health
+    public; the mock agent run with --token does not, and is still an agent."""
+    return reply.status == 401 and isinstance(reply.body, dict) and reply.body.get("error") == "unauthorized"
+
+
+def probe(address: str, port: int, connect_timeout: float, read_timeout: float,
+          connect_to: str | None = None) -> tuple[str, dict[str, Any] | None]:
+    """Is there an agent on address:port? Returns ("ok", scan row),
+    ("not_answering", None) or ("not_an_agent", None). Sends GET /api/health
+    and GET /api/drives only, never with credentials."""
+    target = connect_to or address
+    health = agent_call(target, port, "GET", "/api/health",
+                        connect_timeout=connect_timeout, read_timeout=read_timeout)
+    if health.status is None:
+        return "not_answering", None
+    body: dict[str, Any] = {}
+    if _is_agent_health(health):
+        body = health.body
+        drives = agent_call(target, port, "GET", "/api/drives",
+                            connect_timeout=connect_timeout, read_timeout=read_timeout)
+        if drives.status is None:
+            return "not_answering", None
+        auth = "password" if drives.status == 401 else "open"
+        count = len(drives.body) if drives.status == 200 and isinstance(drives.body, list) else None
+    elif _wants_password(health):
+        auth, count = "password", None
+    else:
+        return "not_an_agent", None
+    if count is None and isinstance(body.get("drives"), int):
+        count = body["drives"]
+    endpoints = body.get("endpoints") if isinstance(body.get("endpoints"), list) else []
+    pools = body.get("pools") if isinstance(body.get("pools"), int) else (
+        0 if body and "/api/pools" not in endpoints else None)
+    hostname = body.get("hostname") if isinstance(body.get("hostname"), str) else None
+    if not hostname:
+        try:
+            ipaddress.IPv4Address(address)
+            hostname = reverse_name(address)
+        except ValueError:
+            hostname = address.split(".")[0]
+    return "ok", {
+        "id": host_id(address, port), "address": address, "port": port,
+        "hostname": hostname or address,
+        "version": body.get("version") if isinstance(body.get("version"), str) else None,
+        "drives": count, "pools": pools, "auth": auth, "added": False,
+    }
+
+
+def parse_block(text: Any) -> ipaddress.IPv4Network:
+    """An IPv4 CIDR block (a bare address is a /32); ApiError 400 otherwise."""
+    if not isinstance(text, str) or not text.strip():
+        raise ApiError(400, "bad_block", "the block must be an IPv4 address or CIDR block")
+    try:
+        net = ipaddress.ip_network(text.strip(), strict=False)
+    except ValueError:
+        raise ApiError(400, "bad_block", "the block must be an IPv4 address or CIDR block") from None
+    if net.version != 4:
+        raise ApiError(400, "bad_block", "only IPv4 blocks can be scanned")
+    return net  # type: ignore[return-value]
+
+
+class Scan:
+    def __init__(self, scan_id: str, block: ipaddress.IPv4Network, port: int) -> None:
+        self.id = scan_id
+        self.block = block
+        self.port = port
+        hosts = list(block.hosts()) if block.prefixlen < 31 else list(block)
+        self.addresses = [str(a) for a in hosts]
+        self.total = len(self.addresses)
+        self.probed = 0
+        self.found: list[dict[str, Any]] = []
+        self.state = "running"
+        self.started_at = utc_now()
+        self.finished_at: str | None = None
+        self.finished_mono: float | None = None
+        self.cancel = threading.Event()
+        self.lock = threading.Lock()
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "scan_id": self.id, "block": str(self.block), "port": self.port,
+                "state": self.state, "probed": self.probed, "total": self.total,
+                "found": [dict(row) for row in self.found],
+                "started_at": self.started_at, "finished_at": self.finished_at,
+            }
+
+    def finish(self, state: str) -> None:
+        with self.lock:
+            if self.state == "running":
+                self.state = state
+                self.finished_at = utc_now()
+                self.finished_mono = time.monotonic()
+
+
+class ScanManager:
+    """One scan at a time; a new one cancels the running one."""
+
+    def __init__(self) -> None:
+        self.scans: dict[str, Scan] = {}
+        self.lock = threading.Lock()
+
+    def _purge(self) -> None:
+        now = time.monotonic()
+        for scan_id, scan in list(self.scans.items()):
+            if scan.finished_mono is not None and now - scan.finished_mono > SCAN_KEEP_SECONDS:
+                del self.scans[scan_id]
+
+    def get(self, scan_id: str) -> Scan | None:
+        with self.lock:
+            self._purge()
+            return self.scans.get(scan_id)
+
+    def start(self, block: ipaddress.IPv4Network, port: int, skip: str | None,
+              stored: list[dict[str, Any]]) -> Scan:
+        scan = Scan(os.urandom(4).hex(), block, port)
+        with self.lock:
+            self._purge()
+            for other in self.scans.values():
+                if other.state == "running":
+                    other.cancel.set()
+                    other.finish("cancelled")
+            self.scans[scan.id] = scan
+        threading.Thread(target=self._run, args=(scan, skip, stored), daemon=True).start()
+        return scan
+
+    def cancel(self, scan_id: str) -> Scan | None:
+        scan = self.get(scan_id)
+        if scan is not None:
+            scan.cancel.set()
+            scan.finish("cancelled")
+        return scan
+
+    def _run(self, scan: Scan, skip: str | None, stored: list[dict[str, Any]]) -> None:
+        added = stored_keys(stored)
+
+        def one(address: str) -> None:
+            if scan.cancel.is_set():
+                return
+            row = None
+            if address != skip:
+                outcome, row = probe(address, scan.port, SCAN_CONNECT_TIMEOUT, SCAN_READ_TIMEOUT)
+                if outcome != "ok":
+                    row = None
+            with scan.lock:
+                if scan.state != "running":
+                    return
+                scan.probed += 1
+                if row is not None:
+                    row["added"] = (row["address"], row["port"]) in added
+                    scan.found.append(row)
+
+        pool = ThreadPoolExecutor(max_workers=SCAN_WORKERS, thread_name_prefix="scan")
+        try:
+            for address in scan.addresses:
+                if scan.cancel.is_set():
+                    break
+                pool.submit(one, address)
+        finally:
+            pool.shutdown(wait=not scan.cancel.is_set(), cancel_futures=scan.cancel.is_set())
+        scan.finish("cancelled" if scan.cancel.is_set() else "done")
+
+
+def stored_keys(stored: list[dict[str, Any]]) -> set[tuple[str, int]]:
+    """(address, port) pairs a scan row is compared with: each stored host's
+    address, and the IPv4 address its name resolves to."""
+    keys: set[tuple[str, int]] = set()
+    for host in stored:
+        address, port = host["address"], host["port"]
+        keys.add((address, port))
+        resolved = resolve_ipv4(address)
+        if resolved:
+            keys.add((resolved, port))
+    return keys
+
+
+# ── Field agents: stored hosts and the last-good cache ──────────────────────
+
+class FleetCache:
+    """/data/fleet-cache.json: per host the last good response, its time,
+    when the host was added and since when it is hidden. Written atomically."""
+
+    def __init__(self, path: str | None) -> None:
+        self.path = path
+        self.lock = threading.Lock()
+        self.hosts: dict[str, dict[str, Any]] = {}
+        self._warned = False
+        if path:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+                hosts = data.get("hosts") if isinstance(data, dict) else None
+                if isinstance(hosts, dict):
+                    self.hosts = {k: v for k, v in hosts.items() if isinstance(v, dict)}
+            except (OSError, ValueError):
+                pass
+
+    def get(self, key: str) -> dict[str, Any]:
+        with self.lock:
+            return dict(self.hosts.get(key) or {})
+
+    def update(self, key: str, **fields: Any) -> None:
+        with self.lock:
+            entry = self.hosts.setdefault(key, {})
+            entry.update(fields)
+            self._save()
+
+    def drop(self, key: str) -> None:
+        with self.lock:
+            if self.hosts.pop(key, None) is not None:
+                self._save()
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        tmp = f"{self.path}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump({"version": 1, "hosts": self.hosts}, handle)
+            os.replace(tmp, self.path)
+        except OSError as err:
+            if not self._warned:
+                log(f"Cannot write {self.path}: {err.strerror or err}; the cache stays in memory")
+                self._warned = True
+
+
+def _normalize_hosts(raw: Any) -> list[dict[str, Any]]:
+    hosts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        address = valid_address(item.get("address"))
+        port = valid_port(item.get("port"))
+        if address is None or port is None or host_id(address, port) in seen:
+            continue
+        seen.add(host_id(address, port))
+        password = item.get("password")
+        hosts.append({
+            "address": address, "port": port,
+            "password": password if isinstance(password, str) else "",
+            "hidden": item.get("hidden") is True,
+        })
+    return hosts
+
+
+def _serialize_host(host: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {"address": host["address"], "port": host["port"]}
+    if host.get("password"):
+        out["password"] = host["password"]
+    if host.get("hidden"):
+        out["hidden"] = True
+    return out
+
+
+class HostStore:
+    """The field agents, kept in the app's options (the source of truth).
+
+    The Supervisor's options call replaces the whole object, so every write
+    takes the process lock, reads the current options, replaces hosts only
+    and posts them back: one write per user action. Writing options does not
+    restart the app."""
+
+    MEMO_SECONDS = 5
+
+    def __init__(self, supervisor: Supervisor) -> None:
+        self.sv = supervisor
+        self.lock = threading.Lock()
+        self.last_known: list[dict[str, Any]] | None = None
+        self._memo_at = 0.0
+
+    def _options(self) -> dict[str, Any]:
+        if not self.sv.available:
+            raise ApiError(503, "supervisor_unavailable", "the Supervisor is not available")
+        status, info = self.sv.call("GET", "/addons/self/info")
+        data = info.get("data") if isinstance(info, dict) else None
+        options = data.get("options") if isinstance(data, dict) else None
+        if status != 200 or not isinstance(options, dict):
+            raise ApiError(502, "supervisor_failed", "could not read the app options")
+        return options
+
+    def hosts(self) -> list[dict[str, Any]]:
+        hosts = _normalize_hosts(self._options().get("hosts"))
+        self.last_known = hosts
+        self._memo_at = time.monotonic()
+        return hosts
+
+    def hosts_quick(self) -> list[dict[str, Any]]:
+        """The stored hosts, read again at most every MEMO_SECONDS; the last
+        known list (or none) when the Supervisor cannot be read."""
+        if self.last_known is not None and time.monotonic() - self._memo_at < self.MEMO_SECONDS:
+            return self.last_known
+        try:
+            return self.hosts()
+        except ApiError:
+            return self.last_known or []
+
+    def find(self, key: str) -> dict[str, Any] | None:
+        return next((h for h in self.hosts_quick() if host_id(h["address"], h["port"]) == key), None)
+
+    def write(self, change) -> list[dict[str, Any]]:
+        """Apply change() to the stored hosts and save them in one options
+        write. change() returning None means nothing to save."""
+        with self.lock:
+            options = self._options()
+            current = _normalize_hosts(options.get("hosts"))
+            hosts = change([dict(h) for h in current])
+            if hosts is None:
+                self.last_known = current
+                self._memo_at = time.monotonic()
+                return current
+            options = {**options, "hosts": [_serialize_host(h) for h in hosts]}
+            status, reply = self.sv.call("POST", "/addons/self/options", {"options": options})
+            if status != 200:
+                message = reply.get("message") if isinstance(reply, dict) else None
+                raise ApiError(502, "supervisor_failed", message or "could not save the app options")
+            self.last_known = hosts
+            self._memo_at = time.monotonic()
+            log(f"Field agents saved ({len(hosts)} stored)")
+            return hosts
+
+
+# ── Reading an agent's drives ───────────────────────────────────────────────
+
+AGENT_HEALTH_TIMEOUT = 3.0
+AGENT_READ_TIMEOUT = 5.0
+DRIVE_READERS = 8
+
+
+def summarize(items: list[dict[str, Any]], ok: bool) -> dict[str, Any]:
+    """The host header (section 2) and the counts behind it."""
+    drives = [i for i in items if i.get("type") == "drive"]
+    pools = [i for i in items if i.get("type") == "pool"]
+    states = [((i.get("verdict") or {}).get("state")) for i in drives]
+    pool_states = [((i.get("verdict") or {}).get("state")) for i in pools
+                   if not (i.get("view") or {}).get("vanished")]
+    attention = states.count("YES") + pool_states.count("YES")
+    maybe = states.count("MAYBE")
+    unsupported = states.count("UNSUPPORTED")
+    judged = any(s in ("YES", "MAYBE", "NO") for s in states + pool_states)
+    if not ok:
+        header = "unknown"
+    elif attention:
+        header = "attention"
+    elif maybe:
+        header = "maybe"
+    elif judged:
+        header = "ok"
+    else:
+        header = "unknown"
+    return {"header": header, "attention": attention, "maybe": maybe,
+            "unsupported": unsupported, "drives": len(drives), "pools": len(pools)}
+
+
+def judge_drive(rules: Rules, drive: dict[str, Any], rules_ok: bool) -> tuple[Any, Any]:
+    if not rules_ok:
+        return None, drive_view(drive, None)
+    work = dict(drive)
+    verdict = rules.evaluate(work)
+    return verdict, drive_view(work, verdict)
+
+
+def judge_pool(rules: Rules, pool: dict[str, Any], lab: dict[str, Any] | None,
+               rules_ok: bool) -> tuple[Any, Any]:
+    verdict = None
+    if rules_ok and rules.pool_health is not None:
+        verdict = pool_verdict(pool, rules)
+    return verdict, pool_view(pool, verdict, lab)
+
+
 # ── Request handler ─────────────────────────────────────────────────────────
-
-class ApiError(Exception):
-    """An error answer: {"error": code, "message": text} with an HTTP status."""
-
-    def __init__(self, status: int, code: str, message: str | None = None,
-                 **extra: Any) -> None:
-        super().__init__(code)
-        self.status = status
-        self.code = code
-        self.message = message
-        self.extra = extra
-
 
 # Path prefixes that belong to the proxy itself: anything under them that no
 # route matches is a JSON 404, never the page.
@@ -1004,12 +1470,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
     mdns_name: str | None = None
     rules: Rules = Rules(DEFAULT_RULES_DIR)
     supervisor: Supervisor = Supervisor("http://supervisor", "")
+    host_store: HostStore = HostStore(supervisor)
+    cache: FleetCache = FleetCache(None)
+    scans: ScanManager = ScanManager()
 
     # The routes answered by the proxy itself: (method, path pattern, handler
     # name). Path parameters are named groups, percent-decoded before use.
     ROUTES: list[tuple[str, str, str]] = [
         ("GET", r"/app/info", "_route_app_info"),
         ("POST", r"/evaluate", "_route_evaluate"),
+        ("POST", r"/fleet/scan", "_route_scan_start"),
+        ("GET", r"/fleet/scan/(?P<scan_id>[^/]+)", "_route_scan_get"),
+        ("DELETE", r"/fleet/scan/(?P<scan_id>[^/]+)", "_route_scan_cancel"),
+        ("POST", r"/fleet/probe", "_route_probe"),
+        ("GET", r"/fleet/hosts", "_route_hosts_list"),
+        ("POST", r"/fleet/hosts", "_route_hosts_add"),
+        ("PATCH", r"/fleet/hosts/(?P<key>[^/]+)", "_route_host_patch"),
+        ("DELETE", r"/fleet/hosts/(?P<key>[^/]+)", "_route_host_delete"),
+        ("GET", r"/fleet/hosts/(?P<key>[^/]+)/drives", "_route_host_drives"),
         ("GET", r"/ha/status", "_route_ha_status"),
         ("POST", r"/ha/connect", "_route_ha_connect"),
         ("POST", r"/ha/disconnect", "_route_ha_disconnect"),
@@ -1198,6 +1676,302 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         verdict = self.rules.evaluate(body)
         self._send_json(200, {**verdict, "view": drive_view(body, verdict)})
+
+    # ── /fleet/scan, /fleet/probe ──
+
+    def _route_scan_start(self, _parsed) -> None:
+        body = self._read_json()
+        if not isinstance(body, dict):
+            raise ApiError(400, "bad_request", "body must be an object")
+        block = parse_block(body.get("block"))
+        port = valid_port(body.get("port", 9099))
+        if port is None:
+            raise ApiError(400, "bad_port", "the port must be 1 to 65535")
+        network = self.supervisor.network()
+        if block.prefixlen < MIN_SCAN_PREFIX:
+            suggest_from = network["address"] if network else str(block.network_address)
+            suggest = ipaddress.ip_network(f"{suggest_from}/24", strict=False)
+            raise ApiError(422, "too_wide", f"blocks wider than /{MIN_SCAN_PREFIX} are not scanned",
+                           addresses=2 ** (32 - block.prefixlen) - 2, suggest=str(suggest))
+        scan = self.scans.start(block, port, network["address"] if network else None,
+                                self.host_store.hosts_quick())
+        log(f"Scan {scan.id}: {block} port {port}, {scan.total} addresses")
+        self._send_json(202, {"scan_id": scan.id, "total": scan.total})
+
+    def _route_scan_get(self, _parsed, scan_id: str) -> None:
+        scan = self.scans.get(scan_id)
+        if scan is None:
+            raise ApiError(404, "not_found", "no such scan, or it has expired")
+        self._send_json(200, scan.snapshot())
+
+    def _route_scan_cancel(self, _parsed, scan_id: str) -> None:
+        if self.scans.cancel(scan_id) is None:
+            raise ApiError(404, "not_found", "no such scan, or it has expired")
+        self._send_json(200, {"state": "cancelled"})
+
+    def _route_probe(self, _parsed) -> None:
+        body = self._read_json()
+        if not isinstance(body, dict):
+            raise ApiError(400, "bad_request", "body must be an object")
+        address = valid_address(body.get("host"))
+        port = valid_port(body.get("port", 9099))
+        if address is None or port is None:
+            raise ApiError(400, "bad_request", "host must be an IPv4 address or a host name, "
+                                               "port 1 to 65535")
+        connect_to = resolve_ipv4(address, budget=PROBE_TIMEOUT)
+        if connect_to is None:
+            raise ApiError(400, "cannot_resolve", f"{address} does not resolve")
+        outcome, row = probe(address, port, PROBE_TIMEOUT, PROBE_TIMEOUT, connect_to=connect_to)
+        if outcome == "not_answering":
+            raise ApiError(504, "not_answering", f"nothing answered on {address}, port {port}")
+        if row is None:
+            raise ApiError(404, "not_an_agent", f"{address}, port {port} is not a SMART Sniffer agent")
+        stored = self.host_store.hosts_quick()
+        keys = {(h["address"], h["port"]) for h in stored}
+        row["added"] = (address, port) in keys or (
+            (connect_to, port) in stored_keys(stored))
+        self._send_json(200, row)
+
+    # ── /fleet/hosts ──
+
+    def _host_object(self, host: dict[str, Any]) -> dict[str, Any]:
+        key = host_id(host["address"], host["port"])
+        cached = self.cache.get(key)
+        return {
+            "id": key, "address": host["address"], "port": host["port"],
+            "has_password": bool(host.get("password")), "hidden": bool(host.get("hidden")),
+            "hidden_since": cached.get("hidden_since") if host.get("hidden") else None,
+            "added_at": cached.get("added_at"),
+        }
+
+    def _route_hosts_list(self, _parsed) -> None:
+        hosts = self.host_store.hosts()
+        self._send_json(200, {"hosts": [self._host_object(h) for h in hosts]})
+
+    def _route_hosts_add(self, _parsed) -> None:
+        body = self._read_json()
+        items = body.get("hosts") if isinstance(body, dict) else None
+        if not isinstance(items, list) or not items:
+            raise ApiError(400, "bad_request", 'give {"hosts": [{"address", "port"}, ...]}')
+        wanted: list[dict[str, Any]] = []
+        for item in items:
+            address = valid_address(item.get("address")) if isinstance(item, dict) else None
+            port = valid_port(item.get("port", 9099)) if isinstance(item, dict) else None
+            if address is None or port is None:
+                raise ApiError(400, "bad_request",
+                               "each host needs an IPv4 address or host name and a port 1 to 65535")
+            wanted.append({"address": address, "port": port, "password": "", "hidden": False})
+
+        added: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+
+        def change(hosts: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+            added.clear()
+            skipped.clear()
+            known = {host_id(h["address"], h["port"]) for h in hosts}
+            for host in wanted:
+                key = host_id(host["address"], host["port"])
+                if key in known:
+                    skipped.append({"address": host["address"], "port": host["port"],
+                                    "reason": "already_added"})
+                    continue
+                known.add(key)
+                added.append(host)
+            return hosts + added if added else None  # nothing new: no write
+
+        self.host_store.write(change)
+        now = utc_now()
+        for host in added:
+            self.cache.update(host_id(host["address"], host["port"]), added_at=now,
+                              hidden_since=None)
+        self._send_json(201, {"added": [self._host_object(h) for h in added], "skipped": skipped})
+
+    def _route_host_patch(self, _parsed, key: str) -> None:
+        body = self._read_json()
+        if not isinstance(body, dict) or not ({"password", "hidden"} & set(body)):
+            raise ApiError(400, "bad_request", 'give "password" and/or "hidden"')
+        password = body.get("password")
+        hidden = body.get("hidden")
+        if "password" in body and not isinstance(password, str):
+            raise ApiError(400, "bad_request", "password must be a string")
+        if "hidden" in body and not isinstance(hidden, bool):
+            raise ApiError(400, "bad_request", "hidden must be true or false")
+        host = next((h for h in self.host_store.hosts()
+                     if host_id(h["address"], h["port"]) == key), None)
+        if host is None:
+            raise ApiError(404, "not_found", "no such field agent")
+        if password:
+            check = agent_call(host["address"], host["port"], "GET", "/api/drives",
+                               token=password, connect_timeout=AGENT_HEALTH_TIMEOUT,
+                               read_timeout=AGENT_READ_TIMEOUT)
+            if check.status is None:
+                raise ApiError(504, "not_answering", "the agent did not answer")
+            if check.status == 401:
+                raise ApiError(422, "password_refused", "the agent refused that password")
+            if check.status != 200:
+                raise ApiError(502, "agent_failed", f"the agent answered HTTP {check.status}")
+
+        def change(hosts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            for item in hosts:
+                if host_id(item["address"], item["port"]) == key:
+                    if "password" in body:
+                        item["password"] = password
+                    if "hidden" in body:
+                        item["hidden"] = hidden
+            return hosts
+
+        hosts = self.host_store.write(change)
+        if "hidden" in body:
+            self.cache.update(key, hidden_since=utc_now() if hidden else None)
+        updated = next((h for h in hosts if host_id(h["address"], h["port"]) == key), None)
+        if updated is None:
+            raise ApiError(404, "not_found", "no such field agent")
+        self._send_json(200, {"host": self._host_object(updated)})
+
+    def _route_host_delete(self, _parsed, key: str) -> None:
+        if not any(host_id(h["address"], h["port"]) == key for h in self.host_store.hosts()):
+            raise ApiError(404, "not_found", "no such field agent")
+        self.host_store.write(
+            lambda hosts: [h for h in hosts if host_id(h["address"], h["port"]) != key])
+        self.cache.drop(key)
+        self._send_json(200, {"removed": key})
+
+    # ── /fleet/hosts/<id>/drives ──
+
+    def _route_host_drives(self, _parsed, key: str) -> None:
+        if key == "self":
+            target = ("self", "127.0.0.1", self.agent_port, self.token)
+        elif key == "replicas":
+            target = ("replicas", "127.0.0.1", self.mock_port, "")
+        else:
+            host = self.host_store.find(key)
+            if host is None:
+                raise ApiError(404, "not_found", "no such field agent")
+            target = ("field", host["address"], host["port"], host.get("password") or "")
+        self._send_json(200, self._read_agent(key, *target))
+
+    def _agent_hostname(self, kind: str, address: str, health: dict[str, Any]) -> str | None:
+        name = health.get("hostname")
+        if isinstance(name, str) and name and kind == "field":
+            return name
+        if kind != "field":
+            return self.agent_host
+        try:
+            ipaddress.IPv4Address(address)
+        except ValueError:
+            return address.split(".")[0]
+        return reverse_name(address) or address
+
+    def _read_agent(self, key: str, kind: str, address: str, port: int, token: str) -> dict[str, Any]:
+        """One read of an agent: health, drive list, each drive, pools; every
+        drive and pool judged. On failure the last good read, marked stale."""
+        def call(path: str, timeout: float = AGENT_READ_TIMEOUT) -> AgentReply:
+            return agent_call(address, port, "GET", path, token=token,
+                              connect_timeout=AGENT_HEALTH_TIMEOUT, read_timeout=timeout)
+
+        health = call("/api/health", AGENT_HEALTH_TIMEOUT)
+        if health.status == 401:
+            return self._stale(key, kind, "password_refused" if token else "password_needed")
+        if not _is_agent_health(health):
+            return self._stale(key, kind, "unreachable")
+        info = health.body
+
+        rules_ok = self.rules.load()
+        lab_drives: dict[str, dict[str, Any]] = {}
+        lab_pools: list[dict[str, Any]] | None = None
+        failed_ids: set[str] = set()
+        if kind == "replicas":
+            state = call("/api/state")
+            if state.status != 200 or not isinstance(state.body, dict):
+                return self._stale(key, kind, "unreachable")
+            drives = [d for d in state.body.get("drives") or [] if isinstance(d, dict)]
+            lab_pools = [p for p in state.body.get("pools") or [] if isinstance(p, dict)]
+            payloads: list[tuple[dict[str, Any], dict[str, Any] | None]] = [
+                ({k: v for k, v in d.items() if k != "lab"}, d.get("lab")) for d in drives]
+            for drive, lab in payloads:
+                lab_drives[str(drive.get("id"))] = lab or {}
+        else:
+            listing = call("/api/drives")
+            if listing.status == 401:
+                return self._stale(key, kind, "password_refused" if token else "password_needed")
+            if listing.status != 200 or not isinstance(listing.body, list):
+                return self._stale(key, kind, "unreachable")
+            summaries = [d for d in listing.body if isinstance(d, dict) and d.get("id")]
+
+            def read_one(summary: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+                reply = call(f"/api/drives/{quote(str(summary['id']), safe='')}")
+                if reply.status == 200 and isinstance(reply.body, dict):
+                    return reply.body, None
+                return summary, None
+
+            with ThreadPoolExecutor(max_workers=DRIVE_READERS) as pool:
+                payloads = list(pool.map(read_one, summaries))
+            # A drive whose read failed is kept as its summary, unjudged.
+            failed_ids = {str(d.get("id")) for d, _ in payloads if "smart_data" not in d}
+
+        items: list[dict[str, Any]] = []
+        for drive, lab in payloads:
+            drive_id = str(drive.get("id"))
+            if kind != "replicas" and drive_id in failed_ids:
+                items.append({"type": "drive", "id": drive_id, "drive": drive, "verdict": None,
+                              "view": None, "lab": None, "error": "not_answering"})
+                continue
+            verdict, view = judge_drive(self.rules, drive, rules_ok)
+            items.append({"type": "drive", "id": drive_id, "drive": drive, "verdict": verdict,
+                          "view": view, "lab": lab if kind == "replicas" else None})
+
+        endpoints = info.get("endpoints") or []
+        pools_status = "none"
+        pool_list: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        if lab_pools is not None:
+            pools_status = "ok"
+            pool_list = [({k: v for k, v in p.items() if k != "lab"}, p.get("lab")) for p in lab_pools]
+        elif "/api/pools" in endpoints:
+            reply = call("/api/pools")
+            if reply.status == 200 and isinstance(reply.body, list):
+                pools_status = "ok"
+                pool_list = [(p, None) for p in reply.body if isinstance(p, dict) and p.get("name")]
+            else:
+                pools_status = "failed"
+        for pool_payload, lab in pool_list:
+            verdict, view = judge_pool(self.rules, pool_payload, lab, rules_ok)
+            items.append({"type": "pool", "id": f"pool.{pool_payload.get('name')}",
+                          "pool": pool_payload, "verdict": verdict, "view": view, "lab": lab})
+
+        now = utc_now()
+        response = {
+            "id": key, "kind": kind, "status": "ok", "read_at": now, "last_answer": now,
+            "agent": {
+                "hostname": self._agent_hostname(kind, address, info),
+                "version": info.get("version"), "os": info.get("os"),
+                "os_name": info.get("os_name"), "uptime_seconds": info.get("uptime_seconds"),
+                "drives": sum(1 for i in items if i["type"] == "drive"),
+                "pools": sum(1 for i in items if i["type"] == "pool"),
+            },
+            "summary": summarize(items, True),
+            "items": items,
+            "pools_status": pools_status,
+            "rules_version": self.rules.version if rules_ok else None,
+            "stale": False,
+        }
+        self.cache.update(key, response=response, last_answer=now)
+        return response
+
+    def _stale(self, key: str, kind: str, status: str) -> dict[str, Any]:
+        """The last good read of a host that did not answer as it should."""
+        cached = self.cache.get(key)
+        last = cached.get("response") if isinstance(cached.get("response"), dict) else {}
+        items = [{**item, "stale": True} for item in last.get("items") or []]
+        return {
+            "id": key, "kind": kind, "status": status, "read_at": utc_now(),
+            "last_answer": cached.get("last_answer"),
+            "agent": last.get("agent"),
+            "summary": summarize(items, False),
+            "items": items,
+            "pools_status": last.get("pools_status"),
+            "rules_version": last.get("rules_version") or self.rules.version,
+            "stale": True,
+        }
 
     # ── /ha/status ──
 
@@ -1556,6 +2330,8 @@ def main():
                              "(run.sh passes the container hostname)")
     parser.add_argument("--mdns-name", type=str, default="",
                         help="The agent's mDNS name, shown on the page (empty: none)")
+    parser.add_argument("--data-dir", type=str, default="/data",
+                        help="Where fleet-cache.json is kept (empty: memory only)")
     args = parser.parse_args()
 
     ProxyHandler.agent_port = args.agent_port
@@ -1567,6 +2343,10 @@ def main():
     ProxyHandler.rules = Rules(args.rules_dir)
     ProxyHandler.supervisor = Supervisor(
         args.supervisor_url, os.environ.get("SUPERVISOR_TOKEN", "")
+    )
+    ProxyHandler.host_store = HostStore(ProxyHandler.supervisor)
+    ProxyHandler.cache = FleetCache(
+        os.path.join(args.data_dir, "fleet-cache.json") if args.data_dir else None
     )
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), ProxyHandler)
