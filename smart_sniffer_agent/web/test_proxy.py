@@ -118,6 +118,13 @@ class FakeState:
             "mock_port": 9100, "hosts": [],
         }
         self.options_status = 200  # 400 makes the Supervisor refuse a write
+        # The schema as the Supervisor's app info reports it (its UI form);
+        # None when it reports none.
+        self.schema: list[dict[str, Any]] | None = [
+            {"name": "port", "type": "integer"}, {"name": "token", "type": "string"},
+            {"name": "scan_interval", "type": "integer"}, {"name": "mock_port", "type": "integer"},
+            {"name": "hosts", "type": "schema", "multiple": True},
+        ]
         self.network: dict[str, Any] = {"interfaces": [
             {"interface": "lo0", "primary": False, "connected": True,
              "ipv4": {"address": ["192.168.99.2/24"]}},
@@ -162,6 +169,7 @@ class FakeSupervisor(BaseHTTPRequestHandler):
         if path == "/addons/self/info" and method == "GET":
             _json_reply(self, 200, {"result": "ok", "data": {
                 "slug": SLUG, "hostname": AGENT_HOST, "options": STATE.options,
+                "schema": STATE.schema,
             }})
             return
         if path == "/addons/self/options" and method == "POST":
@@ -1411,6 +1419,48 @@ def test_hosts_add_bad_input(proxy, hosts):
     status, body = proxy.post("/fleet/hosts", {"hosts": hosts})
     assert status == 400 and body["error"] == "bad_request"
     assert _option_writes() == []
+
+
+def _wait_for(check, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not check():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.05)
+
+
+@pytest.mark.parametrize("schema", ["reported", "not_reported"])
+def test_start_removes_options_the_schema_no_longer_has(backends, schema):
+    # A 0.2.x install keeps mock_mode after the update until the options are
+    # written; the proxy writes them once at start without it.
+    hosts = [{"address": "nas.lan", "port": 9099, "password": FIELD_PASSWORD}]
+    STATE.options = {**STATE.options, "mock_mode": True, "future": 1, "hosts": hosts}
+    expected = {"port": 9099, "token": "", "scan_interval": 60, "mock_port": 9100, "hosts": hosts}
+    if schema == "not_reported":
+        # Without the schema only the known old option goes.
+        STATE.schema = None
+        expected["future"] = 1
+    proc, _ = _fresh_proxy(backends[0])
+    try:
+        _wait_for(lambda: _option_writes())
+        time.sleep(0.3)
+    finally:
+        output = _stop_proxy(proc)
+    assert _option_writes() == [{"options": expected}]
+    assert STATE.options == expected
+    removed = [line for line in output.splitlines() if "Removed the old option" in line]
+    assert len(removed) == 1 and "mock_mode" in removed[0]
+    assert FIELD_PASSWORD not in output
+
+
+def test_start_writes_nothing_when_the_options_are_current(backends):
+    proc, _ = _fresh_proxy(backends[0])
+    try:
+        _wait_for(lambda: any(c[1] == "/addons/self/info" for c in STATE.calls))
+        time.sleep(0.3)
+    finally:
+        output = _stop_proxy(proc)
+    assert _option_writes() == []
+    assert "Removed the old option" not in output
 
 
 def test_hosts_supervisor_refuses(proxy):

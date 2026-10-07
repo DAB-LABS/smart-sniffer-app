@@ -1512,6 +1512,32 @@ def _serialize_host(host: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# Options of older versions, removed at start when the Supervisor does not
+# report the schema to compare with.
+REMOVED_OPTIONS = ("mock_mode",)
+
+
+def _schema_names(schema: Any) -> set[str]:
+    """Top-level option names from the Supervisor's schema: a list of
+    {"name": ...} (its UI form) or a mapping. Empty when unknown."""
+    if isinstance(schema, dict):
+        return {str(k) for k in schema}
+    if isinstance(schema, list):
+        return {str(item["name"]) for item in schema if isinstance(item, dict) and item.get("name")}
+    return set()
+
+
+def drop_stale_options(store: HostStore) -> None:
+    """Run once at start: remove options left from an older version."""
+    try:
+        stale = store.drop_stale_options()
+    except ApiError as err:
+        log(f"Could not check the app options for old settings: {err.message or err.code}")
+        return
+    if stale:
+        log(f"Removed the old option{'s' if len(stale) > 1 else ''} {', '.join(stale)} from the app options")
+
+
 class HostStore:
     """The field agents, kept in the app's options (the source of truth).
 
@@ -1528,7 +1554,8 @@ class HostStore:
         self.last_known: list[dict[str, Any]] | None = None
         self._memo_at = 0.0
 
-    def _options(self) -> dict[str, Any]:
+    def _info(self) -> dict[str, Any]:
+        """The Supervisor's info on this app, with its options."""
         if not self.sv.available:
             raise ApiError(503, "supervisor_unavailable", "the Supervisor is not available")
         status, info = self.sv.call("GET", "/addons/self/info")
@@ -1536,7 +1563,34 @@ class HostStore:
         options = data.get("options") if isinstance(data, dict) else None
         if status != 200 or not isinstance(options, dict):
             raise ApiError(502, "supervisor_failed", "could not read the app options")
-        return options
+        return data  # type: ignore[return-value]
+
+    def _options(self) -> dict[str, Any]:
+        return self._info()["options"]
+
+    def _save(self, options: dict[str, Any]) -> None:
+        """Replace the whole options object; the caller holds the lock."""
+        status, reply = self.sv.call("POST", "/addons/self/options", {"options": options})
+        if status != 200:
+            message = reply.get("message") if isinstance(reply, dict) else None
+            raise ApiError(502, "supervisor_failed", message or "could not save the app options")
+
+    def drop_stale_options(self) -> list[str]:
+        """Remove the options the app's schema no longer has, such as
+        mock_mode from 0.2.x, in one write under the same lock as the field
+        agent writes. The Supervisor keeps such an option after an update
+        until the options are next written, and warns about it on every
+        check. Without a schema from the Supervisor only REMOVED_OPTIONS go.
+        Returns the names removed."""
+        with self.lock:
+            data = self._info()
+            options = data["options"]
+            names = _schema_names(data.get("schema"))
+            stale = [key for key in options
+                     if (key not in names if names else key in REMOVED_OPTIONS)]
+            if stale:
+                self._save({k: v for k, v in options.items() if k not in stale})
+            return stale
 
     def hosts(self) -> list[dict[str, Any]]:
         hosts = _normalize_hosts(self._options().get("hosts"))
@@ -1568,11 +1622,7 @@ class HostStore:
                 self.last_known = current
                 self._memo_at = time.monotonic()
                 return current
-            options = {**options, "hosts": [_serialize_host(h) for h in hosts]}
-            status, reply = self.sv.call("POST", "/addons/self/options", {"options": options})
-            if status != 200:
-                message = reply.get("message") if isinstance(reply, dict) else None
-                raise ApiError(502, "supervisor_failed", message or "could not save the app options")
+            self._save({**options, "hosts": [_serialize_host(h) for h in hosts]})
             self.last_known = hosts
             self._memo_at = time.monotonic()
             log(f"Field agents saved ({len(hosts)} stored)")
@@ -2688,6 +2738,9 @@ def main():
     log(f"Agent host for the integration: {ProxyHandler.agent_host}")
     if not ProxyHandler.supervisor.available:
         log("No Supervisor token: field agents cannot be stored and Home Assistant routes are off")
+    else:
+        threading.Thread(target=drop_stale_options, args=(ProxyHandler.host_store,),
+                         daemon=True).start()
 
     try:
         server.serve_forever()
