@@ -4,3 +4,4 @@ web/test_proxy.py
 **/*.pyc
 .pytest_cache
 web/devserver.py
+web/test_page.py
