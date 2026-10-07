@@ -650,6 +650,25 @@ def _stats(smart: dict[str, Any]) -> dict[str, int | None]:
         hours = _int(log_.get("power_on_hours"))
     if cycles is None:
         cycles = _int(log_.get("power_cycles"))
+    # The integration reads these from the ATA table first; a payload with no
+    # top-level fields (a store written by an older mock) still has them there.
+    table = (smart.get("ata_smart_attributes") or {}).get("table") or []
+    by_id = {a.get("id"): a for a in table if isinstance(a, dict)}
+
+    def _raw(*ids: int) -> int | None:
+        for attr_id in ids:
+            raw = (by_id.get(attr_id) or {}).get("raw") or {}
+            match = re.match(r"\s*(\d+)", str(raw.get("string", "")))
+            if match:
+                return int(match.group(1))
+        return None
+
+    if temp is None:
+        temp = _raw(194, 190)
+    if hours is None:
+        hours = _raw(9)
+    if cycles is None:
+        cycles = _raw(12)
     return {"temp_c": temp, "power_on_hours": hours, "power_cycles": cycles}
 
 

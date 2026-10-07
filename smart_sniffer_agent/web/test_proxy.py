@@ -1938,3 +1938,10 @@ def test_reverse_name_ignores_an_address_answer(mod, monkeypatch):
     assert mod.reverse_name("10.0.10.12") is None
     monkeypatch.setattr(mod.socket, "gethostbyaddr", lambda a: ("nas.lan", [], [a]))
     assert mod.reverse_name("10.0.10.12") == "nas"
+
+
+def test_stats_from_the_ata_table_when_top_level_is_missing(mod):
+    attr = lambda i, raw: {"id": i, "raw": {"value": 0, "string": raw}}  # noqa: E731
+    smart = {"ata_smart_attributes": {"table": [
+        attr(194, "36 (Min/Max 20/52)"), attr(9, "18240"), attr(12, "212")]}}
+    assert mod._stats(smart) == {"temp_c": 36, "power_on_hours": 18240, "power_cycles": 212}
