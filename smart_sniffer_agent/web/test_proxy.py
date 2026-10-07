@@ -816,7 +816,7 @@ def test_every_fixture_reason_maps_to_a_row(mod):
         "NVMe media errors: 3 (expected 0)",
         "NVMe available spare (5%) at or below drive threshold (10%)",
         "NVMe available spare low: 15% remaining",
-        "NVMe drive wear at 92% of rated life — consider scheduling replacement",
+        "NVMe drive wear at 92% of rated life \u2014 consider scheduling replacement",
         "SSD wear at 95% of rated life -- consider scheduling replacement",
         "SSD wear at 95% of rated life -- consider scheduling replacement (from device statistics)",
         "Command Timeout: 120 (threshold 100)",
