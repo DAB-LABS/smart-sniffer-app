@@ -1923,6 +1923,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not _is_agent_health(health):
             return self._stale(key, kind, "unreachable")
         info = health.body
+        password_status = "password_refused" if token else "password_needed"
 
         rules_ok = self.rules.load()
         lab_drives: dict[str, dict[str, Any]] = {}
@@ -1941,7 +1942,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         else:
             listing = call("/api/drives")
             if listing.status == 401:
-                return self._stale(key, kind, "password_refused" if token else "password_needed")
+                # The agent answered its health: the pending card (board 3.6)
+                # shows its version and drive count from it.
+                return self._stale(key, kind, password_status, live=info, address=address)
             if listing.status != 200 or not isinstance(listing.body, list):
                 return self._stale(key, kind, "unreachable")
             summaries = [d for d in listing.body if isinstance(d, dict) and d.get("id")]
@@ -1989,13 +1992,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         now = utc_now()
         response = {
             "id": key, "kind": kind, "status": "ok", "read_at": now, "last_answer": now,
-            "agent": {
-                "hostname": self._agent_hostname(kind, address, info),
-                "version": info.get("version"), "os": info.get("os"),
-                "os_name": info.get("os_name"), "uptime_seconds": info.get("uptime_seconds"),
-                "drives": sum(1 for i in items if i["type"] == "drive"),
-                "pools": sum(1 for i in items if i["type"] == "pool"),
-            },
+            "agent": self._agent_info(kind, address, info,
+                                      sum(1 for i in items if i["type"] == "drive"),
+                                      sum(1 for i in items if i["type"] == "pool")),
             "summary": summarize(items, True),
             "items": items,
             "pools_status": pools_status,
@@ -2005,15 +2004,33 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.cache.update(key, response=response, last_answer=now)
         return response
 
-    def _stale(self, key: str, kind: str, status: str) -> dict[str, Any]:
-        """The last good read of a host that did not answer as it should."""
+    def _agent_info(self, kind: str, address: str, info: dict[str, Any],
+                    drives: Any, pools: Any) -> dict[str, Any]:
+        """The response's agent block, from the agent's health answer."""
+        return {
+            "hostname": self._agent_hostname(kind, address, info),
+            "version": info.get("version"), "os": info.get("os"),
+            "os_name": info.get("os_name"), "uptime_seconds": info.get("uptime_seconds"),
+            "drives": drives, "pools": pools,
+        }
+
+    def _stale(self, key: str, kind: str, status: str, live: dict[str, Any] | None = None,
+               address: str = "") -> dict[str, Any]:
+        """The last good read of a host that did not answer as it should.
+        live: the health answer of an agent that wants a password; the agent
+        block then comes from it (drive and pool counts as health gives them)."""
         cached = self.cache.get(key)
         last = cached.get("response") if isinstance(cached.get("response"), dict) else {}
         items = [{**item, "stale": True} for item in last.get("items") or []]
+        agent = last.get("agent")
+        if live is not None:
+            counts = [live.get(k) if isinstance(live.get(k), int) and not isinstance(live.get(k), bool)
+                      else (agent or {}).get(k) for k in ("drives", "pools")]
+            agent = self._agent_info(kind, address, live, *counts)
         return {
             "id": key, "kind": kind, "status": status, "read_at": utc_now(),
             "last_answer": cached.get("last_answer"),
-            "agent": last.get("agent"),
+            "agent": agent,
             "summary": summarize(items, False),
             "items": items,
             "pools_status": last.get("pools_status"),

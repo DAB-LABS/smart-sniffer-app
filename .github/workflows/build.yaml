@@ -104,8 +104,8 @@ jobs:
 
       - name: Check Python syntax
         run: |
-          python3 -m py_compile ${{ env.SLUG }}/mock-agent.py
-          echo "mock-agent.py syntax OK"
+          python3 -m py_compile ${{ env.SLUG }}/web/proxy.py
+          echo "proxy.py syntax OK"
 
       - name: Check Dockerfile
         uses: hadolint/hadolint-action@v3.1.0

@@ -46,9 +46,31 @@ PROXY = Path(__file__).resolve().parent / "proxy.py"
 _SIBLING = Path(__file__).resolve().parents[3] / "smart-sniffer" / "custom_components"
 RULES_DIR = Path(os.environ.get("SS_RULES_DIR", _SIBLING))
 FIXTURES = Path(os.environ.get("SS_FIXTURES", RULES_DIR.parent / "tests" / "fixtures"))
-# The replica agent: SS_MOCK, else the rules checkout's tools/mock-agent.py.
-# The replica tests are skipped when that mock has no replica files.
-MOCK_AGENT = Path(os.environ.get("SS_MOCK", RULES_DIR.parent / "tools" / "mock-agent.py"))
+# The replica agent: SS_MOCK, else the rules checkout's tools/mock-agent.py,
+# else the first smart-sniffer checkout beside this one whose mock serves
+# replica files. The replica tests are skipped when none is found.
+
+
+def _find_mock() -> Path:
+    if os.environ.get("SS_MOCK"):
+        return Path(os.environ["SS_MOCK"])
+    candidates = [RULES_DIR.parent / "tools" / "mock-agent.py"]
+    candidates += sorted(Path(__file__).resolve().parents[3].glob("*/tools/mock-agent.py"))
+    for candidate in candidates:
+        if _serves_replicas(candidate):
+            return candidate
+    return candidates[0]
+
+
+def _serves_replicas(mock: Path) -> bool:
+    try:
+        text = mock.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "--user-replicas" in text and (mock.parent / "replicas").is_dir()
+
+
+MOCK_AGENT = _find_mock()
 TOKEN = "test-supervisor-token"
 # The app installed as a local app: run.sh passes the container hostname and
 # the Supervisor reports the slug.
@@ -60,11 +82,7 @@ MDNS_NAME = "smartha-homeassistant"
 HA_VERSION = "2026.7.2"
 
 def _mock_has_replicas() -> bool:
-    try:
-        text = MOCK_AGENT.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return "--user-replicas" in text and (MOCK_AGENT.parent / "replicas").is_dir()
+    return _serves_replicas(MOCK_AGENT)
 
 
 needs_mock = pytest.mark.skipif(
@@ -708,6 +726,44 @@ def test_view_unsupported(mod):
         ("reallocated", "not known", "unk"), ("pending", "not known", "unk")]
 
 
+def _board_drive(state: str) -> dict[str, Any]:
+    if state == "2.1":
+        return _drive("nvme_healthy")
+    if state == "2.3":
+        return {"id": "sdz", "model": "QEMU HARDDISK", "protocol": "ATA", "smart_data": {}}
+    attrs = {"2.2": {"Reallocated_Sector_Ct": 24, "Current_Pending_Sector": 3,
+                     "Offline_Uncorrectable": 0, "Reported_Uncorrect": 0, "Command_Timeout": 0},
+             "3.1": {"Reallocated_Sector_Ct": 0, "Current_Pending_Sector": 0,
+                     "Reallocated_Event_Count": 1},
+             "3.10": {"Reallocated_Sector_Ct": 0, "Offline_Uncorrectable": 8},
+             "3.12": {"Reallocated_Sector_Ct": 0, "Current_Pending_Sector": 2}}[state]
+    return _ata_drive(attrs)
+
+
+@needs_rules
+@pytest.mark.parametrize("board,header,marks", [
+    ("2.1", "ok", {"critical_warning": None, "media_errors": None, "available_spare": None,
+                   "wear": None}),
+    ("2.2", "attention", {"reallocated": "crit", "pending": "crit", "offline_unc": None,
+                          "reported_unc": None, "cmd_timeout": None}),
+    ("2.3", "unknown", {"reallocated": "unk", "pending": "unk"}),
+    ("3.1", "maybe", {"reallocated": None, "pending": None, "realloc_events": "warn"}),
+    ("3.10", "attention", {"reallocated": None, "offline_unc": "crit"}),
+    ("3.12", "attention", {"reallocated": None, "pending": "crit"}),
+])
+def test_view_board_states(mod, board, header, marks):
+    """The header word and every row mark of the drives drawn in board parts
+    2 and 3, with "expected 0" inline on each marked counter."""
+    _, view = _view(mod, _board_drive(board))
+    assert view["header"] == header
+    assert {row["key"]: row["mark"] for row in view["rows"]} == marks
+    for row in view["rows"]:
+        if row["mark"] in ("crit", "warn"):
+            assert row["expect"] == "expected 0", row
+        else:
+            assert row["expect"] is None, row
+
+
 def test_view_without_verdict(mod):
     view = mod.drive_view(_ata_drive({"Reallocated_Sector_Ct": 5}), None)
     assert view["header"] == "unknown"
@@ -760,7 +816,7 @@ def test_every_fixture_reason_maps_to_a_row(mod):
         "NVMe media errors: 3 (expected 0)",
         "NVMe available spare (5%) at or below drive threshold (10%)",
         "NVMe available spare low: 15% remaining",
-        "NVMe drive wear at 92% of rated life — consider scheduling replacement",
+        "NVMe drive wear at 92% of rated life \u2014 consider scheduling replacement",
         "SSD wear at 95% of rated life -- consider scheduling replacement",
         "SSD wear at 95% of rated life -- consider scheduling replacement (from device statistics)",
         "Command Timeout: 120 (threshold 100)",
@@ -1413,6 +1469,11 @@ def test_drives_password_needed_and_refused(proxy, field):
     status, body = proxy.get(f"/fleet/hosts/{key}/drives")
     assert status == 200 and body["status"] == "password_needed"
     assert body["summary"]["header"] == "unknown"
+    # The pending card (board 3.6): version and drive count from the health
+    # answer; rows only from an earlier good read, marked stale.
+    assert body["agent"]["hostname"] == "backup-pi"
+    assert body["agent"]["version"] == "0.8.1" and body["agent"]["drives"] == 1
+    assert all(item["stale"] is True for item in body["items"])
     _store({"address": "127.0.0.3", "port": field, "password": "wrong-pass"})
     _refresh_hosts(proxy)
     assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "password_refused"

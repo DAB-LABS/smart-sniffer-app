@@ -21,13 +21,21 @@
 ## Integration-Side Changes (see also smart-sniffer repo)
 - [ ] Mask mDNS hostname in discovery dialog with friendly name ("Found HAOS Drive")
 - [ ] Mask 172.30.33.x IP with "Local" or "This system" in UI
-- [ ] Auto-detect mock agent in "Add Device" config flow (check 172.30.33.1:9100)
-- [ ] Guided mock setup flow ("Mock Test Lab detected — add it?")
+- [x] ~~Auto-detect mock agent in "Add Device" config flow (check 172.30.33.1:9100)~~ Not needed since 0.3.0: the replica agent never advertises itself, and the Control Center adds it to the integration.
+- [x] ~~Guided mock setup flow ("Mock Test Lab detected, add it?")~~ Replaced in 0.3.0 by the exit glyph on each replica card.
 
 ## Web UI
-- [ ] Show mock agent IP/port when mock mode is enabled
-- [ ] Add drive detail expand/collapse
-- [ ] Mobile-responsive layout improvements
+- [x] ~~Show mock agent IP/port when mock mode is enabled~~ No mock mode since 0.3.0; the replica agent always runs.
+- [x] Add drive detail expand/collapse: done in 0.3.0 (the Field report on each card, expandable rows on field agent cards).
+- [x] Mobile-responsive layout improvements: done in 0.3.0 (one column below 760 px).
+- [x] Field agents, the network scan and replicas as files: done in 0.3.0.
+- [ ] A native dashboard card for the Control Center. Today a Webpage card can show the page, but its ingress session expires.
+- [ ] Remove a field agent from the page. Today it is removed in the app's Configuration tab; the proxy route exists.
+
+## Agent (see the smart-sniffer repo)
+- [ ] Report the machine's `hostname` in `/api/health`. The Control Center uses a reverse DNS lookup until then, else the address.
+- [ ] Report an `os_name` in `/api/health` (for example "Proxmox VE 8.2"), shown on field agent cards when present. Today the agent sends only `os` ("linux").
+- [ ] Report each ZFS pool's layout and full vdev tree in `/api/pools`, not only the problem vdevs, so field agent cards can show every disk as replicas do.
 
 ## Done (v0.2.x)
 - [x] CI/CD pipeline — GitHub Actions builds amd64, aarch64, armv7

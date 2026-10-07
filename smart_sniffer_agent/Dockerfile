@@ -11,19 +11,14 @@ FROM ghcr.io/home-assistant/base:3.24-2026.08.0
 
 # Install runtime dependencies
 # - smartmontools: smartctl for reading SMART data from host drives
-# - python3: mock agent and web UI proxy server
-# - py3-pip: for installing Python packages (zeroconf)
-# - curl: downloading the Go agent binary from GitHub releases
+# - python3: the replica agent and the web UI proxy server
+# - curl: downloading the Go agent binary and the smart-sniffer tarball
+# The replica agent runs with --no-mdns, so it needs no zeroconf package.
 RUN apk add --no-cache \
     smartmontools \
     python3 \
-    py3-pip \
     curl \
     libc6-compat
-
-# Install Python packages needed by the mock agent
-# - zeroconf: mDNS advertisement so mock drives appear in HA autodiscovery
-RUN pip3 install --no-cache-dir --break-system-packages zeroconf
 
 # Download the Go agent binary from GitHub releases.
 # Architecture is detected from the running container via uname -m, which works
@@ -41,32 +36,47 @@ RUN ARCH=$(uname -m) && \
     curl -fSL -o /usr/bin/smartha-agent "${RELEASE_URL}" && \
     chmod +x /usr/bin/smartha-agent
 
-# The integration's Attention rules and the mock agent, from the smart-sniffer
-# release this app version is built against. The proxy runs the rules for the
-# Control Center's verdict (/evaluate); the mock is the Test Lab. SS_TAG is
-# bumped with each app release.
+# The integration's rule modules, the replica agent and the shipped replica
+# files, all from the smart-sniffer tag this app version is built against
+# (or, while testing, a branch). The proxy runs the rules for the Control
+# Center's verdicts; the replica agent serves the replicas. SS_TAG is bumped
+# with each app release. SS_TARBALL can point a local build at another copy.
 #
-# attention.py, devstat.py and extract.py import nothing from Home Assistant.
-# They go in custom_components/smart_sniffer/ with no package __init__.py of
-# their own; the proxy registers that package itself so their relative imports
-# resolve without the integration's __init__ (which needs Home Assistant).
-ARG SS_TAG=v0.8.0
-RUN SS_RAW="https://raw.githubusercontent.com/DAB-LABS/smart-sniffer/${SS_TAG}" && \
-    RULES_DIR=/opt/ssrules/custom_components && \
-    mkdir -p "${RULES_DIR}/smart_sniffer" && \
-    : > "${RULES_DIR}/__init__.py" && \
-    for f in attention.py devstat.py extract.py; do \
-      echo "Downloading ${f} from smart-sniffer ${SS_TAG}" && \
-      curl -fSL -o "${RULES_DIR}/smart_sniffer/${f}" \
-        "${SS_RAW}/custom_components/smart_sniffer/${f}" || exit 1; \
-    done && \
-    echo "${SS_TAG}" > /opt/ssrules/VERSION && \
-    echo "Downloading mock-agent.py from smart-sniffer ${SS_TAG}" && \
-    curl -fSL -o /opt/mock-agent.py "${SS_RAW}/tools/mock-agent.py" && \
-    python3 -m py_compile /opt/mock-agent.py \
-      "${RULES_DIR}/smart_sniffer/attention.py" \
-      "${RULES_DIR}/smart_sniffer/devstat.py" \
-      "${RULES_DIR}/smart_sniffer/extract.py"
+# attention.py, devstat.py, extract.py, pool_health.py and const.py import
+# nothing from Home Assistant. They go in custom_components/smart_sniffer/
+# with no package __init__.py of their own; the proxy registers that package
+# itself so their relative imports resolve without the integration's
+# __init__ (which needs Home Assistant). Only the files directly in
+# tools/replicas are shipped, not tools/replicas/extra.
+ARG SS_TAG=replica-files
+ARG SS_TARBALL=https://github.com/DAB-LABS/smart-sniffer/archive/${SS_TAG}.tar.gz
+RUN set -e; \
+    SRC=/tmp/smart-sniffer; \
+    RULES_DIR=/opt/ssrules/custom_components; \
+    echo "Downloading smart-sniffer ${SS_TAG} from ${SS_TARBALL}"; \
+    mkdir -p "${SRC}" "${RULES_DIR}/smart_sniffer" /opt/replicas; \
+    curl -fSL -o /tmp/smart-sniffer.tar.gz "${SS_TARBALL}"; \
+    tar -xzf /tmp/smart-sniffer.tar.gz -C "${SRC}" --strip-components=1; \
+    : > "${RULES_DIR}/__init__.py"; \
+    for f in attention devstat extract pool_health const; do \
+      cp "${SRC}/custom_components/smart_sniffer/${f}.py" "${RULES_DIR}/smart_sniffer/"; \
+    done; \
+    cp "${SRC}/tools/mock-agent.py" /opt/mock-agent.py; \
+    cp "${SRC}"/tools/replicas/*.json /opt/replicas/; \
+    rm -rf "${SRC}" /tmp/smart-sniffer.tar.gz; \
+    echo "${SS_TAG}" > /opt/ssrules/VERSION; \
+    python3 -m py_compile /opt/mock-agent.py "${RULES_DIR}"/smart_sniffer/*.py; \
+    loaded=0; \
+    for f in /opt/replicas/*.json; do \
+      [ "$(basename "${f}")" = "scenarios.json" ] && continue; \
+      if python3 -c 'import json, sys; doc = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(doc.get("format") != "smart-sniffer-replica")' "${f}"; then \
+        loaded=$((loaded + 1)); \
+      else \
+        echo "Not a replica file: ${f}"; \
+      fi; \
+    done; \
+    echo "Replica files: ${loaded}"; \
+    [ "${loaded}" -ge 6 ] || { echo "Fewer than six replica files load"; exit 1; }
 
 # Copy the web UI
 COPY web/ /opt/web/
