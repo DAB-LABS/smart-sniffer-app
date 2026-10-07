@@ -1552,6 +1552,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
     scans: ScanManager = ScanManager()
     ha_cache_seconds: float = HA_API_CACHE_SECONDS
     _ha_cache: tuple[float, dict[str, Any]] | None = None
+    # Entry ids whose diagnostics failed; kept for the process life.
+    _diagnostics_failed: set[str] = set()
 
     # The routes answered by the proxy itself: (method, path pattern, handler
     # name). Path parameters are named groups, percent-decoded before use.
@@ -2213,14 +2215,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
             pass
         return hosts
 
-    def _entry_config(self, entry_id: Any) -> dict[str, Any] | None:
-        """host and port from an entry's diagnostics, or None."""
+    def _entry_config(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """host and port from an entry's diagnostics, or None.
+
+        Only a loaded entry has diagnostics: Core answers 500 for one that
+        never set up (setup_retry), so those are not asked. An entry whose
+        diagnostics failed once is not asked again while the proxy runs, so
+        a refresh does not fill Core's log."""
+        entry_id = entry.get("entry_id")
         if not isinstance(entry_id, str) or not entry_id:
+            return None
+        if entry.get("state") != "loaded" or entry_id in self._diagnostics_failed:
             return None
         status, diag = self.supervisor.core(
             "GET", f"/diagnostics/config_entry/{quote(entry_id, safe='')}"
         )
         if status != 200 or not isinstance(diag, dict):
+            self._diagnostics_failed.add(entry_id)
+            log(f"No diagnostics for entry {entry_id}; not asked again")
             return None
         data = diag.get("data") if isinstance(diag.get("data"), dict) else diag
         config = data.get("config_entry") if isinstance(data, dict) else None
@@ -2261,7 +2273,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     return "replicas"
                 return None
             return self._match_stored(host, port, stored)
-        config = self._entry_config(entry.get("entry_id"))
+        config = self._entry_config(entry)
         port = valid_port(config.get("port")) if config else None
         if inner.lower() in own:
             # Both of this app's agents advertise the container hostname, so

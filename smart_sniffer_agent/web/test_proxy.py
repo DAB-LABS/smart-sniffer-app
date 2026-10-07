@@ -125,6 +125,7 @@ class FakeState:
              "ipv4": {"address": ["127.0.0.1/24"]}},
         ]}
         self.diagnostics: dict[str, Any] = {}  # entry_id -> port, or {"host", "port"}
+        self.diagnostics_broken: set[str] = set()  # entry ids Core answers 500 for
         self.devices: list[dict[str, Any]] | None = []  # None: the template call fails
         self.calls: list[tuple[str, str, Any]] = []
         self.restarted = threading.Event()
@@ -217,6 +218,9 @@ class FakeSupervisor(BaseHTTPRequestHandler):
             _json_reply(self, 200, {"message": "Flow aborted"})
         elif core.startswith("/diagnostics/config_entry/") and method == "GET":
             entry_id = core.rsplit("/", 1)[1]
+            if entry_id in STATE.diagnostics_broken:
+                _json_reply(self, 500, {"message": "500 Internal Server Error"})
+                return
             if entry_id not in STATE.diagnostics:
                 _json_reply(self, 404, {"message": "not found"})
                 return
@@ -1611,6 +1615,40 @@ def test_ha_devices_zeroconf_titles(proxy):
     assert body["targets"]["replicas"]["entry_id"] == "z-lab"
     # localhost resolves to 127.0.0.1, the address in the diagnostics.
     assert body["targets"]["localhost:9200"]["entry_id"] == "z-field"
+
+
+def _diagnostics_calls(entry_id: str) -> list[tuple[str, str, Any]]:
+    return [c for c in STATE.calls if c[1] == f"/core/api/diagnostics/config_entry/{entry_id}"]
+
+
+def test_ha_devices_no_diagnostics_for_an_entry_not_loaded(proxy):
+    # A zeroconf entry that never set up: Core answers 500 for its
+    # diagnostics, so the proxy does not ask.
+    _store({"address": "localhost", "port": 9201})
+    _refresh_hosts(proxy)
+    STATE.entries = [_entry("z-retry", "SMART Sniffer (nas-retry)", state="setup_retry")]
+    STATE.diagnostics = {"z-retry": {"host": "127.0.0.1", "port": 9201}}
+    for _ in range(2):
+        status, body = proxy.get("/ha/devices")
+        assert status == 200 and body["targets"] == {}
+    assert _diagnostics_calls("z-retry") == []
+
+
+def test_ha_devices_failed_diagnostics_asked_once(proxy):
+    # A loaded entry whose diagnostics fail is asked once, not on every refresh.
+    STATE.entries = [_entry("z-broken", "SMART Sniffer (nas-broken)")]
+    STATE.diagnostics_broken = {"z-broken"}
+    for _ in range(3):
+        status, body = proxy.get("/ha/devices")
+        assert status == 200 and body["targets"] == {}
+    assert len(_diagnostics_calls("z-broken")) == 1
+    # A loaded entry that answers is still asked each time.
+    STATE.entries.append(_entry("z-fine", "SMART Sniffer (nas-fine)"))
+    STATE.diagnostics = {"z-fine": 9202}
+    proxy.get("/ha/devices")
+    proxy.get("/ha/devices")
+    assert len(_diagnostics_calls("z-fine")) == 2
+    assert len(_diagnostics_calls("z-broken")) == 1
 
 
 # ── /ha/add ─────────────────────────────────────────────────────────────────
