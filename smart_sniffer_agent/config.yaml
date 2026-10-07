@@ -1,6 +1,6 @@
 name: "SMART Sniffer App"
-description: "Monitors the health of your Home Assistant system drive. Reads SMART data from local hardware and reports it to the SMART Sniffer integration as HA entities."
-version: "0.2.12"
+description: "Drive health for this machine and your other machines, on its own page. The SMART Sniffer integration adds entities, history, notifications and automations."
+version: "0.3.0"
 slug: "smart_sniffer_agent"
 url: "https://github.com/DAB-LABS/smart-sniffer-app"
 arch:
@@ -29,14 +29,19 @@ privileged:
 # Users must also disable Protection Mode in the app settings for drive access.
 full_access: true
 
-# Supervisor API access: needed to query HA hostname for unique mDNS names,
-# and for the Control Center's Test Lab button (sets mock_mode, restarts the app)
+# Supervisor API access: the HA hostname for a unique mDNS name, network info
+# for the scan prefill, and the app's own options, where field agents are
+# stored
 hassio_api: true
 
-# Home Assistant Core API access: the Control Center adds and removes the
-# integration entries for this app's own agents and reads the drive's
-# Attention state. Without it the page shows the manual steps instead.
+# Home Assistant Core API access: adds this app's agents, replicas and field
+# agents to the integration, and finds their device pages
 homeassistant_api: true
+
+# /share: the user's replica files live in /share/smart-sniffer/replicas, so
+# they survive app updates and can be dropped in over Samba or SSH
+map:
+  - share:rw
 
 # AppArmor — custom profile (apparmor.txt) provides the Protection Mode toggle
 # in the HA UI and documents what the container actually accesses.
@@ -58,14 +63,18 @@ options:
   port: 9099
   token: ""
   scan_interval: 60
-  mock_mode: false
   mock_port: 9100
+  hosts: []
 schema:
   port: port
   token: "str?"
   scan_interval: "int(10,3600)"
-  mock_mode: bool
   mock_port: port
+  hosts:
+    - address: str
+      port: port
+      password: "password?"
+      hidden: "bool?"
 
 # Container image (uncomment for published releases, must be removed for local builds)
 # image: "ghcr.io/dab-labs/{arch}-smart-sniffer-agent"
