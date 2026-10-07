@@ -1561,6 +1561,8 @@ def test_ha_devices_registry(proxy):
         _device("dev-drive", "e-field", serial="VK0ABCDE"),
         _device("dev-pool", "e-field", pool="cache"),
         _device("dev-elsewhere", "e-other", serial="ZZZ"),
+        {"id": "dev-qemu", "name": "QEMU", "serial_number": "",
+         "identifiers": [["smart_sniffer", "dev-sda"]], "config_entries": ["e-agent"]},
     ]
     status, body = proxy.get("/ha/devices")
     assert status == 200
@@ -1571,13 +1573,14 @@ def test_ha_devices_registry(proxy):
         "entry_id": "e-agent",
         "entry_url": "/config/integrations/integration/smart_sniffer#config_entry=e-agent",
         "state": "loaded",
-        "devices": {"S5GXNF0R412233A": "dev-self"},
+        "devices": {"S5GXNF0R412233A": "dev-self", "id:dev-sda": "dev-qemu"},
     }
     assert body["targets"]["replicas"]["entry_id"] == "e-lab"
     assert body["targets"]["10.0.10.20:9099"]["devices"] == {
         "VK0ABCDE": "dev-drive", "pool:cache": "dev-pool"}
     template = [c[2] for c in STATE.calls if c[1] == "/core/api/template"][0]["template"]
     assert "integration_entities('smart_sniffer')" in template
+    assert "'config_entries')" not in template  # deprecated, raises on 2026.10
 
 
 def test_ha_devices_template_fails(proxy):

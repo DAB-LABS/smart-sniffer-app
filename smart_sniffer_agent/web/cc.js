@@ -515,7 +515,7 @@ function cc() {
     },
     cardGlyph(it) {
       const target = it._src === 'replicas' ? 'replicas' : 'self';
-      const key = it.type === 'pool' ? `pool:${it.pool.name}` : it.drive && it.drive.serial;
+      const key = it.type === 'pool' ? `pool:${it.pool.name}` : it.drive && (it.drive.serial || `id:${it.id}`);
       return this.glyph(target, key, 'card');
     },
     cardAskKey(it) {
@@ -621,7 +621,7 @@ function cc() {
       return this.glyph(h.id, null, 'host');
     },
     rowGlyph(h, it) {
-      const key = it.type === 'pool' ? `pool:${it.pool.name}` : it.drive && it.drive.serial;
+      const key = it.type === 'pool' ? `pool:${it.pool.name}` : it.drive && (it.drive.serial || `id:${it.id}`);
       return this.glyph(h.id, key, 'row');
     },
     hostDrives(h) {

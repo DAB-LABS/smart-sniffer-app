@@ -2293,10 +2293,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             target["devices"][serial] = device["id"]
                         prefix = f"{entry_id}_zpool_"
                         for ident in device.get("identifiers") or []:
-                            if (isinstance(ident, list) and len(ident) == 2
-                                    and ident[0] == INTEGRATION_DOMAIN
-                                    and str(ident[1]).startswith(prefix)):
+                            if not (isinstance(ident, list) and len(ident) == 2
+                                    and ident[0] == INTEGRATION_DOMAIN):
+                                continue
+                            if str(ident[1]).startswith(prefix):
                                 target["devices"][f"pool:{str(ident[1])[len(prefix):]}"] = device["id"]
+                            elif not serial and not str(ident[1]).startswith(f"{entry_id}_"):
+                                # A drive with no serial is known by its drive id.
+                                target["devices"][f"id:{ident[1]}"] = device["id"]
             else:
                 result["lookup"] = "entries_only"
             result["targets"] = targets
