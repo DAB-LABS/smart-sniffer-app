@@ -51,6 +51,7 @@ import mimetypes
 import os
 import re
 import socket
+import struct
 import sys
 import threading
 import time
@@ -59,7 +60,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import ModuleType
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, unquote, urlparse
 
 # Ensure .js and .css MIME types are correct
@@ -825,6 +826,8 @@ class Supervisor:
         self._ha_version_failed_at: float | None = None
         self._network: dict[str, Any] | None = None
         self._network_failed_at: float | None = None
+        self._host_addresses: set[str] = set()
+        self._docker_network: ipaddress.IPv4Network | None = None
         self._installed_cache: tuple[float, bool | None] | None = None
 
     @property
@@ -938,6 +941,7 @@ class Supervisor:
         data = info.get("data") if isinstance(info, dict) else None
         interfaces = data.get("interfaces") if isinstance(data, dict) else None
         if status == 200 and isinstance(interfaces, list):
+            self._read_host_addresses(data)
             for iface in interfaces:
                 if not (isinstance(iface, dict) and iface.get("primary") and iface.get("connected")):
                     continue
@@ -958,6 +962,41 @@ class Supervisor:
                     return self._network
         self._network_failed_at = time.monotonic()
         return None
+
+    def _read_host_addresses(self, data: dict[str, Any]) -> None:
+        """Every IPv4 address of the host from the network info, on any
+        interface, primary or not, connected or not; the host's own address
+        on the Supervisor's hassio network (its gateway); and that network,
+        whose addresses are all containers on this machine."""
+        found: set[str] = set()
+        for iface in data.get("interfaces") or []:
+            ipv4 = iface.get("ipv4") if isinstance(iface, dict) else None
+            for text in (ipv4.get("address") or []) if isinstance(ipv4, dict) else []:
+                try:
+                    address = ipaddress.ip_interface(str(text))
+                except ValueError:
+                    continue
+                if address.version == 4:
+                    found.add(str(address.ip))
+        docker = data.get("docker") if isinstance(data.get("docker"), dict) else {}
+        try:
+            found.add(str(ipaddress.IPv4Address(str(docker.get("gateway")))))
+        except ValueError:
+            pass
+        try:
+            net = ipaddress.ip_network(str(docker.get("address")), strict=False)
+        except ValueError:
+            net = None
+        # Only a private block of sensible size, never a whole LAN by mistake.
+        if net is not None and net.version == 4 and net.is_private and net.prefixlen >= 16:
+            self._docker_network = net  # type: ignore[assignment]
+        self._host_addresses = found
+
+    def own_addresses(self) -> tuple[set[str], ipaddress.IPv4Network | None]:
+        """The host's IPv4 addresses and its hassio network, as the
+        Supervisor's network info lists them; empty when it cannot tell."""
+        self.network()
+        return set(self._host_addresses), self._docker_network
 
     def entries(self) -> list[dict[str, Any]] | None:
         """The integration's config entries; None when Core cannot answer."""
@@ -1147,6 +1186,54 @@ def reverse_name(address: str) -> str | None:
     return name or None
 
 
+def _route_targets(text: str) -> list[str]:
+    """One address per route in /proc/net/route: the gateway, or for a route
+    with none, the first address of its network. The kernel writes each
+    field as the raw 32-bit value in host byte order."""
+    targets: list[str] = []
+    for line in text.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 8:
+            continue
+        try:
+            dest, gateway, mask = (struct.pack("=I", int(fields[i], 16)) for i in (1, 2, 7))
+        except (ValueError, struct.error):
+            continue
+        if gateway != bytes(4):
+            targets.append(socket.inet_ntoa(gateway))
+        elif mask != bytes(4):
+            net = ipaddress.IPv4Network(f"{socket.inet_ntoa(dest)}/{socket.inet_ntoa(mask)}",
+                                        strict=False)
+            if net.num_addresses > 1:
+                targets.append(str(net.network_address + 1))
+    return targets
+
+
+def local_ipv4_addresses(route_file: str = "/proc/net/route") -> set[str]:
+    """This container's own IPv4 addresses, with the standard library only:
+    what its host name resolves to, and for each route the source address
+    the kernel picks towards it (connecting a UDP socket sends nothing).
+    The scan is IPv4 only, so IPv6 addresses are not collected."""
+    found: set[str] = set()
+    infos = _with_budget(socket.getaddrinfo, socket.gethostname(), None, socket.AF_INET)
+    for info in infos or []:
+        found.add(str(info[4][0]))
+    try:
+        with open(route_file, encoding="ascii", errors="replace") as handle:
+            targets = _route_targets(handle.read())
+    except OSError:
+        targets = []
+    for target in targets:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((target, 9))
+                found.add(str(sock.getsockname()[0]))
+        except OSError:
+            continue
+    found.discard("0.0.0.0")
+    return found
+
+
 def _is_agent_health(reply: AgentReply) -> bool:
     body = reply.body
     return (
@@ -1165,10 +1252,12 @@ def _wants_password(reply: AgentReply) -> bool:
 
 
 def probe(address: str, port: int, connect_timeout: float, read_timeout: float,
-          connect_to: str | None = None) -> tuple[str, dict[str, Any] | None]:
+          connect_to: str | None = None,
+          own_names: set[str] | frozenset[str] = frozenset()) -> tuple[str, dict[str, Any] | None]:
     """Is there an agent on address:port? Returns ("ok", scan row),
-    ("not_answering", None) or ("not_an_agent", None). Sends GET /api/health
-    and GET /api/drives only, never with credentials."""
+    ("not_answering", None), ("not_an_agent", None), or ("own", None) when
+    its health names one of own_names (this app's agents). Sends GET
+    /api/health and GET /api/drives only, never with credentials."""
     target = connect_to or address
     health = agent_call(target, port, "GET", "/api/health",
                         connect_timeout=connect_timeout, read_timeout=read_timeout)
@@ -1177,6 +1266,9 @@ def probe(address: str, port: int, connect_timeout: float, read_timeout: float,
     body: dict[str, Any] = {}
     if _is_agent_health(health):
         body = health.body
+        named = body.get("hostname")
+        if own_names and isinstance(named, str) and named.split(".")[0].lower() in own_names:
+            return "own", None
         drives = agent_call(target, port, "GET", "/api/drives",
                             connect_timeout=connect_timeout, read_timeout=read_timeout)
         if drives.status is None:
@@ -1272,8 +1364,12 @@ class ScanManager:
             self._purge()
             return self.scans.get(scan_id)
 
-    def start(self, block: ipaddress.IPv4Network, port: int, skip: str | None,
-              stored: list[dict[str, Any]]) -> Scan:
+    def start(self, block: ipaddress.IPv4Network, port: int, skip: Callable[[str], bool],
+              stored: list[dict[str, Any]],
+              own_names: set[str] | frozenset[str] = frozenset()) -> Scan:
+        """skip(address) is true for an address of this machine: nothing is
+        sent to it. own_names: this app's host names; an agent whose health
+        names one is left out of the results."""
         scan = Scan(os.urandom(4).hex(), block, port)
         with self.lock:
             self._purge()
@@ -1282,7 +1378,7 @@ class ScanManager:
                     other.cancel.set()
                     other.finish("cancelled")
             self.scans[scan.id] = scan
-        threading.Thread(target=self._run, args=(scan, skip, stored), daemon=True).start()
+        threading.Thread(target=self._run, args=(scan, skip, stored, own_names), daemon=True).start()
         return scan
 
     def cancel(self, scan_id: str) -> Scan | None:
@@ -1292,15 +1388,17 @@ class ScanManager:
             scan.finish("cancelled")
         return scan
 
-    def _run(self, scan: Scan, skip: str | None, stored: list[dict[str, Any]]) -> None:
+    def _run(self, scan: Scan, skip: Callable[[str], bool], stored: list[dict[str, Any]],
+             own_names: set[str] | frozenset[str]) -> None:
         added = stored_keys(stored)
 
         def one(address: str) -> None:
             if scan.cancel.is_set():
                 return
             row = None
-            if address != skip:
-                outcome, row = probe(address, scan.port, SCAN_CONNECT_TIMEOUT, SCAN_READ_TIMEOUT)
+            if not skip(address):
+                outcome, row = probe(address, scan.port, SCAN_CONNECT_TIMEOUT, SCAN_READ_TIMEOUT,
+                                     own_names=own_names)
                 if outcome != "ok":
                     row = None
             with scan.lock:
@@ -1771,8 +1869,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
             suggest = ipaddress.ip_network(f"{suggest_from}/24", strict=False)
             raise ApiError(422, "too_wide", f"blocks wider than /{MIN_SCAN_PREFIX} are not scanned",
                            addresses=2 ** (32 - block.prefixlen) - 2, suggest=str(suggest))
-        scan = self.scans.start(block, port, network["address"] if network else None,
-                                self.host_store.hosts_quick())
+        own, hassio = self.supervisor.own_addresses()
+        own |= local_ipv4_addresses()
+        if network:
+            own.add(network["address"])
+
+        def skip(address: str) -> bool:
+            return address in own or (hassio is not None and ipaddress.IPv4Address(address) in hassio)
+
+        scan = self.scans.start(block, port, skip, self.host_store.hosts_quick(), self._own_hosts())
         log(f"Scan {scan.id}: {block} port {port}, {scan.total} addresses")
         self._send_json(202, {"scan_id": scan.id, "total": scan.total})
 

@@ -1192,6 +1192,93 @@ def test_scan_blocks_accepted(proxy, block, total):
     proxy.request("DELETE", f"/fleet/scan/{body['scan_id']}")
 
 
+def _fresh_proxy(supervisor, *extra: str) -> tuple[subprocess.Popen, Proxy]:
+    return _start_proxy([
+        f"--rules-dir={RULES_DIR}",
+        f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
+        f"--agent-host={AGENT_HOST}",
+        f"--mock-port={_free_port()}",
+        *extra,
+    ], TOKEN)
+
+
+def test_scan_skips_every_address_of_this_machine(backends):
+    # The host's addresses on every interface, its side of the hassio
+    # network, every address in that network (other apps' containers) and
+    # an agent whose health names this app's host: nothing found, and
+    # nothing but the health read sent to the last.
+    STATE.network = {
+        "interfaces": [
+            {"interface": "eth0", "primary": True, "connected": True,
+             "ipv4": {"address": ["10.255.0.5/24"]}},
+            {"interface": "wlan0", "primary": False, "connected": False,
+             "ipv4": {"address": ["127.0.2.9/24"]}},
+        ],
+        "docker": {"interface": "hassio", "address": "127.0.3.0/24", "gateway": "127.0.2.10"},
+    }
+    agents = {
+        "127.0.2.9": AgentState(hostname="host-wlan"),
+        "127.0.2.10": AgentState(hostname="host-hassio"),
+        "127.0.2.11": AgentState(hostname=AGENT_HOST.upper() + ".local"),
+        "127.0.2.12": AgentState(hostname="office-nuc"),
+        "127.0.3.5": AgentState(hostname="published-app"),
+    }
+    port = _free_port()
+    servers = [_serve(agent_handler(state), address, port) for address, state in agents.items()]
+    proc, client = _fresh_proxy(backends[0])
+    try:
+        _, started = client.post("/fleet/scan", {"block": "127.0.2.8/29", "port": port})
+        body = _wait_scan(client, started["scan_id"])
+        assert body["state"] == "done" and body["probed"] == body["total"] == 6
+        assert [row["address"] for row in body["found"]] == ["127.0.2.12"]
+        _, started = client.post("/fleet/scan", {"block": "127.0.3.4/30", "port": port})
+        body = _wait_scan(client, started["scan_id"])
+        assert body["state"] == "done" and body["found"] == []
+    finally:
+        _stop_proxy(proc)
+        for server in servers:
+            server.shutdown()
+    for address in ("127.0.2.9", "127.0.2.10", "127.0.3.5"):
+        assert agents[address].requests == [], address
+    assert [r[1] for r in agents["127.0.2.11"].requests] == ["/api/health"]
+
+
+def test_scan_skips_the_container_own_address(backends, field, mod):
+    # The Supervisor lists none of the loopback addresses; the container's
+    # own address (here what this machine's host name resolves to) is still
+    # skipped.
+    if "127.0.0.1" not in mod.local_ipv4_addresses():
+        pytest.skip("this machine's host name does not resolve to 127.0.0.1")
+    STATE.network = {"interfaces": [{"interface": "eth0", "primary": True, "connected": True,
+                                     "ipv4": {"address": ["10.255.0.5/24"]}}]}
+    proc, client = _fresh_proxy(backends[0])
+    try:
+        _, started = client.post("/fleet/scan", {"block": "127.0.0.0/30", "port": field})
+        body = _wait_scan(client, started["scan_id"])
+    finally:
+        _stop_proxy(proc)
+    assert [row["address"] for row in body["found"]] == ["127.0.0.2"]
+    assert FIELD["127.0.0.1"].requests == []
+
+
+def test_route_targets_and_local_addresses(mod, tmp_path):
+    table = (
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+        "eth0\t00000000\t010200C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+        "eth0\t000200C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"
+        "hassio\t0000000A\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+        "broken\tzzzz\n"
+    )
+    if sys.byteorder == "little":
+        assert mod._route_targets(table) == ["192.0.2.1", "192.0.2.1", "10.0.0.1"]
+    route = tmp_path / "route"
+    route.write_text(table)
+    for found in (mod.local_ipv4_addresses(str(route)),
+                  mod.local_ipv4_addresses(str(tmp_path / "missing"))):
+        assert all(mod.ipaddress.IPv4Address(a) for a in found)
+        assert "0.0.0.0" not in found
+
+
 def test_scan_too_wide(proxy):
     STATE.calls.clear()
     status, body = proxy.post("/fleet/scan", {"block": "10.0.0.0/21", "port": 9099})
