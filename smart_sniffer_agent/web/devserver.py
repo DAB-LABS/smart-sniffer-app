@@ -594,7 +594,7 @@ def self_drives(flags) -> list:
     if which == "board":
         bc = ata_drive("sda", "Seagate BarraCuda 2TB ST2000DM008", "ZFL0K7Q2", "/dev/sda",
                        temp=38, poh=31502, cycles=1204, counters={5: 24, 197: 3, 198: 0, 187: 0, 188: 0},
-                       written_tb=61.20, filler=9, last=4)
+                       written_tb=61.20, filler=13, last=4)
         bc["device_statistics"] = {"status": "present", "complete": True, "pages": []}
         out = [nvme, bc]
     elif which in ("1", "2"):
@@ -793,7 +793,7 @@ def shipped_body(file_id: str) -> dict:
                          counters={5: 0, 197: 0, 198: 0, 187: 0, 188: 0, 196: 0})
     if file_id == "shipped.smart-failed":
         return ata_drive("sdx", "Seagate Barracuda 2TB", "MOCK-SATA-0001", "/dev/sdx", temp=36, poh=18240,
-                         cycles=212, written_tb=61.20, filler=9, last=2,
+                         cycles=212, written_tb=61.20, filler=13, last=2,
                          counters={5: 0, 197: 0, 198: 0, 187: 0, 188: 0})
     if file_id == "shipped.sata-hdd-devstat-uncorrectables":
         return ata_drive("sdy", "WDC Ultrastar 14TB WUH721414ALE6L4", "MOCK-DS-9JG0X1", "/dev/sdy", temp=34,
@@ -1143,7 +1143,10 @@ def replicas_response(flags, world: World) -> dict:
                        devices=copy.deepcopy(body.get("devices")))
             items.append(pool_item(copy.deepcopy(body), flags, lab, rec["card_id"]))
         else:
-            items.append(drive_item(copy.deepcopy(rec["body"]), flags, lab))
+            body = copy.deepcopy(rec["body"])
+            # The replica agent stamps every read, as the mock does.
+            body["last_updated"] = iso(2)
+            items.append(drive_item(body, flags, lab))
     agent = {"hostname": agent_host(flags), "version": AGENT_VERSION + "-mock", "os": "linux",
              "os_name": None, "uptime_seconds": int(time.time() - world.started), "drives": 0, "pools": 0}
     return drives_response("replicas", "replicas", "ok", agent, items, iso(0), iso(0), flags)
