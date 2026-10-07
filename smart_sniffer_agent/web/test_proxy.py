@@ -1413,6 +1413,11 @@ def test_drives_password_needed_and_refused(proxy, field):
     status, body = proxy.get(f"/fleet/hosts/{key}/drives")
     assert status == 200 and body["status"] == "password_needed"
     assert body["summary"]["header"] == "unknown"
+    # The pending card (board 3.6): version and drive count from the health
+    # answer; rows only from an earlier good read, marked stale.
+    assert body["agent"]["hostname"] == "backup-pi"
+    assert body["agent"]["version"] == "0.8.1" and body["agent"]["drives"] == 1
+    assert all(item["stale"] is True for item in body["items"])
     _store({"address": "127.0.0.3", "port": field, "password": "wrong-pass"})
     _refresh_hosts(proxy)
     assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "password_refused"
