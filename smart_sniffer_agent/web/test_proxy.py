@@ -1930,3 +1930,11 @@ def test_save_as_refusals(proxy, field):
     _refresh_hosts(proxy)
     status, body = proxy.post("/replicas/save-as", {"host": f"127.0.0.6:{field}", "drive_id": "sda"})
     assert status == 504 and body["error"] == "not_answering"
+
+
+def test_reverse_name_ignores_an_address_answer(mod, monkeypatch):
+    # musl answers gethostbyaddr with the address itself when there is no PTR
+    monkeypatch.setattr(mod.socket, "gethostbyaddr", lambda a: (a, [a], [a]))
+    assert mod.reverse_name("10.0.10.12") is None
+    monkeypatch.setattr(mod.socket, "gethostbyaddr", lambda a: ("nas.lan", [], [a]))
+    assert mod.reverse_name("10.0.10.12") == "nas"

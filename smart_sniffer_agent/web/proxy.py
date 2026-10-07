@@ -1119,6 +1119,11 @@ def reverse_name(address: str) -> str | None:
     found = _with_budget(socket.gethostbyaddr, address)
     if not found:
         return None
+    try:  # no PTR record: some resolvers answer the address itself
+        ipaddress.IPv4Address(str(found[0]))
+        return None
+    except ValueError:
+        pass
     name = str(found[0]).split(".")[0]
     return name or None
 
