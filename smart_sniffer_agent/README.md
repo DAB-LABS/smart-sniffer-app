@@ -120,7 +120,7 @@ Changing the Agent Port, Bearer Token or Scan Interval needs an app restart, as 
 
 **Sidebar.** On the app's Info page, turn on **Show in sidebar**. The Control Center then appears in the sidebar as **SMART Sniffer**.
 
-**Dashboard.** A Webpage card can show the Control Center on a dashboard. Its address is the app's ingress address, `/api/hassio_ingress/<token>/`, which stays the same for an install. To find it, open the Control Center from the sidebar and open the page's frame on its own: in Firefox, right-click inside the page and choose **This Frame → Open Frame in New Tab**; in Chrome or Edge, open the developer tools and look for the `iframe` whose address starts with `/api/hassio_ingress/`. The ingress session expires after a while, and the card then stays blank until the dashboard is reloaded.
+**Dashboard.** A Webpage card can show the Control Center on a dashboard. Its address is the app's ingress address, `/api/hassio_ingress/<token>/`, which stays the same for an install. To find it, open the Control Center from the sidebar and open the page's frame on its own: in Firefox, right-click inside the page and choose **This Frame → Open Frame in New Tab**; in Chrome or Edge, open the developer tools and look for the `iframe` whose address starts with `/api/hassio_ingress/`. The ingress session lasts a long time: in testing it was still open after more than half an hour without use. If it does expire, the card stays blank until the dashboard is reloaded.
 
 ## Upgrading from 0.2.x
 
