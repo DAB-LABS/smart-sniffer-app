@@ -42,9 +42,10 @@ Referer.
                                               earlier give the /hassio/... link paths)
 
 Writes (stored hosts, hidden state, passwords, replicas, HA adds) live in
-memory until the server stops, or until the switches that shape them
-(HOSTS, POOL, REPLICAS, HA, HA_SELF, DRIVES, VDISK) change, or until a
-POST to /dev/reset, which the page checks call before each test.
+memory until the server stops. Each set of the switches that shape them
+(HOSTS, POOL, REPLICAS, HA, HA_SELF, DRIVES, VDISK) has its own copy; a
+POST to /dev/reset with the switches in its query string starts that copy
+afresh, as the page checks do before each page they open.
 
 The board's field agents: proxmox-01 (password saved, Maybe, pool),
 office-nuc (open), backup-pi (wants a password, it is fieldpass),
@@ -180,6 +181,7 @@ RULES = _load_rules()
 RULES_VERSION = (RULES.version if RULES else None) or RULES_VERSION_FALLBACK
 HAVE_DRIVE_VIEW = PROXY is not None and callable(getattr(PROXY, "drive_view", None))
 HAVE_POOL_VERDICT = PROXY is not None and callable(getattr(PROXY, "pool_verdict", None))
+HAVE_POOL_VIEW = PROXY is not None and callable(getattr(PROXY, "pool_view", None))
 print(f"[dev] drive_view from {'proxy.py' if HAVE_DRIVE_VIEW else 'the stand-in'}")
 
 
@@ -453,6 +455,10 @@ FILLER = [(1, "Raw_Read_Error_Rate", 109361208, 80, 64, 6), (3, "Spin_Up_Time", 
           (193, "Load_Cycle_Count", 4120, 98, 98, 0), (195, "Hardware_ECC_Recovered", 109361208, 80, 64, 0),
           (240, "Head_Flying_Hours", 31012, 100, 253, 0)]
 
+# smartctl's flags on a Device Statistics entry; the rules read only valid ones.
+DEVSTAT_VALID = {"value": 192, "string": "V--- ", "valid": True, "normalized": False,
+                 "supports_dsn": False, "monitored_condition_met": False}
+
 ATA_COUNTERS = {5: "Reallocated_Sector_Ct", 197: "Current_Pending_Sector", 198: "Offline_Uncorrectable",
                 187: "Reported_Uncorrect", 188: "Command_Timeout", 196: "Reallocated_Event_Count",
                 10: "Spin_Retry_Count"}
@@ -493,17 +499,18 @@ def ata_drive(drive_id, model, serial, path, *, temp, poh, cycles, counters=None
     if devstat_unc_count is not None or written_from == "devstat" or read_from == "ata_device_statistics":
         ws = int((written_tb or 0) * 1e12 / 512)
         rs = int((read_tb or 0) * 1e12 / 512)
+        def entry(offset, name, size, value):
+            return {"offset": offset, "name": name, "size": size, "value": value, "flags": dict(DEVSTAT_VALID)}
+
         ds = {"status": "present", "complete": True, "logical_block_size": 512, "pages": [
             {"number": 1, "name": "General Statistics", "revision": 1, "table": [
-                {"offset": 8, "name": "Lifetime Power-On Resets", "size": 4, "value": cycles},
-                {"offset": 16, "name": "Power-on Hours", "size": 4, "value": poh},
-                {"offset": 24, "name": "Logical Sectors Written", "size": 6, "value": ws},
-                {"offset": 40, "name": "Logical Sectors Read", "size": 6, "value": rs}]},
+                entry(8, "Lifetime Power-On Resets", 4, cycles),
+                entry(16, "Power-on Hours", 4, poh),
+                entry(24, "Logical Sectors Written", 6, ws),
+                entry(40, "Logical Sectors Read", 6, rs)]},
             {"number": 4, "name": "General Errors Statistics", "revision": 1, "table": [
-                {"offset": 8, "name": "Number of Reported Uncorrectable Errors", "size": 4,
-                 "value": devstat_unc_count or 0},
-                {"offset": 16, "name": "Resets Between Cmd Acceptance and Completion", "size": 4,
-                 "value": 0}]}]}
+                entry(8, "Number of Reported Uncorrectable Errors", 4, devstat_unc_count or 0),
+                entry(16, "Resets Between Cmd Acceptance and Completion", 4, 0)]}]}
     else:
         ds = {"status": "absent"}
     return {"id": drive_id, "model": model, "serial": serial, "protocol": "ATA",
@@ -1018,15 +1025,16 @@ class World:
         return next((h for h in self.hosts if h["id"] == host_id), None)
 
 
-WORLD: World | None = None
+# One world per set of shaping switches, so two pages open on different
+# switches (as the page checks do) do not rebuild each other's world.
+WORLDS: dict[tuple, World] = {}
 
 
-def world_for(flags) -> World:
-    global WORLD  # noqa: PLW0603
+def world_for(flags, fresh: bool = False) -> World:
     key = tuple(flags[k] for k in WORLD_KEYS)
-    if WORLD is None or WORLD.key != key:
-        WORLD = World(flags)
-    return WORLD
+    if fresh or key not in WORLDS:
+        WORLDS[key] = World(flags)
+    return WORLDS[key]
 
 
 # ── Responses ────────────────────────────────────────────────────────────────
@@ -1041,18 +1049,30 @@ def drive_item(drive: dict, flags, lab=None, stale=False) -> dict:
 
 
 def pool_item(p: dict, flags, lab=None, card_id=None, stale=False) -> dict:
+    """A pool as the proxy answers it. A replica's lab block carries its
+    layout and every disk; the board's field agents get the same here, which
+    a real agent does not report yet (spec Q6), so the board's pictures hold."""
     verdict = None if flags["RULES"] == "missing" else pool_verdict(p)
-    devices = p.get("devices")
+    shape = lab or {"vdev": p.get("vdev"), "devices": p.get("devices")}
+    if HAVE_POOL_VIEW:
+        view = PROXY.pool_view(p, verdict, shape)
+    else:
+        devices = shape.get("devices")
+        vanished = bool(shape.get("vanished"))
+        state = (verdict or {}).get("state")
+        view = {"header": "unknown" if vanished or state is None else ("attention" if state == "YES" else "ok"),
+                "layout": pool_layout(p), "state": p.get("state"),
+                "disks": copy.deepcopy(devices) if devices else None, "vanished": vanished}
     item = {"type": "pool", "id": card_id or f"pool.{p['name']}", "pool": p, "verdict": verdict,
-            "view": {"layout": pool_layout(p), "state": p.get("state"),
-                     "disks": copy.deepcopy(devices) if devices else None},
-            "lab": lab}
+            "view": view, "lab": lab}
     if stale:
         item["stale"] = True
     return item
 
 
 def summarize(items: list, status: str) -> dict:
+    if PROXY is not None and callable(getattr(PROXY, "summarize", None)):
+        return PROXY.summarize(items, status == "ok")
     s = {"header": "unknown", "attention": 0, "maybe": 0, "unsupported": 0,
          "drives": sum(1 for i in items if i["type"] == "drive"),
          "pools": sum(1 for i in items if i["type"] == "pool")}
@@ -1290,10 +1310,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # routes
     def _api(self, method, parts, flags):
-        global WORLD  # noqa: PLW0603
         head = parts[0]
         if head == "dev" and parts[1:] == ["reset"] and method == "POST":
-            WORLD = World(flags)
+            world_for(flags, fresh=True)
             return self._send(200, {"reset": True})
         world = world_for(flags)
         if head == "app" and parts[1:] == ["info"]:
