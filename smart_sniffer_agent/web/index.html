@@ -29,12 +29,14 @@
     <summary><span class="m"><span class="mn" x-text="'ZFS pool ' + it.pool.name"></span><template x-if="h && rowGlyph(h, it).kind === 'blue'"><a class="exit" :href="rowGlyph(h, it).href" target="_top" aria-label="Open this pool in Home Assistant" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template></span><span class="s"><span x-text="poolLayout(it) ? poolLayout(it) + ', ' : ''"></span><b x-show="poolBad(it)" x-text="poolState(it)"></b><span x-show="!poolBad(it)" x-text="poolState(it)"></span></span></summary>
     <template x-if="isOpen(poolKey(h, it), !h)">
       <div class="drive-more">
-        <div class="pool-disks" role="table" :aria-label="'Disks in pool ' + it.pool.name">
-          <div class="pd head" role="row"><span></span><span>Disk</span><span>State</span><span class="r">Read</span><span class="r">Write</span><span class="r">Cksum</span></div>
-          <template x-for="d in poolDisks(it)" :key="d.name">
-            <div class="pd" :class="{ crit: d.bad }" role="row"><span :class="d.bad ? 'mk crit' : ''"></span><span class="n" x-text="d.name"></span><span x-text="d.state"></span><span class="r" x-text="d.read"></span><span class="r" x-text="d.write"></span><span class="r" x-text="d.cksum"></span></div>
-          </template>
-        </div>
+        <template x-if="poolDisks(it).length">
+          <div class="pool-disks" role="table" :aria-label="'Disks in pool ' + it.pool.name">
+            <div class="pd head" role="row"><span></span><span>Disk</span><span>State</span><span class="r">Read</span><span class="r">Write</span><span class="r">Cksum</span></div>
+            <template x-for="d in poolDisks(it)" :key="d.name">
+              <div class="pd" :class="{ crit: d.bad }" role="row"><span :class="d.bad ? 'mk crit' : ''"></span><span class="n" x-text="d.name"></span><span x-text="d.state"></span><span class="r" x-text="d.read"></span><span class="r" x-text="d.write"></span><span class="r" x-text="d.cksum"></span></div>
+            </template>
+          </div>
+        </template>
         <p class="pool-foot" x-show="poolFoot(it)" x-text="poolFoot(it)"></p>
       </div>
     </template>
@@ -331,7 +333,7 @@
             <div class="pick" role="group" aria-label="Agents that answered">
               <div class="pick-head"><span></span><span>Host</span><span>Address</span><span>Agent</span><span>Drives</span><span></span></div>
               <template x-for="r in pickRows" :key="r.id">
-                <label class="pick-row" :class="{ on: !r.added && add.ticks[r.id], done: r.added }"><input class="tick" type="checkbox" :checked="!r.added && !!add.ticks[r.id]" :disabled="r.added" @change="add.ticks[r.id] = $event.target.checked"><span class="h" x-text="r.added ? r.hostname + ', already a field agent' : r.hostname"></span><span class="a" x-text="r.address + ':' + r.port"></span><span class="v" x-text="'agent ' + r.version"></span><span class="d" x-text="driveCount(r.drives)"></span><span class="k"><template x-if="r.auth === 'password'"><svg class="lock" role="img" aria-label="wants a password"><use href="#lock"/></svg></template></span></label>
+                <label class="pick-row" :class="{ on: !r.added && add.ticks[r.id], done: r.added }"><input class="tick" type="checkbox" :checked="!r.added && !!add.ticks[r.id]" :disabled="r.added" @change="add.ticks[r.id] = $event.target.checked"><span class="h" x-text="r.added ? r.hostname + ', already a field agent' : r.hostname"></span><span class="a" x-text="r.address + ':' + r.port"></span><span class="v" x-text="r.version ? 'agent ' + r.version : ''"></span><span class="d" x-text="driveCount(r.drives)"></span><span class="k"><template x-if="r.auth === 'password'"><svg class="lock" role="img" aria-label="wants a password"><use href="#lock"/></svg></template></span></label>
               </template>
             </div>
           </template>
