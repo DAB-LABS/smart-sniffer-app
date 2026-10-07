@@ -1657,3 +1657,212 @@ def test_ha_add_drops_the_cache(backends):
 def test_removed_ha_routes_are_404(proxy, method, path):
     status, body = proxy.request(method, path, {} if method == "POST" else None)
     assert status == 404 and body["error"] == "not_found"
+
+
+# ── /replicas ───────────────────────────────────────────────────────────────
+
+def _raw(proxy, method: str, path: str, data: bytes | None = None) -> tuple[int, dict[str, str], bytes]:
+    req = urllib.request.Request(proxy.base + path, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, {k.lower(): v for k, v in resp.getheaders()}, resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, {k.lower(): v for k, v in err.headers.items()}, err.read()
+
+
+def _shipped(proxy, file_id: str) -> dict[str, Any]:
+    status, doc = proxy.get(f"/mock/replicas/{file_id}")
+    assert status == 200
+    return doc
+
+
+@needs_mock
+def test_replicas_listing(proxy, mock_agent):
+    status, body = proxy.get("/replicas")
+    assert status == 200
+    assert body["agent"] == "ok"
+    assert body["folder"] == {"path": str(mock_agent["user"]), "status": "ok"}
+    shipped = [f for f in body["files"] if f.get("source") == "shipped"]
+    assert [f["order"] for f in shipped] == [1, 2, 3, 4, 5, 6]
+    assert all(f["valid"] for f in shipped)
+    assert {f["id"] for f in shipped} >= {"shipped.smart-failed", "shipped.zfs-pool-degraded"}
+
+
+@needs_mock
+def test_replicas_upload(proxy, mock_agent):
+    doc = _shipped(proxy, "shipped.nvme-wear")
+    doc["name"] = "Uploaded NVMe for the test"
+    status, entry = proxy.post("/replicas", doc)
+    assert status == 201
+    assert entry["source"] == "user" and entry["valid"] is True
+    assert entry["name"] == "Uploaded NVMe for the test"
+    assert (mock_agent["user"] / f"{entry['id'][len('user.'):]}.json").is_file()
+    status, body = proxy.get("/replicas")
+    assert entry["id"] in {f["id"] for f in body["files"]}
+
+
+@needs_mock
+def test_replicas_upload_refused(proxy):
+    status, body = proxy.post("/replicas", {"format": "something-else", "name": "x"})
+    assert status == 422 and body["error"] == "invalid_replica" and body["message"]
+    status, _, raw = _raw(proxy, "POST", "/replicas", b"{not json")
+    assert status == 422 and json.loads(raw)["error"] == "invalid_replica"
+    big = json.dumps({"format": "smart-sniffer-replica", "pad": "x" * 1_200_000}).encode()
+    status, _, raw = _raw(proxy, "POST", "/replicas", big)
+    assert status == 413 and json.loads(raw)["error"] == "too_large"
+
+
+@needs_mock
+def test_replicas_folder_unavailable(backends, tmp_path):
+    port = _free_port()
+    mock = subprocess.Popen(
+        [sys.executable, str(MOCK_AGENT), f"--port={port}", "--host=127.0.0.1", "--no-mdns",
+         "--replicas", str(MOCK_AGENT.parent / "replicas"),
+         "--user-replicas", str(tmp_path / "missing")],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _wait_for_port(port, mock)
+    proc, client = _start_proxy([
+        f"--mock-port={port}", "--data-dir=",
+        f"--supervisor-url=http://127.0.0.1:{backends[0].server_address[1]}",
+    ], TOKEN)
+    try:
+        assert client.get("/app/info")[1]["replicas"]["folder"] == "missing"
+        doc = client.get("/mock/replicas/shipped.nvme-wear")[1]
+        status, body = client.post("/replicas", doc)
+        assert status == 503 and body["error"] == "replica_folder_unavailable"
+    finally:
+        _stop_proxy(proc)
+        mock.terminate()
+        mock.wait(timeout=5)
+
+
+def test_replicas_agent_down(backends):
+    proc, client = _start_proxy([
+        f"--mock-port={_free_port()}", "--data-dir=",
+        f"--supervisor-url=http://127.0.0.1:{backends[0].server_address[1]}",
+    ], TOKEN)
+    try:
+        status, body = client.get("/replicas")
+        assert status == 503 and body["error"] == "replica_agent_down"
+        status, body = client.post("/replicas/add", {"files": ["shipped.nvme-wear"]})
+        assert status == 503 and body["error"] == "replica_agent_down"
+    finally:
+        _stop_proxy(proc)
+
+
+@needs_mock
+@needs_rules
+def test_replicas_add_read_export_delete(proxy):
+    status, body = proxy.post("/replicas/add", {"files": [
+        "shipped.smart-failed", "shipped.zfs-pool-degraded", "shipped.nope"]})
+    assert status == 201
+    cards = {c["file"]: c["card_id"] for c in body["cards"]}
+    assert cards["shipped.zfs-pool-degraded"].startswith("pool.tank")
+    assert body["failed"] == [{"file": "shipped.nope", "error": body["failed"][0]["error"]}]
+    drive_card = cards["shipped.smart-failed"]
+    pool_card = cards["shipped.zfs-pool-degraded"]
+
+    # The replicas read carries each item's lab block, judged like any drive.
+    status, read = proxy.get("/fleet/hosts/replicas/drives")
+    assert status == 200 and read["kind"] == "replicas" and read["status"] == "ok"
+    items = {i["id"]: i for i in read["items"]}
+    drive = items[drive_card]
+    assert drive["lab"]["replica"] == "shipped.smart-failed"
+    assert drive["lab"]["kind"] == "ata"
+    assert drive["lab"]["scenario"]["current"] == "smart_failed"
+    assert {"id": "healthy", "label": "Healthy SATA HDD"} in drive["lab"]["scenario"]["options"]
+    assert drive["verdict"]["state"] == "YES" and drive["view"]["health_failed"] is True
+    assert "lab" not in drive["drive"]
+    pool = items[pool_card]
+    assert pool["type"] == "pool" and pool["view"]["layout"] == "two-disk mirror"
+    assert pool["verdict"]["state"] == "YES"
+    assert [d["mark"] for d in pool["view"]["disks"]] == [None, "crit"]
+
+    # A Raw edit through /mock, then the export carries it.
+    status, _ = proxy.request("PATCH", f"/mock/drives/{quote(drive_card, safe='')}/smart",
+                              {"Reallocated_Sector_Ct": 99})
+    assert status == 200
+    status, headers, raw = _raw(proxy, "GET", f"/replicas/{quote(drive_card, safe='')}/file")
+    assert status == 200
+    assert headers["content-disposition"] == 'attachment; filename="smart-failed.json"'
+    exported = json.loads(raw)
+    table = {a["name"]: a for a in exported["smart"]["ata_smart_attributes"]["table"]}
+    assert table["Reallocated_Sector_Ct"]["raw"]["value"] == 99
+    # The download is a file the upload takes back.
+    exported["name"] = "Round trip"
+    assert proxy.post("/replicas", exported)[0] == 201
+    status, _, raw = _raw(proxy, "GET", f"/replicas/{quote(pool_card, safe='')}/file")
+    assert status == 200 and json.loads(raw)["kind"] == "zfs_pool"
+
+    for card in (drive_card, pool_card):
+        status, body = proxy.request("DELETE", f"/replicas/{quote(card, safe='')}")
+        assert status == 200 and body == {"removed": card}
+        assert proxy.request("DELETE", f"/replicas/{quote(card, safe='')}")[0] == 404
+    assert proxy.get("/replicas/nope/file")[0] == 404
+
+
+def _wwn_drive(drive_id: str, serial: str) -> dict[str, Any]:
+    drive = simple_drive(drive_id, serial, {"Reallocated_Sector_Ct": 3})
+    drive["smart_data"].update({
+        "serial_number": serial, "model_name": drive["model"],
+        "wwn": {"naa": 5, "oui": 3152, "id": 77777777},
+    })
+    return drive
+
+
+def _no_trace(user: Path, entry_id: str, *secrets: str) -> dict[str, Any]:
+    text = (user / f"{entry_id[len('user.'):]}.json").read_text(encoding="utf-8")
+    for secret in secrets:
+        assert secret not in text
+    return json.loads(text)
+
+
+@needs_mock
+@needs_rules
+def test_save_as_from_self(proxy, mock_agent):
+    SELF_AGENT.drives = [_wwn_drive("sda", "SELF-SERIAL-77")]
+    status, body = proxy.post("/replicas/save-as", {"host": "self", "drive_id": "sda"})
+    assert status == 201
+    entry = body["file"]
+    assert entry["source"] == "user" and entry["kind"] == "ata"
+    doc = _no_trace(mock_agent["user"], entry["id"], "SELF-SERIAL-77", "77777777")
+    assert doc["origin"]["type"] == "saved"
+    assert doc["verdict"]["state"] == "YES"
+    assert doc["verdict"]["reasons"] == ["Reallocated Sector Count: 3 (expected 0)"]
+    assert ("GET", "/api/drives/sda", f"Bearer {APP_TOKEN}") in SELF_AGENT.requests
+    # The new file is on the page at once, as a replica card.
+    _, read = proxy.get("/fleet/hosts/replicas/drives")
+    assert body["card_id"] in {i["id"] for i in read["items"]}
+    proxy.request("DELETE", f"/replicas/{quote(body['card_id'], safe='')}")
+
+
+@needs_mock
+@needs_rules
+def test_save_as_from_field_host(proxy, field, mock_agent):
+    FIELD["127.0.0.3"].drives = [_wwn_drive("sdb", "FIELD-SERIAL-55")]
+    _store({"address": "127.0.0.3", "port": field, "password": FIELD_PASSWORD})
+    _refresh_hosts(proxy)
+    status, body = proxy.post("/replicas/save-as",
+                              {"host": f"127.0.0.3:{field}", "drive_id": "sdb"})
+    assert status == 201
+    _no_trace(mock_agent["user"], body["file"]["id"], "FIELD-SERIAL-55", "77777777")
+    assert ("GET", "/api/drives/sdb", f"Bearer {FIELD_PASSWORD}") in FIELD["127.0.0.3"].requests
+    proxy.request("DELETE", f"/replicas/{quote(body['card_id'], safe='')}")
+
+
+@needs_mock
+@needs_rules
+def test_save_as_refusals(proxy, field):
+    SELF_AGENT.drives = [simple_drive("sdu", "USB-1", smart=False)]
+    status, body = proxy.post("/replicas/save-as", {"host": "self", "drive_id": "sdu"})
+    assert status == 409 and body["error"] == "unsupported_drive"
+    assert proxy.post("/replicas/save-as", {"host": "self", "drive_id": "nope"})[0] == 404
+    assert proxy.post("/replicas/save-as", {"host": "10.9.9.9:1", "drive_id": "sda"})[0] == 404
+    assert proxy.post("/replicas/save-as", {"host": "self"})[0] == 400
+    _store({"address": "127.0.0.6", "port": field})
+    _refresh_hosts(proxy)
+    status, body = proxy.post("/replicas/save-as", {"host": f"127.0.0.6:{field}", "drive_id": "sda"})
+    assert status == 504 and body["error"] == "not_answering"

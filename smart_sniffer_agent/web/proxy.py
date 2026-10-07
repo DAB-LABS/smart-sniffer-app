@@ -6,9 +6,22 @@ Serves static files from /opt/web/ at the root path and proxies:
   /mock/* -> localhost:$MOCK_PORT   (the replica agent, /mock/ rewritten to /api/)
 
 It also answers the Control Center's own routes:
-  GET  /app/info     versions, ports, the app's identity, network and replicas
-  POST /evaluate     the integration's verdict for a drive (plus its view), or
-                     for a ZFS pool ({"pool": {...}})
+  GET  /app/info                 versions, ports, identity, network, replicas
+  POST /evaluate                 the verdict (and view) for a drive, or for a
+                                 ZFS pool ({"pool": {...}})
+  POST /fleet/scan               scan a block for agents; GET and DELETE
+                                 /fleet/scan/<id> poll and cancel it
+  POST /fleet/probe              check one host by hand
+  GET, POST /fleet/hosts         the field agents stored in the app options;
+  PATCH, DELETE /fleet/hosts/<id>  password, hidden, removal
+  GET  /fleet/hosts/<id>/drives  one judged read of self, replicas or a host
+  GET  /ha/devices               entries and device pages in Home Assistant
+  POST /ha/add                   add self, the replicas or a host to it
+  GET, POST /replicas            replica files: the list, an upload
+  POST /replicas/add             add replica cards from files
+  POST /replicas/save-as         save a real drive as a replica file
+  GET  /replicas/<card>/file     download a replica as it reads now
+  DELETE /replicas/<card>        take a replica off the page
 
 The verdict comes from the integration's own rule modules (attention.py,
 devstat.py, extract.py, pool_health.py), which the Dockerfile takes from the
@@ -73,6 +86,7 @@ MAX_BODY = 4 * 1024 * 1024  # largest JSON request body the app routes accept
 HA_API_CACHE_SECONDS = 30
 REFRESH_MINUTES = 15  # how often the page re-reads stored field agents
 REPLICA_AGENT_TIMEOUT = 1.0  # seconds, /app/info's check of the replica agent
+MAX_REPLICA_BYTES = 1_048_576  # a replica file, as the replica agent limits it
 
 # Matches the titles the integration's config flow gives its entries:
 #   user step:     "SMART Sniffer (<host>:<port>)"
@@ -1527,6 +1541,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ("GET", r"/fleet/hosts/(?P<key>[^/]+)/drives", "_route_host_drives"),
         ("GET", r"/ha/devices", "_route_ha_devices"),
         ("POST", r"/ha/add", "_route_ha_add"),
+        ("GET", r"/replicas", "_route_replicas_list"),
+        ("POST", r"/replicas", "_route_replicas_upload"),
+        ("POST", r"/replicas/add", "_route_replicas_add"),
+        ("POST", r"/replicas/save-as", "_route_replicas_save_as"),
+        ("GET", r"/replicas/(?P<card_id>[^/]+)/file", "_route_replica_file"),
+        ("DELETE", r"/replicas/(?P<card_id>[^/]+)", "_route_replica_delete"),
     ]
 
     def log_message(self, format, *args):
@@ -2000,6 +2020,143 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "rules_version": last.get("rules_version") or self.rules.version,
             "stale": True,
         }
+
+    # ── /replicas ──
+
+    def _mock_or_down(self, method: str, path: str, body: Any = None,
+                      raw_body: bytes | None = None) -> AgentReply:
+        reply = self._mock(method, path, body=body, raw_body=raw_body)
+        if reply.status is None:
+            raise ApiError(503, "replica_agent_down", "the replica agent is not answering")
+        return reply
+
+    def _relay(self, reply: AgentReply, ok: int | None = None) -> None:
+        """Answer with the replica agent's own status and JSON body."""
+        body = reply.body if reply.body is not None else {
+            "error": "replica_agent_failed", "message": f"HTTP {reply.status}"}
+        if isinstance(body, dict) and "error" in body and "message" not in body:
+            body = {**body, "message": None}
+        self._send_json(ok if ok is not None and reply.status in (200, 201) else reply.status, body)
+
+    def _route_replicas_list(self, _parsed) -> None:
+        self._relay(self._mock_or_down("GET", "/api/replicas"))
+
+    def _route_replicas_upload(self, _parsed) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            raise ApiError(400, "bad_request", "bad Content-Length") from None
+        if length > MAX_REPLICA_BYTES + 64 * 1024:
+            # Read and drop what was sent (up to a limit), so the page gets
+            # the answer rather than a broken connection.
+            remaining = length if length <= 16 * MAX_REPLICA_BYTES else 0
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+            self.close_connection = True
+            raise ApiError(413, "too_large", "A replica file is at most 1 MB.")
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            raise ApiError(422, "invalid_replica", "not valid JSON") from None
+        if not isinstance(doc, dict):
+            raise ApiError(422, "invalid_replica", "a replica file is a JSON object")
+        body = doc if set(doc) == {"file"} else {"file": doc}
+        self._relay(self._mock_or_down("POST", "/api/replicas", body=body))
+
+    def _route_replicas_add(self, _parsed) -> None:
+        body = self._read_json()
+        files = body.get("files") if isinstance(body, dict) else None
+        if not isinstance(files, list) or not files or not all(isinstance(f, str) for f in files):
+            raise ApiError(400, "bad_request", 'give {"files": ["<file id>", ...]}')
+        cards: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for file_id in files:
+            reply = self._mock_or_down("POST", "/api/drives", body={"replica": file_id})
+            if reply.status == 201 and isinstance(reply.body, dict):
+                cards.append({"file": file_id, "card_id": self._card_id(reply.body)})
+            else:
+                error = reply.body.get("error") if isinstance(reply.body, dict) else None
+                failed.append({"file": file_id, "error": error or f"http_{reply.status}"})
+        self._send_json(201, {"cards": cards, "failed": failed})
+
+    @staticmethod
+    def _card_id(added: dict[str, Any]) -> str:
+        if added.get("kind") == "pool":
+            return f"pool.{added.get('name') or added.get('id')}"
+        return str(added.get("id"))
+
+    @staticmethod
+    def _replica_path(card_id: str) -> str:
+        if card_id.startswith("pool."):
+            return f"/api/pools/{quote(card_id[len('pool.'):], safe='')}"
+        return f"/api/drives/{quote(card_id, safe='')}"
+
+    def _route_replica_file(self, _parsed, card_id: str) -> None:
+        reply = self._mock_or_down("GET", self._replica_path(card_id) + "/replica")
+        if reply.status != 200:
+            raise ApiError(404, "not_found", "no such replica")
+        disposition = reply.headers.get("content-disposition") or (
+            f'attachment; filename="{re.sub(r"[^A-Za-z0-9._-]+", "-", card_id)}.json"')
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Disposition", disposition)
+        self.send_header("Content-Length", str(len(reply.raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(reply.raw)
+
+    def _route_replica_delete(self, _parsed, card_id: str) -> None:
+        reply = self._mock_or_down("DELETE", self._replica_path(card_id))
+        if reply.status != 200:
+            raise ApiError(404, "not_found", "no such replica")
+        self._send_json(200, {"removed": card_id})
+
+    def _route_replicas_save_as(self, _parsed) -> None:
+        body = self._read_json()
+        source = body.get("host") if isinstance(body, dict) else None
+        drive_id = body.get("drive_id") if isinstance(body, dict) else None
+        if not isinstance(source, str) or not isinstance(drive_id, str) or not drive_id:
+            raise ApiError(400, "bad_request", 'give {"host": "self" or a field agent id, "drive_id"}')
+        if source == "self":
+            address, port, token = "127.0.0.1", self.agent_port, self.token
+        else:
+            host = self.host_store.find(source)
+            if host is None:
+                raise ApiError(404, "not_found", "no such field agent")
+            address, port, token = host["address"], host["port"], host.get("password") or ""
+        reply = agent_call(address, port, "GET", f"/api/drives/{quote(drive_id, safe='')}",
+                           token=token, connect_timeout=AGENT_HEALTH_TIMEOUT,
+                           read_timeout=AGENT_READ_TIMEOUT)
+        if reply.status is None:
+            raise ApiError(504, "not_answering", "the agent did not answer")
+        if reply.status == 401:
+            raise ApiError(422, "password_refused" if token else "password_needed",
+                           "the agent wants a password")
+        if reply.status != 200 or not isinstance(reply.body, dict):
+            raise ApiError(404, "not_found", "no such drive")
+        drive = reply.body
+        verdict = None
+        if self.rules.load():
+            full = self.rules.evaluate(dict(drive))
+            if full["state"] == "UNSUPPORTED":
+                raise ApiError(409, "unsupported_drive", "This drive gives no SMART data to copy.")
+            verdict = {"state": full["state"], "severity": full["severity"],
+                       "reasons": full["reasons"], "rules_version": full["rules_version"],
+                       "at": utc_now()}
+        saved = self._mock_or_down("POST", "/api/replicas",
+                                   body={"from_drive": drive, "verdict": verdict})
+        if saved.status != 201 or not isinstance(saved.body, dict):
+            self._relay(saved)
+            return
+        entry = saved.body
+        added = self._mock_or_down("POST", "/api/drives", body={"replica": entry.get("id")})
+        card_id = self._card_id(added.body) if added.status == 201 and isinstance(added.body, dict) else None
+        log(f"Saved a replica of drive {drive_id}")
+        self._send_json(201, {"file": entry, "card_id": card_id})
 
     # ── /ha/devices ──
 
