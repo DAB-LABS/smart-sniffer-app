@@ -22,7 +22,7 @@
 
 ### Removed
 
-- **The Test Lab switch and the `mock_mode` option** (Enable Mock Test Drives). The Supervisor drops the option when the app updates. Drives you had in the Test Lab come back as replicas, and an integration entry you had for the Test Lab now serves the replicas.
+- **The Test Lab switch and the `mock_mode` option** (Enable Mock Test Drives). The app removes the old option from its options when it starts after the update. Drives you had in the Test Lab come back as replicas, and an integration entry you had for the Test Lab now serves the replicas.
 - The Control Center's Connect and Disconnect buttons. Adding is the exit glyph; removing an entry happens in Home Assistant.
 
 ## 0.2.12 — 2026-09-17
