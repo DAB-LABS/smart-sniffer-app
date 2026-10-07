@@ -436,6 +436,35 @@ def test_closing_the_add_card_cancels_the_scan(open_page):
     assert p.api("DELETE", r"/fleet/scan/")
 
 
+def _set_hidden(p: Page, hidden: bool) -> None:
+    p.page.evaluate("""(hidden) => {
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+        document.dispatchEvent(new Event('visibilitychange'));
+    }""", hidden)
+
+
+def test_scan_polling_pauses_while_hidden_and_resumes_at_once(open_page):
+    p = open_page("SCAN=slow")
+    open_add(p)
+    p.page.wait_for_timeout(900)
+    polls = lambda: len(p.api("GET", r"/fleet/scan/"))  # noqa: E731
+    assert polls() >= 1
+    _set_hidden(p, True)
+    p.page.wait_for_timeout(500)
+    before = polls()
+    probed = p.page.evaluate("() => Alpine.$data(document.body).add.scan.probed")
+    p.page.wait_for_timeout(1600)
+    assert polls() == before  # nothing while hidden
+    # Shown again: a poll at once, well inside the 400 ms rhythm, and the
+    # bar catches up with the time spent hidden.
+    _set_hidden(p, False)
+    p.page.wait_for_timeout(60)
+    assert polls() == before + 1
+    p.page.wait_for_function(f"() => Alpine.$data(document.body).add.scan.probed > {probed}", timeout=2000)
+    p.page.wait_for_timeout(900)
+    assert before + 2 <= polls() <= before + 5  # one poll loop, not two
+
+
 def test_nothing_answered(open_page):
     p = open_page("SCAN=none&HOSTS=one")
     open_add(p)

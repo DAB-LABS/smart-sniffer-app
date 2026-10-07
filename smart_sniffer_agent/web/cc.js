@@ -83,6 +83,8 @@ function cc() {
     optimistic: {},
     ha: null,
     haTimers: [],
+    scanTimer: null,
+    scanPolling: false,
     now: Date.now(),
     showHidden: false,
     hideErr: '',
@@ -102,7 +104,11 @@ function cc() {
       this.loadHosts();
       this.loadHa();
       setInterval(() => this.tick(), 1000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) this.tick(); });
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) return;
+        this.tick();
+        this.resumeScan();
+      });
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && this.ui.confirm) this.closeConfirm();
       });
@@ -873,11 +879,17 @@ function cc() {
       this.add.scan.total = r.data.total;
       this.pollScan(r.data.scan_id);
     },
-    pollScan(id) {
-      setTimeout(async () => {
+    // One poll every 400 ms while the page is visible. A hidden page waits;
+    // when it shows again resumeScan() polls at once so the bar catches up.
+    pollScan(id, delay = 400) {
+      clearTimeout(this.scanTimer);
+      this.scanTimer = setTimeout(async () => {
+        this.scanTimer = null;
         if (this.add.scanId !== id) return;
         if (document.hidden) { this.pollScan(id); return; }
+        this.scanPolling = true;
         const r = await this.request(`fleet/scan/${enc(id)}`);
+        this.scanPolling = false;
         if (this.add.scanId !== id) return;
         if (!r.ok || !r.data) {
           if (this.add.scan) this.add.scan.state = 'done';
@@ -890,7 +902,11 @@ function cc() {
         this.add.scan = r.data;
         if (r.data.state === 'running') this.pollScan(id);
         else this.add.scanId = null;
-      }, 400);
+      }, delay);
+    },
+    resumeScan() {
+      // A request already on its way schedules the next poll itself.
+      if (this.add.scanId && !this.scanPolling) this.pollScan(this.add.scanId, 0);
     },
     useSuggest() {
       this.add.block = this.add.wide.suggest;
