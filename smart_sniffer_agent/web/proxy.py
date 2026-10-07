@@ -79,6 +79,28 @@ REPLICA_AGENT_TIMEOUT = 1.0  # seconds, /app/info's check of the replica agent
 #   zeroconf step: "SMART Sniffer (<hostname>)"
 _TITLE_RE = re.compile(r"^SMART Sniffer \((?P<inner>.+)\)$")
 
+INTEGRATION_URL = "/config/integrations/integration/smart_sniffer"
+
+# Every device of the integration with its id, name, serial number,
+# identifiers and config entries, printed as JSON by Core's template
+# endpoint. The REST API has no device registry list; the websocket API does,
+# but this proxy has no websocket client. Sets become lists for to_json.
+DEVICES_TEMPLATE = (
+    "{%- set ns = namespace(ids=[]) -%}"
+    "{%- for e in integration_entities('smart_sniffer') -%}"
+    "{%- set d = device_id(e) -%}"
+    "{%- if d and d not in ns.ids -%}{%- set ns.ids = ns.ids + [d] -%}{%- endif -%}"
+    "{%- endfor -%}"
+    "[{%- for d in ns.ids -%}"
+    '{"id": {{ d | to_json }}, '
+    '"name": {{ device_attr(d, \'name\') | to_json }}, '
+    '"serial_number": {{ device_attr(d, \'serial_number\') | to_json }}, '
+    '"identifiers": {{ (device_attr(d, \'identifiers\') or []) | list | map(\'list\') | list | to_json }}, '
+    '"config_entries": {{ (device_attr(d, \'config_entries\') or []) | list | to_json }}}'
+    "{{ ',' if not loop.last else '' }}"
+    "{%- endfor -%}]"
+)
+
 
 def log(message: str) -> None:
     print(f"[webui] {message}", flush=True)
@@ -1061,6 +1083,19 @@ def resolve_ipv4(name: str, budget: float = LOOKUP_BUDGET) -> str | None:
     return None
 
 
+_IPV4_CACHE: dict[str, tuple[float, str | None]] = {}
+
+
+def cached_ipv4(name: str) -> str | None:
+    """resolve_ipv4(), remembered for five minutes."""
+    hit = _IPV4_CACHE.get(name)
+    if hit and time.monotonic() - hit[0] < 300:
+        return hit[1]
+    address = resolve_ipv4(name)
+    _IPV4_CACHE[name] = (time.monotonic(), address)
+    return address
+
+
 def reverse_name(address: str) -> str | None:
     """A short host name for an address, within the lookup budget."""
     found = _with_budget(socket.gethostbyaddr, address)
@@ -1473,6 +1508,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
     host_store: HostStore = HostStore(supervisor)
     cache: FleetCache = FleetCache(None)
     scans: ScanManager = ScanManager()
+    ha_cache_seconds: float = HA_API_CACHE_SECONDS
+    _ha_cache: tuple[float, dict[str, Any]] | None = None
 
     # The routes answered by the proxy itself: (method, path pattern, handler
     # name). Path parameters are named groups, percent-decoded before use.
@@ -1488,10 +1525,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ("PATCH", r"/fleet/hosts/(?P<key>[^/]+)", "_route_host_patch"),
         ("DELETE", r"/fleet/hosts/(?P<key>[^/]+)", "_route_host_delete"),
         ("GET", r"/fleet/hosts/(?P<key>[^/]+)/drives", "_route_host_drives"),
-        ("GET", r"/ha/status", "_route_ha_status"),
-        ("POST", r"/ha/connect", "_route_ha_connect"),
-        ("POST", r"/ha/disconnect", "_route_ha_disconnect"),
-        ("GET", r"/ha/verdict", "_route_ha_verdict"),
+        ("GET", r"/ha/devices", "_route_ha_devices"),
+        ("POST", r"/ha/add", "_route_ha_add"),
     ]
 
     def log_message(self, format, *args):
@@ -1606,13 +1641,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return json.loads(raw)
         except ValueError:
             raise ApiError(400, "bad_request", "body is not JSON") from None
-
-    def _target_port(self, target: str) -> int | None:
-        if target in ("agent", "self"):
-            return self.agent_port
-        if target in ("testlab", "replicas"):
-            return self.mock_port
-        return None
 
     def _mock(self, method: str, path: str, body: Any = None, timeout: float = 5.0,
               raw_body: bytes | None = None) -> AgentReply:
@@ -1973,7 +2001,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "stale": True,
         }
 
-    # ── /ha/status ──
+    # ── /ha/devices ──
 
     def _own_hosts(self) -> set[str]:
         hosts = {self.agent_host.lower()}
@@ -1983,34 +2011,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             pass
         return hosts
 
-    def _classify_entry(self, entry: dict[str, Any]) -> str | None:
-        """Which of this app's agents an entry points at: "agent", "testlab"
-        or None. Decided from the title the config flow wrote."""
-        match = _TITLE_RE.match(str(entry.get("title") or ""))
-        if not match:
-            return None
-        inner = match.group("inner").strip()
-        own = self._own_hosts()
-        host, sep, port = inner.rpartition(":")
-        if sep and port.isdigit():
-            if host.lower() not in own:
-                return None
-            if int(port) == self.agent_port:
-                return "agent"
-            if int(port) == self.mock_port:
-                return "testlab"
-            return None
-        if inner.lower() not in own:
-            return None
-        # A zeroconf entry names the host but not the port. Both of this app's
-        # agents advertise the same container hostname, so ask the entry's
-        # diagnostics for its port; when that is not possible it is the agent.
-        port_seen = self._entry_port(entry.get("entry_id"))
-        if port_seen == self.mock_port:
-            return "testlab"
-        return "agent"
-
-    def _entry_port(self, entry_id: Any) -> int | None:
+    def _entry_config(self, entry_id: Any) -> dict[str, Any] | None:
+        """host and port from an entry's diagnostics, or None."""
         if not isinstance(entry_id, str) or not entry_id:
             return None
         status, diag = self.supervisor.core(
@@ -2020,202 +2022,204 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return None
         data = diag.get("data") if isinstance(diag.get("data"), dict) else diag
         config = data.get("config_entry") if isinstance(data, dict) else None
-        port = config.get("port") if isinstance(config, dict) else None
-        try:
-            return int(port)
-        except (TypeError, ValueError):
+        return config if isinstance(config, dict) else None
+
+    def _match_stored(self, host: str, port: int, stored: list[dict[str, Any]]) -> str | None:
+        """The stored field agent at host:port, compared on the stored address
+        and on the IPv4 address both names resolve to."""
+        host = host.lower()
+        candidates = [h for h in stored if h["port"] == port]
+        for item in candidates:
+            if item["address"] == host:
+                return host_id(item["address"], item["port"])
+        wanted = cached_ipv4(host)
+        if wanted is None:
             return None
+        for item in candidates:
+            if cached_ipv4(item["address"]) == wanted:
+                return host_id(item["address"], item["port"])
+        return None
 
-    def _ha_status(self) -> dict[str, Any]:
+    def _entry_target(self, entry: dict[str, Any], stored: list[dict[str, Any]]) -> str | None:
+        """Which target an entry belongs to: "self", "replicas", a stored
+        host's id, or None. Decided from the title the config flow wrote, and
+        for a zeroconf title (hostname only) from the entry's diagnostics."""
+        match = _TITLE_RE.match(str(entry.get("title") or ""))
+        if not match:
+            return None
+        inner = match.group("inner").strip()
+        own = self._own_hosts()
+        host, sep, port_text = inner.rpartition(":")
+        if sep and port_text.isdigit():
+            port = int(port_text)
+            if host.lower() in own:
+                if port == self.agent_port:
+                    return "self"
+                if port == self.mock_port:
+                    return "replicas"
+                return None
+            return self._match_stored(host, port, stored)
+        config = self._entry_config(entry.get("entry_id"))
+        port = valid_port(config.get("port")) if config else None
+        if inner.lower() in own:
+            # Both of this app's agents advertise the container hostname, so
+            # the port tells them apart; without it the entry is the agent's.
+            return "replicas" if port == self.mock_port else "self"
+        if config is None or port is None:
+            return None
+        found = self._match_stored(str(config.get("host") or ""), port, stored)
+        return found or self._match_stored(inner, port, stored)
+
+    def _ha_lookup(self, fresh: bool = False) -> dict[str, Any]:
+        """The /ha/devices answer, cached ha_cache_seconds (30 s); dropped
+        after any /ha/add."""
+        cls = type(self)
+        cached = cls._ha_cache
+        if not fresh and cached and time.monotonic() - cached[0] < cls.ha_cache_seconds:
+            return cached[1]
         sv = self.supervisor
-        targets = {
-            name: {
-                "host": self.agent_host,
-                "port": self._target_port(name),
-                "entry_id": None,
-                "state": None,
-            }
-            for name in ("agent", "testlab")
+        result: dict[str, Any] = {
+            "installed": None, "reachable": False, "lookup": None,
+            "integration_url": INTEGRATION_URL, "targets": {},
         }
-        result = {"reachable": False, "integration_loaded": False, "targets": targets}
-        if not sv.available or not sv.core_reachable():
-            return result
-        result["reachable"] = True
-
-        status, entries = sv.core(
-            "GET", f"/config/config_entries/entry?domain={INTEGRATION_DOMAIN}"
-        )
-        if status != 200 or not isinstance(entries, list):
-            entries = []
-        entries = [
-            e for e in entries
-            if isinstance(e, dict) and e.get("domain", INTEGRATION_DOMAIN) == INTEGRATION_DOMAIN
-        ]
-        for entry in entries:
-            name = self._classify_entry(entry)
-            if name and targets[name]["entry_id"] is None:
-                targets[name]["entry_id"] = entry.get("entry_id")
-                targets[name]["state"] = entry.get("state")
-
-        # The integration counts as there when it has any entry, is set up, or
-        # offers a config flow (installed through HACS, no entry yet).
-        loaded = bool(entries)
-        if not loaded:
-            status, config = sv.core("GET", "/config")
-            if status == 200 and isinstance(config, dict):
-                loaded = INTEGRATION_DOMAIN in (config.get("components") or [])
-        if not loaded:
-            status, handlers = sv.core("GET", "/config/config_entries/flow_handlers")
-            if status == 200 and isinstance(handlers, list):
-                loaded = INTEGRATION_DOMAIN in handlers
-        result["integration_loaded"] = loaded
+        if sv.available and sv.core_reachable():
+            entries = sv.entries() or []
+            result["reachable"] = True
+            result["installed"] = sv.integration_installed(entries)
+            stored = self.host_store.hosts_quick()
+            targets: dict[str, dict[str, Any]] = {}
+            for entry in entries:
+                key = self._entry_target(entry, stored)
+                entry_id = entry.get("entry_id")
+                if key and key not in targets and isinstance(entry_id, str):
+                    targets[key] = {
+                        "entry_id": entry_id,
+                        "entry_url": f"{INTEGRATION_URL}#config_entry={quote(entry_id, safe='')}",
+                        "state": entry.get("state"),
+                        "devices": {},
+                    }
+            status, devices = sv.call("POST", "/core/api/template",
+                                      {"template": DEVICES_TEMPLATE})
+            if status == 200 and isinstance(devices, list):
+                result["lookup"] = "registry"
+                by_entry = {t["entry_id"]: t for t in targets.values()}
+                for device in devices:
+                    if not isinstance(device, dict) or not isinstance(device.get("id"), str):
+                        continue
+                    for entry_id in device.get("config_entries") or []:
+                        target = by_entry.get(entry_id)
+                        if target is None:
+                            continue
+                        serial = device.get("serial_number")
+                        if isinstance(serial, str) and serial:
+                            target["devices"][serial] = device["id"]
+                        prefix = f"{entry_id}_zpool_"
+                        for ident in device.get("identifiers") or []:
+                            if (isinstance(ident, list) and len(ident) == 2
+                                    and ident[0] == INTEGRATION_DOMAIN
+                                    and str(ident[1]).startswith(prefix)):
+                                target["devices"][f"pool:{str(ident[1])[len(prefix):]}"] = device["id"]
+            else:
+                result["lookup"] = "entries_only"
+            result["targets"] = targets
+        cls._ha_cache = (time.monotonic(), result)
         return result
 
-    def _route_ha_status(self, _parsed) -> None:
-        self._send_json(200, self._ha_status())
+    def _route_ha_devices(self, _parsed) -> None:
+        self._send_json(200, self._ha_lookup())
 
-    # ── /ha/connect ──
+    # ── /ha/add ──
 
-    def _route_ha_connect(self, _parsed) -> None:
-        try:
-            body = self._read_json()
-        except ApiError:
-            body = None
+    def _route_ha_add(self, _parsed) -> None:
+        body = self._read_json()
         target = body.get("target") if isinstance(body, dict) else None
-        port = self._target_port(target) if target in ("agent", "testlab") else None
-        if port is None:
-            self._send_json(400, {"error": 'target must be "agent" or "testlab"'})
-            return
+        if target == "self":
+            host, port, token = self.agent_host, self.agent_port, self.token
+        elif target == "replicas":
+            host, port, token = self.agent_host, self.mock_port, ""
+        elif isinstance(target, str):
+            stored = next((h for h in self.host_store.hosts()
+                           if host_id(h["address"], h["port"]) == target), None)
+            if stored is None:
+                raise ApiError(400, "bad_target", 'target must be "self", "replicas" or a field agent id')
+            host, port, token = stored["address"], stored["port"], stored.get("password") or ""
+        else:
+            raise ApiError(400, "bad_target", 'target must be "self", "replicas" or a field agent id')
+        try:
+            outcome, code = self._ha_add(target, host, port, token)
+        finally:
+            type(self)._ha_cache = None
+            self.supervisor.forget_installed()
+        self._send_json(code, outcome)
 
-        status_now = self._ha_status()
-        if not status_now["reachable"]:
-            self._send_json(502, {"result": "error", "message": "unreachable"})
-            return
-        existing = status_now["targets"][target]["entry_id"]
-        if existing:
-            self._send_json(200, {"result": "already_connected", "entry_id": existing})
-            return
+    def _ha_add(self, target: str, host: str, port: int, token: str) -> tuple[dict[str, Any], int]:
+        def failed(message: str) -> tuple[dict[str, Any], int]:
+            return {"error": "add_failed", "result": "error", "message": message}, 502
 
+        lookup = self._ha_lookup(fresh=True)
+        if not lookup["reachable"]:
+            return failed("unreachable")
+        existing = lookup["targets"].get(target)
         sv = self.supervisor
+        if existing:
+            entry_id = existing["entry_id"]
+            if target != "replicas":
+                return {"result": "already_added", "entry_id": entry_id}, 200
+            # All replicas share one entry: reload it so a new replica shows
+            # now rather than at the next poll.
+            status, _ = sv.core(
+                "POST", f"/config/config_entries/entry/{quote(entry_id, safe='')}/reload"
+            )
+            if status != 200:
+                return failed("flow_failed")
+            return {"result": "reloaded", "entry_id": entry_id}, 200
+
         status, flow = sv.core("POST", "/config/config_entries/flow", {
             "handler": INTEGRATION_DOMAIN,
             "show_advanced_options": False,
         })
         if status != 200 or not isinstance(flow, dict):
-            message = "integration_not_loaded" if status == 404 else "flow_failed"
-            self._send_json(502, {"result": "error", "message": message})
-            return
+            return failed("integration_not_loaded" if status == 404 else "flow_failed")
         if flow.get("type") != "form" or not flow.get("flow_id"):
-            self._send_json(200, self._flow_outcome(flow))
-            return
+            return self._flow_outcome(flow)
 
         flow_id = str(flow["flow_id"])
         flow_path = f"/config/config_entries/flow/{quote(flow_id, safe='')}"
         status, step = sv.core("POST", flow_path, {
-            "host": self.agent_host,
-            "port": port,
-            "token": self.token if target == "agent" else "",
-            "scan_interval": 60,
+            "host": host, "port": port, "token": token, "scan_interval": 60,
         })
         if status != 200 or not isinstance(step, dict):
             sv.core("DELETE", flow_path)
-            self._send_json(502, {"result": "error", "message": "flow_failed"})
-            return
-        outcome = self._flow_outcome(step)
+            return failed("flow_failed")
         if step.get("type") == "form":
             sv.core("DELETE", flow_path)  # do not leave a half-finished flow behind
-        if outcome["result"] == "created":
-            log(f"Integration entry added for the {target} on port {port}")
-        self._send_json(200, outcome)
+        outcome = self._flow_outcome(step)
+        if outcome[0].get("result") == "created":
+            log(f"Integration entry added for {target}")
+        return outcome
 
     @staticmethod
-    def _flow_outcome(step: dict[str, Any]) -> dict[str, Any]:
+    def _flow_outcome(step: dict[str, Any]) -> tuple[dict[str, Any], int]:
         kind = step.get("type")
         if kind == "create_entry":
             entry = step.get("result")
             entry_id = entry.get("entry_id") if isinstance(entry, dict) else None
-            return {"result": "created", "entry_id": entry_id or step.get("entry_id")}
+            return {"result": "created", "entry_id": entry_id or step.get("entry_id")}, 200
+        message: Any = None
         if kind == "abort":
             reason = step.get("reason")
             if reason == "already_configured":
-                return {"result": "already_connected"}
-            return {"result": "error", "message": reason or "aborted"}
-        if kind == "form":
+                return {"result": "already_added", "entry_id": None}, 200
+            message = reason or "aborted"
+        elif kind == "form":
             errors = step.get("errors") or {}
             message = errors.get("base") if isinstance(errors, dict) else None
             if not message and isinstance(errors, dict) and errors:
                 message = next(iter(errors.values()))
-            return {"result": "error", "message": message or "unexpected_form"}
-        return {"result": "error", "message": f"unexpected_{kind or 'reply'}"}
-
-    # ── /ha/disconnect ──
-
-    def _route_ha_disconnect(self, _parsed) -> None:
-        try:
-            body = self._read_json()
-        except ApiError:
-            body = None
-        target = body.get("target") if isinstance(body, dict) else None
-        if target != "testlab":
-            self._send_json(400, {"error": "only the Test Lab can be disconnected here"})
-            return
-        status_now = self._ha_status()
-        if not status_now["reachable"]:
-            self._send_json(502, {"result": "error", "message": "unreachable"})
-            return
-        entry_id = status_now["targets"]["testlab"]["entry_id"]
-        if not entry_id:
-            self._send_json(200, {"result": "not_connected"})
-            return
-        status, _ = self.supervisor.core(
-            "DELETE", f"/config/config_entries/entry/{quote(str(entry_id), safe='')}"
-        )
-        if status != 200:
-            self._send_json(502, {"result": "error", "message": "delete_failed"})
-            return
-        log("Integration entry for the Test Lab removed")
-        self._send_json(200, {"result": "removed", "entry_id": entry_id})
-
-    # ── /ha/verdict ──
-
-    def _route_ha_verdict(self, parsed) -> None:
-        from urllib.parse import parse_qs
-
-        serial = (parse_qs(parsed.query).get("serial") or [""])[0]
-        slug = re.sub(r"[^a-z0-9]+", "_", str(serial).lower()).strip("_")
-        if not slug:
-            self._send_json(400, {"error": "serial is required"})
-            return
-        if not self.supervisor.available:
-            self._send_json(502, {"error": "home assistant not reachable"})
-            return
-        status, states = self.supervisor.core("GET", "/states")
-        if status != 200 or not isinstance(states, list):
-            self._send_json(502, {"error": "home assistant not reachable"})
-            return
-
-        matches = [
-            s for s in states
-            if isinstance(s, dict)
-            and str(s.get("entity_id", "")).endswith("_attention_needed")
-            and slug in str(s.get("entity_id", ""))
-        ]
-        matches.sort(key=lambda s: s.get("state") in ("unavailable", "unknown"))
-        if not matches:
-            self._send_json(200, {
-                "found": False, "entity_id": None, "state": None,
-                "severity": None, "reasons": None,
-            })
-            return
-        best = matches[0]
-        attrs = best.get("attributes") if isinstance(best.get("attributes"), dict) else {}
-        self._send_json(200, {
-            "found": True,
-            "entity_id": best.get("entity_id"),
-            "state": best.get("state"),
-            "severity": attrs.get("severity"),
-            "reasons": attrs.get("reasons"),
-        })
+            message = message or "unexpected_form"
+        else:
+            message = f"unexpected_{kind or 'reply'}"
+        return {"error": "add_failed", "result": "error", "message": message}, 502
 
     # ── proxy and static files ──
 
@@ -2330,6 +2334,8 @@ def main():
                              "(run.sh passes the container hostname)")
     parser.add_argument("--mdns-name", type=str, default="",
                         help="The agent's mDNS name, shown on the page (empty: none)")
+    parser.add_argument("--ha-cache-seconds", type=float, default=HA_API_CACHE_SECONDS,
+                        help="How long /ha/devices is cached")
     parser.add_argument("--data-dir", type=str, default="/data",
                         help="Where fleet-cache.json is kept (empty: memory only)")
     args = parser.parse_args()
@@ -2345,6 +2351,7 @@ def main():
         args.supervisor_url, os.environ.get("SUPERVISOR_TOKEN", "")
     )
     ProxyHandler.host_store = HostStore(ProxyHandler.supervisor)
+    ProxyHandler.ha_cache_seconds = args.ha_cache_seconds
     ProxyHandler.cache = FleetCache(
         os.path.join(args.data_dir, "fleet-cache.json") if args.data_dir else None
     )

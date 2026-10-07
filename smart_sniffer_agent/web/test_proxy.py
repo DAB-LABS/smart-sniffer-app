@@ -94,6 +94,7 @@ class FakeState:
         self.components: list[str] = ["sensor", "zeroconf"]
         self.flow_handlers: list[str] = ["met", "zha"]
         self.flow_step: dict[str, Any] = {"type": "create_entry"}
+        self.handler_known = True  # False: the integration is not installed
         self.options: dict[str, Any] = {
             "port": 9099, "token": "", "scan_interval": 60,
             "mock_port": 9100, "hosts": [],
@@ -105,8 +106,8 @@ class FakeState:
             {"interface": "enp0s18", "primary": True, "connected": True,
              "ipv4": {"address": ["127.0.0.1/24"]}},
         ]}
-        self.states: list[dict[str, Any]] = []
-        self.diagnostics: dict[str, int] = {}  # entry_id -> port
+        self.diagnostics: dict[str, Any] = {}  # entry_id -> port, or {"host", "port"}
+        self.devices: list[dict[str, Any]] | None = []  # None: the template call fails
         self.calls: list[tuple[str, str, Any]] = []
         self.restarted = threading.Event()
 
@@ -185,7 +186,7 @@ class FakeSupervisor(BaseHTTPRequestHandler):
             STATE.entries = [e for e in STATE.entries if e["entry_id"] != entry_id]
             _json_reply(self, 200, {"require_restart": False})
         elif core == "/config/config_entries/flow" and method == "POST":
-            if body.get("handler") != "smart_sniffer":
+            if body.get("handler") != "smart_sniffer" or not STATE.handler_known:
                 _json_reply(self, 404, {"message": "Invalid handler specified"})
                 return
             _json_reply(self, 200, {
@@ -201,11 +202,24 @@ class FakeSupervisor(BaseHTTPRequestHandler):
             if entry_id not in STATE.diagnostics:
                 _json_reply(self, 404, {"message": "not found"})
                 return
-            _json_reply(self, 200, {"data": {"config_entry": {
-                "host": "172.30.33.5", "port": STATE.diagnostics[entry_id],
-            }}})
-        elif core == "/states" and method == "GET":
-            _json_reply(self, 200, STATE.states)
+            config = STATE.diagnostics[entry_id]
+            if not isinstance(config, dict):
+                config = {"host": "172.30.33.5", "port": config}
+            _json_reply(self, 200, {"data": {"config_entry": config}})
+        elif core == "/template" and method == "POST":
+            if STATE.devices is None:
+                _json_reply(self, 400, {"message": "Error rendering template"})
+                return
+            # Core answers the rendered text, here the JSON the template prints.
+            text = json.dumps(STATE.devices).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(text)))
+            self.end_headers()
+            self.wfile.write(text)
+        elif (core.startswith("/config/config_entries/entry/") and core.endswith("/reload")
+              and method == "POST"):
+            _json_reply(self, 200, {"require_restart": False})
         else:
             _json_reply(self, 404, {"message": f"no fake for {method} {core}"})
 
@@ -458,6 +472,7 @@ def proxy(backends, mock_agent, data_dir):
         f"--mdns-name={MDNS_NAME}",
         f"--token={APP_TOKEN}",
         f"--data-dir={data_dir}",
+        "--ha-cache-seconds=0",
     ], TOKEN)
     client.agent_port = agent_port  # type: ignore[attr-defined]
     client.mock_port = mock_port  # type: ignore[attr-defined]
@@ -1447,181 +1462,198 @@ def test_summary_header(mod, states, ok, header):
     assert mod.summarize(states, ok)["header"] == header
 
 
-# ── /ha/status ──────────────────────────────────────────────────────────────
+# ── /ha/devices ─────────────────────────────────────────────────────────────
 
-def test_ha_status_unreachable(proxy):
+def _device(device_id: str, entry_id: str, serial: str | None = None,
+            pool: str | None = None) -> dict[str, Any]:
+    identifiers = [["smart_sniffer", f"{entry_id}_{serial}" if serial else f"{entry_id}_zpool_{pool}"]]
+    return {"id": device_id, "name": serial or f"ZFS pool {pool}", "serial_number": serial,
+            "identifiers": identifiers, "config_entries": [entry_id]}
+
+
+def test_ha_devices_core_down(proxy):
     STATE.core_status = 401
-    status, body = proxy.get("/ha/status")
+    status, body = proxy.get("/ha/devices")
     assert status == 200
-    assert body["reachable"] is False
-    assert body["integration_loaded"] is False
-    assert body["targets"]["agent"] == {
-        "host": AGENT_HOST, "port": proxy.agent_port, "entry_id": None, "state": None,
-    }
-    assert body["targets"]["testlab"]["port"] == proxy.mock_port
+    assert body == {"installed": None, "reachable": False, "lookup": None,
+                    "integration_url": "/config/integrations/integration/smart_sniffer",
+                    "targets": {}}
 
 
-def test_ha_status_reachable_without_integration(proxy):
-    status, body = proxy.get("/ha/status")
-    assert status == 200
-    assert body["reachable"] is True
-    assert body["integration_loaded"] is False
-    assert body["targets"]["agent"]["entry_id"] is None
+def test_ha_devices_not_installed(proxy):
+    _, body = proxy.get("/ha/devices")
+    assert body["reachable"] is True and body["installed"] is False
+    assert body["targets"] == {}
 
 
-def test_ha_status_installed_but_no_entries(proxy):
-    STATE.flow_handlers.append("smart_sniffer")
-    _, body = proxy.get("/ha/status")
-    assert body["reachable"] is True and body["integration_loaded"] is True
-
-
-def test_ha_status_with_entries(proxy):
+def test_ha_devices_registry(proxy):
+    _store({"address": "10.0.10.20", "port": 9099}, {"address": "nas.lan", "port": 9099})
+    _refresh_hosts(proxy)
     STATE.entries = [
-        _entry("e-nas", "SMART Sniffer (nas.local:9099)"),
         _entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})"),
         _entry("e-lab", f"SMART Sniffer ({AGENT_HOST}:{proxy.mock_port})", state="setup_retry"),
+        _entry("e-field", "SMART Sniffer (10.0.10.20:9099)"),
+        _entry("e-other", "SMART Sniffer (somewhere.else:9099)"),
     ]
-    status, body = proxy.get("/ha/status")
+    STATE.devices = [
+        _device("dev-self", "e-agent", serial="S5GXNF0R412233A"),
+        _device("dev-drive", "e-field", serial="VK0ABCDE"),
+        _device("dev-pool", "e-field", pool="cache"),
+        _device("dev-elsewhere", "e-other", serial="ZZZ"),
+    ]
+    status, body = proxy.get("/ha/devices")
     assert status == 200
-    assert body["reachable"] is True
-    assert body["integration_loaded"] is True
-    assert body["targets"]["agent"]["entry_id"] == "e-agent"
-    assert body["targets"]["agent"]["state"] == "loaded"
-    assert body["targets"]["testlab"]["entry_id"] == "e-lab"
-    assert body["targets"]["testlab"]["state"] == "setup_retry"
+    assert body["installed"] is True and body["reachable"] is True
+    assert body["lookup"] == "registry"
+    assert set(body["targets"]) == {"self", "replicas", "10.0.10.20:9099"}
+    assert body["targets"]["self"] == {
+        "entry_id": "e-agent",
+        "entry_url": "/config/integrations/integration/smart_sniffer#config_entry=e-agent",
+        "state": "loaded",
+        "devices": {"S5GXNF0R412233A": "dev-self"},
+    }
+    assert body["targets"]["replicas"]["entry_id"] == "e-lab"
+    assert body["targets"]["10.0.10.20:9099"]["devices"] == {
+        "VK0ABCDE": "dev-drive", "pool:cache": "dev-pool"}
+    template = [c[2] for c in STATE.calls if c[1] == "/core/api/template"][0]["template"]
+    assert "integration_entities('smart_sniffer')" in template
 
 
-def test_ha_status_zeroconf_titles(proxy):
-    # Zeroconf entries carry the hostname only; the port comes from the
-    # entry's diagnostics, and without them the entry is the agent's.
+def test_ha_devices_template_fails(proxy):
+    STATE.entries = [_entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})")]
+    STATE.devices = None
+    _, body = proxy.get("/ha/devices")
+    assert body["lookup"] == "entries_only"
+    assert body["targets"]["self"]["devices"] == {}
+    assert body["targets"]["self"]["entry_url"].endswith("#config_entry=e-agent")
+
+
+def test_ha_devices_zeroconf_titles(proxy):
+    # Zeroconf entries carry the hostname only. This app's own: the port
+    # from the diagnostics tells the agent from the replicas, and without it
+    # the entry is the agent's. A field agent: host and port from the
+    # diagnostics, compared with the stored address.
+    _store({"address": "localhost", "port": 9200})
+    _refresh_hosts(proxy)
     STATE.entries = [
         _entry("z-agent", f"SMART Sniffer ({AGENT_HOST})"),
         _entry("z-lab", f"SMART Sniffer ({AGENT_HOST})"),
+        _entry("z-field", "SMART Sniffer (proxmox-01)"),
     ]
-    STATE.diagnostics = {"z-lab": proxy.mock_port}
-    _, body = proxy.get("/ha/status")
-    assert body["targets"]["agent"]["entry_id"] == "z-agent"
-    assert body["targets"]["testlab"]["entry_id"] == "z-lab"
+    STATE.diagnostics = {"z-lab": proxy.mock_port,
+                         "z-field": {"host": "127.0.0.1", "port": 9200}}
+    _, body = proxy.get("/ha/devices")
+    assert body["targets"]["self"]["entry_id"] == "z-agent"
+    assert body["targets"]["replicas"]["entry_id"] == "z-lab"
+    # localhost resolves to 127.0.0.1, the address in the diagnostics.
+    assert body["targets"]["localhost:9200"]["entry_id"] == "z-field"
 
 
-# ── /ha/connect ─────────────────────────────────────────────────────────────
+# ── /ha/add ─────────────────────────────────────────────────────────────────
 
-def test_ha_connect_creates_entry(proxy):
+def _flow_posts() -> list[tuple[str, str, Any]]:
+    return [c for c in STATE.calls
+            if c[1].startswith("/core/api/config/config_entries/flow") and c[0] == "POST"]
+
+
+def test_ha_add_self(proxy):
     STATE.flow_handlers.append("smart_sniffer")
-    STATE.flow_step = {
-        "type": "create_entry", "title": f"SMART Sniffer ({AGENT_HOST}:{proxy.mock_port})",
-        "result": {"entry_id": "new-lab", "domain": "smart_sniffer"},
-    }
-    status, body = proxy.post("/ha/connect", {"target": "testlab"})
-    assert status == 200
-    assert body == {"result": "created", "entry_id": "new-lab"}
-    flow_calls = [
-        c for c in STATE.calls
-        if c[1].startswith("/core/api/config/config_entries/flow") and c[0] == "POST"
+    STATE.flow_step = {"type": "create_entry", "result": {"entry_id": "new-self"}}
+    status, body = proxy.post("/ha/add", {"target": "self"})
+    assert status == 200 and body == {"result": "created", "entry_id": "new-self"}
+    assert _flow_posts() == [
+        ("POST", "/core/api/config/config_entries/flow",
+         {"handler": "smart_sniffer", "show_advanced_options": False}),
+        ("POST", "/core/api/config/config_entries/flow/flow123",
+         {"host": AGENT_HOST, "port": proxy.agent_port, "token": APP_TOKEN, "scan_interval": 60}),
     ]
-    assert flow_calls[0] == (
-        "POST", "/core/api/config/config_entries/flow",
-        {"handler": "smart_sniffer", "show_advanced_options": False},
-    )
-    assert flow_calls[1] == (
-        "POST", "/core/api/config/config_entries/flow/flow123",
-        {"host": AGENT_HOST, "port": proxy.mock_port, "token": "", "scan_interval": 60},
-    )
 
 
-def test_ha_connect_already_configured(proxy):
-    STATE.flow_step = {"type": "abort", "reason": "already_configured"}
-    status, body = proxy.post("/ha/connect", {"target": "agent"})
-    assert status == 200
-    assert body == {"result": "already_connected"}
+def test_ha_add_replicas(proxy):
+    STATE.flow_step = {"type": "create_entry", "result": {"entry_id": "new-lab"}}
+    status, body = proxy.post("/ha/add", {"target": "replicas"})
+    assert status == 200 and body["result"] == "created"
+    assert _flow_posts()[1][2] == {"host": AGENT_HOST, "port": proxy.mock_port, "token": "",
+                                   "scan_interval": 60}
 
 
-def test_ha_connect_existing_entry_short_circuits(proxy):
+def test_ha_add_field_host_with_password(proxy):
+    _store({"address": "nas.lan", "port": 9099, "password": FIELD_PASSWORD})
+    STATE.flow_step = {"type": "create_entry", "result": {"entry_id": "new-nas"}}
+    status, body = proxy.post("/ha/add", {"target": "nas.lan:9099"})
+    assert status == 200 and body == {"result": "created", "entry_id": "new-nas"}
+    assert _flow_posts()[1][2] == {"host": "nas.lan", "port": 9099, "token": FIELD_PASSWORD,
+                                   "scan_interval": 60}
+
+
+def test_ha_add_already_added(proxy):
     STATE.entries = [_entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})")]
-    status, body = proxy.post("/ha/connect", {"target": "agent"})
-    assert status == 200
-    assert body == {"result": "already_connected", "entry_id": "e-agent"}
-    assert not any("/flow" in c[1] for c in STATE.calls)
+    status, body = proxy.post("/ha/add", {"target": "self"})
+    assert status == 200 and body == {"result": "already_added", "entry_id": "e-agent"}
+    assert _flow_posts() == []
+    STATE.entries = []
+    STATE.flow_step = {"type": "abort", "reason": "already_configured"}
+    status, body = proxy.post("/ha/add", {"target": "self"})
+    assert status == 200 and body["result"] == "already_added"
 
 
-def test_ha_connect_cannot_connect(proxy):
-    STATE.flow_step = {
-        "type": "form", "step_id": "user", "errors": {"base": "cannot_connect"},
-    }
-    status, body = proxy.post("/ha/connect", {"target": "testlab"})
-    assert status == 200
-    assert body == {"result": "error", "message": "cannot_connect"}
+def test_ha_add_replicas_reloads(proxy):
+    STATE.entries = [_entry("e-lab", f"SMART Sniffer ({AGENT_HOST}:{proxy.mock_port})")]
+    status, body = proxy.post("/ha/add", {"target": "replicas"})
+    assert status == 200 and body == {"result": "reloaded", "entry_id": "e-lab"}
+    assert ("POST", "/core/api/config/config_entries/entry/e-lab/reload", None) in STATE.calls
+    assert _flow_posts() == []
+
+
+def test_ha_add_cannot_connect(proxy):
+    STATE.flow_step = {"type": "form", "step_id": "user", "errors": {"base": "cannot_connect"}}
+    status, body = proxy.post("/ha/add", {"target": "replicas"})
+    assert status == 502
+    assert body == {"error": "add_failed", "result": "error", "message": "cannot_connect"}
     # The half-finished flow is cleaned up.
     assert ("DELETE", "/core/api/config/config_entries/flow/flow123", None) in STATE.calls
 
 
-def test_ha_connect_bad_target(proxy):
-    status, _ = proxy.post("/ha/connect", {"target": "nas"})
-    assert status == 400
+def test_ha_add_errors(proxy):
+    STATE.flow_step = {"type": "form", "step_id": "user", "errors": {"base": "invalid_auth"}}
+    assert proxy.post("/ha/add", {"target": "self"})[1]["message"] == "invalid_auth"
+    STATE.core_status = 401
+    status, body = proxy.post("/ha/add", {"target": "self"})
+    assert status == 502 and body["message"] == "unreachable"
 
 
-# ── /ha/disconnect ──────────────────────────────────────────────────────────
-
-def test_ha_disconnect_refuses_agent(proxy):
-    STATE.entries = [_entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})")]
-    status, body = proxy.post("/ha/disconnect", {"target": "agent"})
-    assert status == 400 and "error" in body
-    assert not any(c[0] == "DELETE" for c in STATE.calls)
-    assert STATE.entries
+def test_ha_add_integration_not_installed(proxy):
+    # Core answers 404 for a config flow handler it does not know.
+    STATE.handler_known = False
+    status, body = proxy.post("/ha/add", {"target": "self"})
+    assert status == 502 and body["message"] == "integration_not_loaded"
 
 
-def test_ha_disconnect_testlab(proxy):
-    STATE.entries = [
-        _entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})"),
-        _entry("e-lab", f"SMART Sniffer ({AGENT_HOST}:{proxy.mock_port})"),
-    ]
-    status, body = proxy.post("/ha/disconnect", {"target": "testlab"})
-    assert status == 200
-    assert body == {"result": "removed", "entry_id": "e-lab"}
-    assert [e["entry_id"] for e in STATE.entries] == ["e-agent"]
+def test_ha_add_bad_target(proxy):
+    for target in ("nas", "10.9.9.9:9099", None):
+        status, body = proxy.post("/ha/add", {"target": target})
+        assert status == 400 and body["error"] == "bad_target"
 
 
-# ── /ha/verdict ─────────────────────────────────────────────────────────────
-
-def test_ha_verdict(proxy):
-    STATE.states = [
-        {"entity_id": "sensor.samsung_ssd_980_pro_1tb_s5gxnf0r000001_temperature",
-         "state": "35", "attributes": {}},
-        {"entity_id": "sensor.samsung_ssd_980_pro_1tb_s5gxnf0r000001_attention_needed",
-         "state": "YES",
-         "attributes": {"severity": "critical",
-                        "reasons": ["NVMe media errors: 3 (expected 0)"]}},
-        {"entity_id": "sensor.other_drive_zz_attention_needed", "state": "NO",
-         "attributes": {"severity": "none", "reasons": ["No issues detected"]}},
-    ]
-    status, body = proxy.get("/ha/verdict?serial=S5GXNF0R000001")
-    assert status == 200
-    assert body == {
-        "found": True,
-        "entity_id": "sensor.samsung_ssd_980_pro_1tb_s5gxnf0r000001_attention_needed",
-        "state": "YES",
-        "severity": "critical",
-        "reasons": ["NVMe media errors: 3 (expected 0)"],
-    }
+def test_ha_add_drops_the_cache(backends):
+    proc, client = _start_proxy([
+        f"--supervisor-url=http://127.0.0.1:{backends[0].server_address[1]}",
+        f"--agent-host={AGENT_HOST}", "--agent-port=9099", "--data-dir=",
+    ], TOKEN)
+    try:
+        assert client.get("/ha/devices")[1]["targets"] == {}
+        STATE.entries = [_entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:9099)")]
+        assert client.get("/ha/devices")[1]["targets"] == {}  # cached
+        client.post("/ha/add", {"target": "self"})
+        assert client.get("/ha/devices")[1]["targets"]["self"]["entry_id"] == "e-agent"
+    finally:
+        _stop_proxy(proc)
 
 
-def test_ha_verdict_slugifies_serial(proxy):
-    STATE.states = [
-        {"entity_id": "sensor.wdc_wd40_wd_wx12a3_attention_needed", "state": "MAYBE",
-         "attributes": {"severity": "warning", "reasons": ["x"]}},
-    ]
-    _, body = proxy.get("/ha/verdict?serial=WD-WX12A3")
-    assert body["found"] is True and body["state"] == "MAYBE"
-
-
-def test_ha_verdict_not_found(proxy):
-    status, body = proxy.get("/ha/verdict?serial=NOPE123")
-    assert status == 200
-    assert body["found"] is False and body["state"] is None
-
-
-def test_ha_verdict_needs_serial(proxy):
-    status, _ = proxy.get("/ha/verdict")
-    assert status == 400
-
-
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/ha/status"), ("POST", "/ha/connect"), ("POST", "/ha/disconnect"),
+    ("GET", "/ha/verdict?serial=X"),
+])
+def test_removed_ha_routes_are_404(proxy, method, path):
+    status, body = proxy.request(method, path, {} if method == "POST" else None)
+    assert status == 404 and body["error"] == "not_found"
