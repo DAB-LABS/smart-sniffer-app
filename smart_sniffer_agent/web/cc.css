@@ -243,7 +243,7 @@
   .add-foot > span { margin-right: auto; }
 
   .pick { border: 1px solid var(--rule-2); border-radius: 3px; container-type: inline-size; }
-  .pick-head, .pick-row { display: grid; grid-template-columns: 18px minmax(0, 1.1fr) minmax(0, 1fr) 90px 64px 16px; gap: 10px; align-items: center; padding: 7px 12px; }
+  .pick-head, .pick-row { display: grid; grid-template-columns: 18px minmax(0, 1.1fr) minmax(0, 1fr) 112px 64px 16px; gap: 10px; align-items: center; padding: 7px 12px; }
   .pick-head { font-size: 0.7rem; color: var(--dim); border-bottom: 1px solid var(--rule); }
   .pick-row { border-bottom: 1px solid #1a1a1a; font-size: 0.8rem; color: var(--grey); cursor: pointer; margin: 0; }
   .pick-row:last-child { border-bottom: 0; }
@@ -251,6 +251,7 @@
   .pick-row .h { color: var(--paper); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pick-row .a { font-family: var(--mono); font-size: 0.76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pick-row .v, .pick-row .d { font-family: var(--mono); font-size: 0.74rem; white-space: nowrap; }
+  .pick-row .v { overflow: hidden; text-overflow: ellipsis; }
   .pick-row .k { color: var(--paper); }
   .pick-row.done { cursor: default; color: var(--dim); }
   .pick-row.done .h { color: var(--dim); font-weight: 400; }
