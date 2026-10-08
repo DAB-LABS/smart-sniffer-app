@@ -18,11 +18,6 @@ const ATA_IDS = { reallocated: 5, pending: 197, offline_unc: 198, reported_unc: 
 const DEVSTAT_ROWS = { reported_unc_devstat: [4, 8], reallocated_devstat: [3, 32], wear_devstat: [7, 8] };
 const NVME_FIELDS = { critical_warning: 'critical_warning', media_errors: 'media_errors',
   available_spare: 'available_spare', wear: 'percentage_used' };
-// Short names for the replica preset buttons, by scenario id.
-const PRESET_NAMES = { healthy: 'Healthy', reallocated_growing: 'Reallocated growing',
-  pending_sectors: 'Pending sectors', command_timeouts: 'Command timeouts', smart_failed: 'SMART failed',
-  degraded: 'Degraded', faulted: 'Faulted', nvme_wear: 'Wear', media_errors: 'Media errors',
-  critical_warning: 'Critical warning', devstat_uncorrectables: 'Uncorrectables' };
 const NONE = { kind: 'none', href: null };
 const LONG_PRESS_MS = 450;
 const enc = encodeURIComponent;
@@ -412,11 +407,12 @@ function cc() {
       }
       if (c.kind === 'pool') {
         const layout = this.poolLayout(it);
-        if (c.src === 'replicas') return [this.scenarioName(it), layout, 'on REPLICA'].filter(Boolean);
+        // A replica's scenario is the picker drawn ahead of these parts.
+        if (c.src === 'replicas') return [this.scenOn(c) ? null : this.scenarioName(it), layout, 'on REPLICA'].filter(Boolean);
         if (c.src === 'self') return [layout, 'on HAOS'].filter(Boolean);
         return [addr, layout, `on ${this.machine(c)}`].filter(Boolean);
       }
-      if (c.src === 'replicas') return [this.scenarioName(it) || (it.lab && it.lab.name) || ''];
+      if (c.src === 'replicas') return this.scenOn(c) ? [] : [this.scenarioName(it) || (it.lab && it.lab.name) || ''];
       const drive = it.drive || {};
       if (c.src === 'field') return [addr, drive.device_path].filter(Boolean);
       return [drive.device_path, this.proto(drive)].filter(Boolean);
@@ -476,19 +472,19 @@ function cc() {
     problems(c) {
       if (c.kind === 'drive') {
         return this.rows(c.it).filter((r) => r.mark === 'crit' || r.mark === 'warn')
-          .map((r) => ({ key: r.key, label: r.name, expect: r.expect, value: r.value, mark: r.mark }));
+          .map((r) => ({ key: r.key, label: r.name, note: this.rowNote(r), value: r.value, mark: r.mark }));
       }
       if (c.kind === 'pool') {
         if (!this.poolBad(c.it)) return [];
         const out = [];
         const state = this.poolState(c.it);
         if (state && state !== 'ONLINE') {
-          out.push({ key: 'state', label: 'Pool state', expect: 'expected ONLINE', value: state, mark: 'crit' });
+          out.push({ key: 'state', label: 'Pool state', note: 'expected ONLINE', value: state, mark: 'crit' });
         }
         this.poolDisks(c.it).filter((d) => d.bad).forEach((d) => {
           const errs = [['read', d.read], ['write', d.write], ['cksum', d.cksum]].filter(([, n]) => n)
             .map(([k, n]) => `${this.num(n)} ${k}`);
-          out.push({ key: `disk:${d.name}`, label: d.name, expect: 'expected ONLINE, no errors',
+          out.push({ key: `disk:${d.name}`, label: d.name, note: 'expected ONLINE, no errors',
             value: [d.state, ...errs].join(', '), mark: 'crit' });
         });
         return out;
@@ -502,6 +498,12 @@ function cc() {
     rows(it) {
       return (it.view && it.view.rows) || [];
     },
+    // What sits in brackets after a row's label: the expectation when the
+    // row is flagged, then where the reading came from. Never by the value.
+    rowNote(r) {
+      const flagged = r.mark === 'crit' || r.mark === 'warn';
+      return [flagged ? r.expect : null, r.note].filter(Boolean).join(', ');
+    },
     vol(it, which) {
       const v = it.view && it.view.volumes && it.view.volumes[which];
       return v && typeof v.bytes === 'number' ? v : null;
@@ -512,19 +514,19 @@ function cc() {
       if (src.includes('nvme')) return 'from the NVMe log';
       return 'from Device Statistics';
     },
-    // "present", "absent", "not applicable (NVMe)", "off (os)", "unavailable: timeout"
-    devstatText(it) {
+    // The Device Statistics row: a value ("present", "absent", "off",
+    // "unavailable", "not applicable") and the note for after the label.
+    devstat(it) {
       const ds = (it.drive && it.drive.device_statistics) || {};
       const view = it.view || {};
       const v = String(view.devstat || ds.status || 'absent');
       const reason = view.devstat_reason || ds.reason || '';
       if (v === 'not_applicable') {
         const nvme = view.protocol === 'nvme' || (it.drive && it.drive.protocol === 'NVMe');
-        return nvme ? 'not applicable (NVMe)' : 'not applicable';
+        return { value: 'not applicable', note: nvme ? 'NVMe' : '' };
       }
-      if (v === 'off') return reason ? `off (${reason})` : 'off';
-      if (v === 'unavailable') return reason ? `unavailable: ${reason}` : 'unavailable';
-      return v;
+      if (v === 'off' || v === 'unavailable') return { value: v, note: reason };
+      return { value: v, note: '' };
     },
     unsupportedNote(c) {
       return c.kind === 'drive' && this.health(c) === 'unknown' && !!c.it.verdict;
@@ -895,7 +897,7 @@ function cc() {
       this.ui.pwState[h.id] = code === 'password_refused' ? 'refused' : code === 'not_answering' ? 'noanswer' : 'error';
     },
 
-    // ── Replica presets ─────────────────────────────────────────────
+    // ── Replica scenarios ──────────────────────────────────────────
     scenOptions(it) {
       const opts = (it.lab && it.lab.scenario && it.lab.scenario.options) || [];
       // A pool offers Healthy, Degraded and Faulted.
@@ -909,8 +911,13 @@ function cc() {
       const o = ((it.lab && it.lab.scenario && it.lab.scenario.options) || []).find((x) => x.id === cur);
       return o ? o.label : '';
     },
-    presetName(o) {
-      return PRESET_NAMES[o.id] || o.label;
+    // The picker on a replica's where line, in place of the scenario's name.
+    scenOn(c) {
+      return c.src === 'replicas' && c.kind !== 'filesystem' && !!c.it && this.scenOptions(c.it).length > 0;
+    },
+    pickScenario(c, id) {
+      const o = this.scenOptions(c.it).find((x) => x.id === id);
+      if (o) this.applyPreset(c, o);
     },
     mockPath(it) {
       return it.pool ? `mock/pools/${enc(it.pool.name)}` : `mock/drives/${enc(it.drive.id)}`;

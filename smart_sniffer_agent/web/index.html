@@ -65,7 +65,7 @@
         <template x-if="asking(c)">
           <div class="ask" role="group" aria-label="Confirm"><span x-text="ui.confirm.text"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.confirm.busy" @click="confirmAdd()">Add</button><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Cancel</button></span><span class="ask-err" x-show="ui.confirm.err" x-text="ui.confirm.err"></span></div>
         </template>
-        <div class="c-where"><template x-for="(w, i) in where(c)" :key="i"><span x-text="w"></span></template></div>
+        <div class="c-where"><template x-if="scenOn(c)"><span class="scen-box"><span class="scen-size" aria-hidden="true" x-text="scenarioName(c.it)"></span><select class="scen" aria-label="Scenario" :disabled="!!ui.busy['scen:' + c.id]" @change="pickScenario(c, $event.target.value)"><template x-for="o in scenOptions(c.it)" :key="o.id"><option :value="o.id" :selected="o.id === scenCurrent(c.it)" x-text="o.label"></option></template></select></span></template><template x-for="(w, i) in where(c)" :key="i"><span x-text="w"></span></template></div>
         <template x-if="vitals(c).length">
           <div class="c-vitals"><template x-for="(v, i) in vitals(c)" :key="i"><span x-text="v"></span></template></div>
         </template>
@@ -104,7 +104,7 @@
         <template x-if="!isOpen(c) && problems(c).length">
           <div class="pw" :class="problemTone(c)">
             <template x-for="p in problems(c)" :key="p.key">
-              <div class="pw-row" :class="p.mark"><span class="pw-label"><span x-text="p.label"></span><template x-if="p.expect"><small x-text="' (' + p.expect + ')'"></small></template></span><span class="pw-val" x-text="p.value"></span></div>
+              <div class="pw-row" :class="p.mark"><span class="pw-label"><span class="lb" x-text="p.label"></span><template x-if="p.note"><small x-text="' (' + p.note + ')'"></small></template></span><span class="pw-val" x-text="p.value"></span></div>
             </template>
           </div>
         </template>
@@ -115,10 +115,10 @@
             <template x-if="unsupportedNote(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
             <dl class="kv">
               <template x-for="r in rows(c.it)" :key="r.key + r.name">
-                <div :class="r.mark"><dt x-text="r.name"></dt><dd><span class="v" x-text="r.value"></span><template x-if="r.expect && (r.mark === 'crit' || r.mark === 'warn')"><small x-text="' (' + r.expect + ')'"></small></template><template x-if="r.note"><small x-text="' ' + r.note"></small></template></dd></div>
+                <div :class="r.mark"><dt><span class="lb" x-text="r.name"></span><template x-if="rowNote(r)"><small x-text="' (' + rowNote(r) + ')'"></small></template></dt><dd><span class="v" x-text="r.value"></span></dd></div>
               </template>
-              <div><dt>Data Read</dt><dd><template x-if="vol(c.it, 'read')"><span><span class="v" x-text="tb(vol(c.it, 'read').bytes)"></span><small x-text="' ' + volNote(vol(c.it, 'read'))"></small></span></template><template x-if="!vol(c.it, 'read')"><small>this drive does not report it</small></template></dd></div>
-              <div><dt>Device Statistics</dt><dd><span class="v" x-text="devstatText(c.it)"></span></dd></div>
+              <div><dt><span class="lb">Data Read</span><template x-if="vol(c.it, 'read')"><small x-text="' (' + volNote(vol(c.it, 'read')) + ')'"></small></template></dt><dd><span class="v" :class="{ na: !vol(c.it, 'read') }" x-text="vol(c.it, 'read') ? tb(vol(c.it, 'read').bytes) : 'not reported'"></span></dd></div>
+              <div><dt><span class="lb">Device Statistics</span><template x-if="devstat(c.it).note"><small x-text="' (' + devstat(c.it).note + ')'"></small></template></dt><dd><span class="v" x-text="devstat(c.it).value"></span></dd></div>
             </dl>
             <template x-if="spaces(c).length">
               <div class="fs-list">
@@ -214,15 +214,6 @@
           <div class="m-body">
             <p class="m-msg">The app may still be starting. This page asks again every 8 seconds. If it stays like this, read the <a :href="appPage('logs')" target="_top">Mission Log</a>.</p>
             <p class="m-msg dim" x-text="countdown"></p>
-          </div>
-        </template>
-
-        <!-- Replica presets: one per scenario, applied on click -->
-        <template x-if="c.src === 'replicas' && c.kind !== 'filesystem' && scenOptions(c.it).length">
-          <div class="presets" role="group" aria-label="Scenario">
-            <template x-for="o in scenOptions(c.it)" :key="o.id">
-              <button class="preset" type="button" :class="{ on: o.id === scenCurrent(c.it) }" :aria-pressed="o.id === scenCurrent(c.it) ? 'true' : 'false'" :disabled="!!ui.busy['scen:' + c.id]" @click="applyPreset(c, o)" x-text="presetName(o)"></button>
-            </template>
           </div>
         </template>
 

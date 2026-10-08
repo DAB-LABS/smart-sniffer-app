@@ -1,7 +1,7 @@
 /* Control Center styles: one grid of cards (design Rev 4).
    Black, white and grey. Four colour exceptions, muted, defined once below:
    --att   Attention: the word, FAILED, its chevron, the problem window's
-           stroke and the values of rows that caused it;
+           stroke and the labels and values of rows that caused it;
    --maybe Maybe: the same places, for warnings;
    --ok    Health OK and its chevron, nowhere else;
    --ha    the exit icon of something in Home Assistant, nowhere else.
@@ -121,6 +121,21 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 
 .c-where { font-family: var(--mono); font-size: 0.72rem; color: var(--dim); margin: 3px 0 0 18px; display: flex; flex-wrap: wrap; gap: 2px 12px; min-width: 0; }
 .c-where span { overflow-wrap: anywhere; }
+/* A replica's scenario: its name on the where line is a picker, applied on
+   change. Quiet until hovered or focused, with a small caret. A hidden copy
+   of the current name sizes it, so the caret sits by the name and not past
+   the longest option. */
+.scen-box { position: relative; display: inline-block; max-width: 100%; min-width: 0; margin: -2px 0 -2px -5px; }
+.c-where .scen-size { display: block; visibility: hidden; white-space: pre; overflow: hidden; padding: 1px 17px 1px 4px; border: 1px solid transparent; }
+.scen { position: absolute; inset: 0; width: 100%; height: 100%; appearance: none; -webkit-appearance: none; font: inherit; color: var(--grey); background-color: transparent;
+        border: 1px solid transparent; border-radius: 0; margin: 0; padding: 1px 17px 1px 4px; max-width: 100%;
+        min-width: 0; cursor: pointer; text-overflow: ellipsis;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5'%3E%3Cpath d='M.8.8 4 4 7.2.8' fill='none' stroke='%238f8f8f' stroke-width='1.3'/%3E%3C/svg%3E");
+        background-repeat: no-repeat; background-position: right 5px center; background-size: 8px 5px; }
+.scen:hover { border-color: var(--rule-2); color: var(--paper); }
+.scen:focus { outline: none; border-color: var(--paper); color: var(--paper); }
+.scen:disabled { cursor: progress; color: var(--dim); }
+.scen option { background: var(--panel-2); color: var(--paper); }
 .c-vitals { font-family: var(--mono); font-size: 0.78rem; color: var(--grey); margin: 8px 0 0 18px; display: flex; flex-wrap: wrap; gap: 2px 16px; }
 
 /* Disk space. No colour: a near-black track and a grey fill. Below 80% the
@@ -154,7 +169,9 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .h-unk { display: inline-flex; align-items: center; gap: 8px; color: var(--grey); font-weight: 600; font-size: 0.86rem; white-space: nowrap; }
 .ghost-dot { width: 10px; height: 10px; border-radius: 50%; border: 1.5px dashed var(--dim); flex: none; }
 .chev { margin-left: auto; background: none; border: 0; padding: 4px 2px; cursor: pointer; line-height: 0; color: var(--grey); }
-.chev svg { width: 22px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
+/* 80% of its first size (22 by 13); the stroke is raised by the same
+   factor so the drawn line stays as heavy as before (2.42 px). */
+.chev svg { width: 17.6px; height: 10.4px; fill: none; stroke: currentColor; stroke-width: 2.75; stroke-linecap: round; stroke-linejoin: round;
             transition: transform 0.18s ease; }
 .chev[aria-expanded="true"] svg { transform: rotate(180deg); }
 .chev.attention { color: var(--att); }
@@ -164,7 +181,8 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .c-note { font-size: 0.76rem; color: var(--dim); margin: 6px 0 0; }
 
 /* The problem window: the only box on a card. Sharp corners; its stroke and
-   each row's value carry the state, the rows carry no marks. */
+   each row's label and value carry the state, the rows carry no marks. The
+   note in brackets sits after the label, muted; the value stands alone. */
 .pw { margin-top: 8px; border: 1px solid var(--att-line); padding: 4px 9px; display: grid; grid-template-columns: minmax(0, 1fr); }
 .pw.warn { border-color: var(--maybe-line); }
 .pw-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 3px 0; font-size: 0.8rem; color: var(--paper); }
@@ -172,8 +190,8 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .pw-label { min-width: 0; overflow-wrap: anywhere; }
 .pw-label small, .kv small, .fs-line small { font-size: 0.7rem; color: var(--dim); font-weight: 400; }
 .pw-val { font-family: var(--mono); font-size: 0.78rem; font-weight: 600; white-space: nowrap; text-align: right; }
-.pw-row.crit .pw-val { color: var(--att); }
-.pw-row.warn .pw-val { color: var(--maybe); }
+.pw-row.crit .lb, .pw-row.crit .pw-val { color: var(--att); }
+.pw-row.warn .lb, .pw-row.warn .pw-val { color: var(--maybe); }
 
 /* Details, in place of the problem window */
 .details { margin-top: 8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
@@ -182,10 +200,9 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .kv dt { color: var(--dim); min-width: 0; }
 .kv dd { margin: 0; text-align: right; min-width: 0; overflow-wrap: anywhere; }
 .kv dd .v { font-family: var(--mono); color: var(--grey); }
-.kv > div.crit dt, .kv > div.warn dt { color: var(--paper); font-weight: 600; }
-.kv > div.crit .v { color: var(--att); font-weight: 600; }
-.kv > div.warn .v { color: var(--maybe); font-weight: 600; }
-.kv > div.unk .v { font-family: var(--sans); color: var(--dim); }
+.kv > div.crit .lb, .kv > div.crit .v { color: var(--att); font-weight: 600; }
+.kv > div.warn .lb, .kv > div.warn .v { color: var(--maybe); font-weight: 600; }
+.kv > div.unk .v, .kv dd .v.na { font-family: var(--sans); color: var(--dim); }
 .fs-list { display: grid; grid-template-columns: minmax(0, 1fr); border-top: 1px solid var(--rule); padding-top: 4px; }
 .fs-line { display: flex; justify-content: space-between; gap: 10px; font-size: 0.76rem; color: var(--grey); padding: 2px 0; }
 .fs-used { font-family: var(--mono); font-size: 0.72rem; color: var(--grey); white-space: nowrap; }
@@ -195,7 +212,8 @@ table.attrs { width: 100%; border-collapse: collapse; font-family: var(--mono); 
 table.attrs th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--rule); background: var(--panel-2); font-family: var(--sans); }
 table.attrs td { padding: 2px 6px; color: var(--grey); border-bottom: 1px solid #151515; white-space: nowrap; }
 table.attrs td.num, table.attrs th.num { text-align: right; }
-table.attrs tr.crit td, table.attrs tr.warn td { color: var(--paper); font-weight: 600; }
+table.attrs tr.crit td { color: var(--att); font-weight: 600; }
+table.attrs tr.warn td { color: var(--maybe); font-weight: 600; }
 table.attrs .input { padding: 1px 6px; font-size: 0.7rem; }
 table.attrs .raw-in { width: 100%; min-width: 64px; max-width: 150px; text-align: right; }
 
@@ -209,14 +227,6 @@ table.attrs .raw-in { width: 100%; min-width: 64px; max-width: 150px; text-align
 .pass .input { width: 210px; max-width: 100%; }
 .pass .input.bad { border-color: var(--paper); border-width: 1.5px; }
 .pass-help { margin: 6px 0 0; font-size: 0.74rem; color: var(--dim); }
-
-/* Replica presets: the active one filled, applied on click */
-.presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-.preset { cursor: pointer; border: 1px solid var(--rule-2); background: transparent; color: var(--grey); font: 600 0.72rem/1.3 var(--sans);
-          padding: 3px 9px; border-radius: 0; }
-.preset:hover { border-color: var(--grey); color: var(--paper); }
-.preset.on { background: var(--paper); color: #000; border-color: var(--paper); cursor: default; }
-.preset:disabled:not(.on) { color: var(--dim); }
 
 /* Footer: Last seen, then the corner icons */
 .c-spacer { flex: 1 0 12px; }
@@ -327,5 +337,8 @@ table.attrs .raw-in { width: 100%; min-width: 64px; max-width: 150px; text-align
   .grip { padding: 8px 6px; margin: -6px -2px -6px -10px; }
   .exit { padding: 9px; margin: -9px; }
   .chev { padding: 8px 4px; margin-top: -6px; margin-bottom: -6px; }
+  .scen-box { margin-top: -6px; margin-bottom: -6px; }
+  .scen, .c-where .scen-size { padding-top: 6px; padding-bottom: 6px; }
+  .scen { border-color: var(--rule); }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

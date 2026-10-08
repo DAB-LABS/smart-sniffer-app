@@ -164,8 +164,10 @@ COLOUR_AUDIT = """
 () => {
   const want = { att: 'rgb(204, 107, 99)', maybe: 'rgb(204, 159, 82)', ok: 'rgb(93, 163, 114)', blue: 'rgb(3, 169, 244)' };
   const allowed = {
-    att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .pw-row.crit .pw-val, .kv > div.crit .v'),
-    maybe: (el) => !!el.closest('.h-maybe, .chev.maybe, .pw-row.warn .pw-val, .kv > div.warn .v'),
+    att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .pw-row.crit .lb, .pw-row.crit .pw-val, '
+      + '.kv > div.crit .lb, .kv > div.crit .v, table.attrs tr.crit'),
+    maybe: (el) => !!el.closest('.h-maybe, .chev.maybe, .pw-row.warn .lb, .pw-row.warn .pw-val, '
+      + '.kv > div.warn .lb, .kv > div.warn .v, table.attrs tr.warn'),
     ok: (el) => !!el.closest('.h-ok, .chev.ok'),
     blue: (el) => !!el.closest('.exit:not(.add)'),
   };
@@ -319,13 +321,75 @@ def test_colours(open_page):
     assert pw.evaluate("e => getComputedStyle(e).borderTopColor") == "rgba(204, 107, 99, 0.15)"
     assert by_id(p, NAS_MAYBE).locator(".pw").evaluate("e => getComputedStyle(e).borderTopColor") \
         == "rgba(204, 159, 82, 0.15)"
-    assert by_id(p, NAS_ATT).locator(".pw-row.crit .pw-val").first.evaluate("e => getComputedStyle(e).color") == ATT
-    assert by_id(p, NAS_ATT).locator(".pw-row.warn .pw-val").evaluate("e => getComputedStyle(e).color") == MAYBE
+    # A flagged row's label and value are in its state colour; its note is not.
+    for mark, rgb in (("crit", ATT), ("warn", MAYBE)):
+        row = by_id(p, NAS_ATT).locator(f".pw-row.{mark}").first
+        assert row.locator(".lb").evaluate("e => getComputedStyle(e).color") == rgb
+        assert row.locator(".pw-val").evaluate("e => getComputedStyle(e).color") == rgb
+        assert row.locator("small").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
     assert p.page.locator(".mk, .pw-row .mark").count() == 0
     # Pills and the problem window have sharp corners; cards round ones.
-    radii = p.page.evaluate("""() => ['.pill', '.pw', '.card', '.preset'].map((s) =>
+    radii = p.page.evaluate("""() => ['.pill', '.pw', '.card'].map((s) =>
         getComputedStyle(document.querySelector(s)).borderTopLeftRadius)""")
-    assert radii[0] == "0px" and radii[1] == "0px" and radii[2] != "0px" and radii[3] == "0px"
+    assert radii[0] == "0px" and radii[1] == "0px" and radii[2] != "0px"
+
+
+def test_details_flagged_rows_in_state_colour(open_page):
+    p = open_page()
+    att = by_id(p, NAS_ATT)
+    att.locator(".chev").click()
+    for mark, rgb in (("crit", ATT), ("warn", MAYBE)):
+        rows = att.locator(f".kv > div.{mark}")
+        assert rows.count() >= 1, mark
+        for row in rows.all():
+            assert row.locator("dt .lb").evaluate("e => getComputedStyle(e).color") == rgb
+            assert row.locator("dd .v").evaluate("e => getComputedStyle(e).color") == rgb
+            note = row.locator("dt small")
+            if note.count():
+                assert note.evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
+    # Healthy rows stay grey.
+    plain = att.locator(".kv > div:not(.crit):not(.warn)").first
+    assert plain.locator("dd .v").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
+    assert_colours(p)
+
+
+def test_notes_follow_labels(open_page):
+    p = open_page()
+    nas = by_id(p, NAS_ATT)
+    assert nas.locator(".pw-row").first.locator(".pw-label").inner_text() == "Reallocated sectors (expected 0)"
+    assert nas.locator(".pw-row").first.locator(".pw-val").inner_text().replace(",", "").isdigit()
+    pw_vals = p.page.locator(".pw-val").all_inner_texts()
+    assert pw_vals and not [v for v in pw_vals if "(" in v or "expected" in v], pw_vals
+    for chev in p.page.locator(".chev").all():
+        chev.click()
+    p.page.wait_for_timeout(200)
+    # No note, bracket or small text ever sits in a value cell.
+    assert p.page.locator(".kv dd small").count() == 0
+    values = p.page.locator(".kv dd").all_inner_texts()
+    assert values and not [v for v in values if "(" in v or "from " in v or "expected" in v], values
+    # Every note is in the label cell, right after the label.
+    notes = p.page.evaluate("""() => [...document.querySelectorAll('.kv dt small')]
+        .map((s) => {
+          let prev = s.previousElementSibling;
+          while (prev && prev.tagName === 'TEMPLATE') prev = prev.previousElementSibling;
+          return [!!prev && prev.classList.contains('lb'), s.textContent];
+        })""")
+    assert notes and all(ok and t.startswith(" (") and t.endswith(")") for ok, t in notes), notes
+    read = by_id(p, NVME).locator(".kv > div", has_text="Data Read")
+    assert read.locator("dt").inner_text() == "Data Read (from the NVMe log)"
+    assert re.fullmatch(r"[\d.]+ [KMGTP]?B", read.locator("dd").inner_text()), read.locator("dd").inner_text()
+    stats = by_id(p, NVME).locator(".kv > div", has_text="Device Statistics")
+    assert stats.locator("dt").inner_text() == "Device Statistics (NVMe)"
+    assert stats.locator("dd").inner_text() == "not applicable"
+
+
+def test_chevron_is_80_percent(open_page):
+    p = open_page()
+    box = p.page.locator(".chev svg").first.bounding_box()
+    assert abs(box["width"] - 22 * 0.8) < 0.05 and abs(box["height"] - 13 * 0.8) < 0.05, box
+    # The drawn line is as heavy as before: 2.2 user units at 22 px over 20 units.
+    sw = p.page.locator(".chev svg").first.evaluate("e => parseFloat(getComputedStyle(e).strokeWidth)")
+    assert abs(sw * box["width"] / 20 - 2.2 * 22 / 20) < 0.01, sw
 
 
 # ── The grid ─────────────────────────────────────────────────────────────────
@@ -518,23 +582,57 @@ def test_trash_confirm(open_page):
     p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{BACKUP_PI}\"]')")
 
 
-def test_presets_apply_on_click(open_page):
+def _scenario(card):
+    pick = card.locator(".c-where select.scen")
+    return pick, pick.evaluate("e => e.options[e.selectedIndex].text"), pick.locator("option").all_inner_texts()
+
+
+def test_scenario_picker_applies_on_change(open_page):
     p = open_page()
     rep = by_id(p, REP_NVME)
-    presets = rep.get_by_role("group", name="Scenario")
-    assert presets.locator(".preset").all_inner_texts() == ["Healthy", "Wear", "Media errors", "Critical warning"]
-    assert presets.locator(".preset.on").inner_text() == "Wear"
-    assert rep.locator(".c-where").inner_text() == "NVMe wear"
-    presets.get_by_role("button", name="Media errors").click()
+    assert rep.locator(".preset, .presets").count() == 0
+    pick, current, options = _scenario(rep)
+    assert pick.get_attribute("aria-label") == "Scenario"
+    assert current == "NVMe wear"
+    assert options == ["Healthy NVMe", "NVMe wear", "Media errors", "Critical warning"]
+    pick.select_option("media_errors")
     p.page.wait_for_function(f"() => document.querySelector('[data-card=\"{REP_NVME}\"] .h-att')")
     posts = p.api("POST", r"/mock/drives/[^/]+/scenario$")
     assert len(posts) == 1 and json.loads(posts[0][2]) == {"id": "media_errors"}
-    assert rep.locator(".preset.on").inner_text() == "Media errors"
-    assert by_id(p, REP_FAILED).locator(".preset").all_inner_texts() == [
-        "Healthy", "Reallocated growing", "Pending sectors", "Command timeouts", "SMART failed"]
-    assert by_id(p, REP_POOL).locator(".preset").all_inner_texts() == ["Healthy", "Degraded", "Faulted"]
-    # Presets sit above the footer; no picker on the where line.
-    assert rep.locator("select").count() == 0
+    assert _scenario(rep)[1] == "Media errors"
+    assert _scenario(by_id(p, REP_FAILED))[2] == [
+        "Healthy SATA HDD", "Reallocated sectors growing", "Pending sectors", "Command timeouts", "SMART failed"]
+    pool_pick, _, pool_options = _scenario(by_id(p, REP_POOL))
+    assert pool_options == ["Healthy pool", "ZFS pool degraded", "Pool faulted"]
+    assert by_id(p, REP_POOL).locator(".c-where").inner_text().split("\n")[-1] == "on REPLICA"
+    # Quiet at rest: no border until hovered or focused.
+    assert pick.evaluate("e => getComputedStyle(e).borderTopColor") == "rgba(0, 0, 0, 0)"
+    assert pick.evaluate("e => getComputedStyle(e).fontFamily") == rep.locator(".c-where").evaluate(
+        "e => getComputedStyle(e).fontFamily")
+    pool_pick.select_option("faulted")
+    p.page.wait_for_timeout(400)
+    assert len(p.api("POST", r"/mock/pools/[^/]+/scenario$")) == 1
+    assert json.loads(p.api("POST", r"/mock/pools/[^/]+/scenario$")[0][2]) == {"id": "faulted"}
+
+
+def test_scenario_picker_on_touch(browser, server):
+    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
+    ctx = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
+    try:
+        page = ctx.new_page()
+        page.goto(f"{server}/")
+        page.wait_for_function("() => window.Alpine && document.body._x_dataStack")
+        page.wait_for_timeout(700)
+        pick = page.locator(f'article.card[data-card="{REP_NVME}"] select.scen')
+        pick.scroll_into_view_if_needed()
+        box = pick.bounding_box()
+        card = page.locator(f'article.card[data-card="{REP_NVME}"]').bounding_box()
+        assert box["height"] >= 24 and box["x"] >= card["x"] and box["x"] + box["width"] <= card["x"] + card["width"], box
+        pick.tap()
+        pick.select_option("critical_warning")
+        page.wait_for_function(f"() => document.querySelector('[data-card=\"{REP_NVME}\"] .h-att')")
+    finally:
+        ctx.close()
 
 
 def test_download(open_page, tmp_path):
@@ -833,7 +931,9 @@ def test_screenshots(open_page):
         _shot(p, "filesystem-card", by_id(p, NAS_FS))
         _shot(p, "unreachable", by_id(p, STUDIO))
         _shot(p, "password-placeholder", by_id(p, BACKUP_PI))
-        for cid, name in ((BARRACUDA, "details-drive"), (NAS_POOL, "details-pool"), (REP_NVME, "details-replica")):
+        _shot(p, "replica-scenario-picker", by_id(p, REP_NVME))
+        for cid, name in ((BARRACUDA, "details-drive"), (NAS_POOL, "details-pool"), (REP_NVME, "details-replica"),
+                          (NAS_ATT, "details-attention")):
             by_id(p, cid).locator(".chev").click()
             _shot(p, name, by_id(p, cid))
             by_id(p, cid).locator(".chev").click()
