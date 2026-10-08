@@ -2351,3 +2351,26 @@ def test_card_download_real_drive_is_anonymised(proxy, mock_agent):
     doc = json.loads(text)
     assert doc["format"] == "smart-sniffer-replica" and doc["origin"]["type"] == "saved"
     assert proxy.get("/cards/self%7CNOPE/file")[0] == 404
+
+
+@needs_mock
+@needs_rules
+def test_replica_filesystems_from_the_mock(proxy):
+    """The replica agent serves /api/filesystems from its files; each lands
+    on its drive or pool card, and none is left over."""
+    status, added = proxy.post("/replicas/add", {"files": ["shipped.smart-failed", "shipped.zfs-pool-degraded"]})
+    assert status == 201
+    _, read = proxy.get("/fleet/hosts/replicas/drives")
+    if read.get("filesystems_status") == "none":
+        pytest.skip("this replica agent does not serve /api/filesystems")
+    assert read["filesystems_status"] == "ok"
+    items = {i["id"]: i for i in read["items"]}
+    drive = items[added["cards"][0]["card_id"]]
+    pool = items[added["cards"][1]["card_id"]]
+    assert drive["filesystems"] and all(
+        f["device"].startswith(drive["drive"]["device_path"]) for f in drive["filesystems"])
+    assert pool["filesystems"] and all(f["fstype"] == "zfs" for f in pool["filesystems"])
+    assert {f["device"].split("/")[0] for f in pool["filesystems"]} == {pool["pool"]["name"]}
+    assert read["filesystem_cards"] == []
+    for card in added["cards"]:
+        proxy.request("DELETE", f"/replicas/{quote(card['card_id'], safe='')}")
