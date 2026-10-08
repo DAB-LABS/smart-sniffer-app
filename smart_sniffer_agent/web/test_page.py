@@ -887,6 +887,75 @@ def test_raw_table_marks(open_page):
     assert sorted(t.split()[0] for t in hits.all_inner_texts()) == ["197", "5"]
 
 
+# The grid columns a card spans, and the wrappers that scroll sideways.
+SPAN = """(e) => {
+  const cols = getComputedStyle(e.parentElement).gridTemplateColumns.split(' ').length;
+  const gap = parseFloat(getComputedStyle(e.parentElement).columnGap);
+  const col = (e.parentElement.getBoundingClientRect().width - gap * (cols - 1)) / cols;
+  return [cols, Math.round((e.getBoundingClientRect().width + gap) / (col + gap))];
+}"""
+WIDE_WRAPS = "els => els.filter((w) => w.scrollWidth > w.clientWidth + 0.5).map((w) => w.outerHTML.slice(0, 80))"
+
+
+@pytest.mark.parametrize("width,cols,span", [(1280, 3, 2), (740, 2, 2), (390, 1, 1)])
+def test_open_card_spans_two_columns(open_page, width, cols, span):
+    p = open_page("", width)
+    c = by_id(p, BARRACUDA)
+    assert c.evaluate(SPAN) == [cols, 1]
+    c.locator(".chev").click()
+    p.page.wait_for_timeout(200)
+    assert c.evaluate(SPAN) == [cols, span]
+    # Two columns: the open card is the whole row.
+    if cols == 2:
+        row = p.page.locator(".grid").bounding_box()
+        box = c.bounding_box()
+        assert abs(box["x"] - row["x"]) < 1 and abs(box["width"] - row["width"]) < 1, (box, row)
+    # The saved order is still the order on screen.
+    assert card_ids(p)[:2] == [NVME, BARRACUDA]
+    # The raw table fits: no wrapper scrolls sideways, on any open card.
+    for cid in (NAS_ATT, NAS_POOL, REP_FAILED, REP_NVME):
+        by_id(p, cid).locator(".chev").click()
+    p.page.wait_for_timeout(200)
+    assert p.page.locator(".table-wrap").count() >= 5
+    assert p.page.eval_on_selector_all(".table-wrap", WIDE_WRAPS) == []
+    assert_no_scroll(p)
+    assert_inside_cards(p)
+    heads = c.locator("table.attrs").first.locator("thead th:visible").all_inner_texts()
+    if width == 390:
+        # A phone keeps Name, Value and Raw; long names wrap, with the whole name as a tooltip.
+        assert heads == ["Name", "Value", "Raw"], heads
+        assert c.locator("td.c-worst:visible, td.c-thresh:visible, td.c-id:visible").count() == 0
+        name = c.locator("table.attrs td.nm").first
+        assert name.get_attribute("title") == name.inner_text()
+        assert_no_overflow(p)
+    else:
+        assert heads == ["ID", "Name", "Value", "Worst", "Thresh", "Raw"], heads
+    # Closed again, it is one column.
+    c.locator(".chev").click()
+    p.page.wait_for_timeout(200)
+    assert c.evaluate(SPAN) == [cols, 1]
+
+
+def test_drag_with_a_wide_card(open_page):
+    p = open_page()
+    by_id(p, BARRACUDA).locator(".chev").click()
+    p.page.wait_for_timeout(200)
+    grip = by_id(p, BARRACUDA).locator(".grip").bounding_box()
+    target = by_id(p, NAS_MAYBE).bounding_box()
+    p.page.mouse.move(grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
+    p.page.mouse.down()
+    for i in range(1, 13):
+        p.page.mouse.move(grip["x"] + (target["x"] + target["width"] * 0.75 - grip["x"]) * i / 12,
+                          grip["y"] + (target["y"] + target["height"] / 2 - grip["y"]) * i / 12)
+        p.page.wait_for_timeout(20)
+    p.page.mouse.up()
+    p.page.wait_for_timeout(300)
+    ids = card_ids(p)
+    assert ids.index(BARRACUDA) == ids.index(NAS_MAYBE) + 1, ids[:6]
+    assert by_id(p, BARRACUDA).evaluate(SPAN) == [3, 2]
+    assert len(p.api("PUT", r"/cards/order$")) == 1
+
+
 def test_page_polls_only_its_own_reads(open_page):
     p = open_page()
     p.page.wait_for_timeout(9000)
@@ -937,6 +1006,9 @@ def test_screenshots(open_page):
             by_id(p, cid).locator(".chev").click()
             _shot(p, name, by_id(p, cid))
             by_id(p, cid).locator(".chev").click()
+        by_id(p, BARRACUDA).locator(".chev").click()
+        _shot(p, "grid-details-open", None)
+        by_id(p, BARRACUDA).locator(".chev").click()
         usb = by_id(p, NAS_USB)
         usb.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
         _shot(p, "exit-grey-confirm", usb)

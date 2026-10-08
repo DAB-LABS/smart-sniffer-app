@@ -131,10 +131,10 @@
               <div>
                 <div class="table-wrap">
                   <table class="attrs">
-                    <thead><tr><th class="num">ID</th><th>Name</th><th class="num">Value</th><th class="num">Worst</th><th class="num">Thresh</th><th class="num">Raw</th></tr></thead>
+                    <thead><tr><th class="num c-id">ID</th><th>Name</th><th class="num">Value</th><th class="num c-worst">Worst</th><th class="num c-thresh">Thresh</th><th class="num c-raw">Raw</th></tr></thead>
                     <tbody>
                       <template x-for="a in ataTable(c.it)" :key="a.id">
-                        <tr :class="a.mark"><td class="num" x-text="a.id"></td><td x-text="a.name"></td><td class="num" x-text="a.value"></td><td class="num" x-text="a.worst"></td><td class="num" x-text="a.thresh"></td><td class="num"><template x-if="c.src !== 'replicas'"><span x-text="a.raw"></span></template><template x-if="c.src === 'replicas'"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(c.it, 'ata', a.name, $event.target.value)"></template></td></tr>
+                        <tr :class="a.mark"><td class="num c-id" x-text="a.id"></td><td class="nm" x-text="a.name" :title="a.name"></td><td class="num" x-text="a.value"></td><td class="num c-worst" x-text="a.worst"></td><td class="num c-thresh" x-text="a.thresh"></td><td class="num c-raw"><template x-if="c.src !== 'replicas'"><span x-text="a.raw"></span></template><template x-if="c.src === 'replicas'"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(c.it, 'ata', a.name, $event.target.value)"></template></td></tr>
                       </template>
                     </tbody>
                   </table>
@@ -145,7 +145,7 @@
                       <thead><tr><th class="num">Page</th><th>Device Statistics</th><th class="num">Value</th></tr></thead>
                       <tbody>
                         <template x-for="e in devstatTable(c.it)" :key="e.key">
-                          <tr :class="e.mark"><td class="num" x-text="e.page"></td><td x-text="e.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && e.editable)"><span x-text="e.value"></span></template><template x-if="c.src === 'replicas' && e.editable"><input class="input raw-in" :value="e.value" inputmode="numeric" :aria-label="'Value of ' + e.name" @change="editRaw(c.it, 'devstat', null, $event.target.value)"></template></td></tr>
+                          <tr :class="e.mark"><td class="num" x-text="e.page"></td><td class="nm" x-text="e.name" :title="e.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && e.editable)"><span x-text="e.value"></span></template><template x-if="c.src === 'replicas' && e.editable"><input class="input raw-in" :value="e.value" inputmode="numeric" :aria-label="'Value of ' + e.name" @change="editRaw(c.it, 'devstat', null, $event.target.value)"></template></td></tr>
                         </template>
                       </tbody>
                     </table>
@@ -159,7 +159,7 @@
                   <thead><tr><th>Field</th><th class="num">Value</th></tr></thead>
                   <tbody>
                     <template x-for="f in nvmeTable(c.it)" :key="f.name">
-                      <tr :class="f.mark"><td x-text="f.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && f.editable)"><span x-text="f.value"></span></template><template x-if="c.src === 'replicas' && f.editable"><input class="input raw-in" :value="f.value" inputmode="numeric" :aria-label="'Value of ' + f.name" @change="editRaw(c.it, 'nvme', f.name, $event.target.value)"></template></td></tr>
+                      <tr :class="f.mark"><td class="nm" x-text="f.name" :title="f.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && f.editable)"><span x-text="f.value"></span></template><template x-if="c.src === 'replicas' && f.editable"><input class="input raw-in" :value="f.value" inputmode="numeric" :aria-label="'Value of ' + f.name" @change="editRaw(c.it, 'nvme', f.name, $event.target.value)"></template></td></tr>
                     </template>
                   </tbody>
                 </table>
