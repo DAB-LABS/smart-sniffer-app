@@ -93,7 +93,7 @@
             <template x-if="health(c) === 'ok'"><span class="h-ok">Health OK</span></template>
             <template x-if="health(c) === 'unknown'"><span class="h-unk"><span class="ghost-dot" aria-hidden="true"></span>Health not known</span></template>
             <template x-if="hasDetails(c)">
-              <button class="chev" :class="health(c)" type="button" :aria-expanded="isOpen(c) ? 'true' : 'false'" :aria-label="isOpen(c) ? 'Hide details' : 'Details'" title="Details" @click="toggleOpen(c)"><svg aria-hidden="true"><use href="#chevron"/></svg></button>
+              <button class="chev" :class="health(c)" type="button" :aria-expanded="isOpen(c) ? 'true' : 'false'" :aria-label="isOpen(c) ? 'Hide details' : 'Details'" title="Details" @mousedown.prevent="$el.blur()" @click="toggleOpen(c)"><svg aria-hidden="true"><use href="#chevron"/></svg></button>
             </template>
           </div>
         </template>

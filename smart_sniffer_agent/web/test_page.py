@@ -956,6 +956,27 @@ def test_drag_with_a_wide_card(open_page):
     assert len(p.api("PUT", r"/cards/order$")) == 1
 
 
+def test_chevron_outline_only_for_the_keyboard(open_page):
+    p = open_page()
+    chev = by_id(p, BARRACUDA).locator(".chev")
+    chev.click()
+    assert chev.get_attribute("aria-expanded") == "true"
+    assert chev.evaluate("e => getComputedStyle(e).outlineStyle") == "none"
+    assert not chev.evaluate("e => e.matches(':focus-visible')")
+    # By Tab from the card's grip, the outline shows, and Enter still works.
+    by_id(p, BARRACUDA).locator(".grip").focus()
+    for _ in range(12):
+        p.page.keyboard.press("Tab")
+        if chev.evaluate("e => document.activeElement === e"):
+            break
+    assert chev.evaluate("e => document.activeElement === e")
+    outline = chev.evaluate("e => [getComputedStyle(e).outlineStyle, getComputedStyle(e).outlineWidth]")
+    assert outline == ["solid", "2px"], outline
+    p.page.keyboard.press("Enter")
+    assert chev.get_attribute("aria-expanded") == "false"
+    assert chev.evaluate("e => e.matches(':focus-visible')")
+
+
 def test_page_polls_only_its_own_reads(open_page):
     p = open_page()
     p.page.wait_for_timeout(9000)
