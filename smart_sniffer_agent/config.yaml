@@ -65,6 +65,8 @@ options:
   scan_interval: 60
   mock_port: 9100
   hosts: []
+  card_order: []
+  hidden_cards: []
 schema:
   port: port
   token: "str?"
@@ -75,6 +77,12 @@ schema:
       port: port
       password: "password?"
       hidden: "bool?"
+      removed:
+        - "str?"
+  card_order:
+    - "str?"
+  hidden_cards:
+    - "str?"
 
 # Container image (uncomment for published releases, must be removed for local builds)
 # image: "ghcr.io/dab-labs/{arch}-smart-sniffer-agent"

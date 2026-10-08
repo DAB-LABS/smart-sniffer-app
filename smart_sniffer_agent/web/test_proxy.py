@@ -296,12 +296,14 @@ class AgentState:
 
     def __init__(self, mode: str = "agent", token: str = "", hostname: str | None = None,
                  drives: list[dict[str, Any]] | None = None,
-                 pools: list[dict[str, Any]] | None = None, version: str = "0.8.1") -> None:
+                 pools: list[dict[str, Any]] | None = None, version: str = "0.8.1",
+                 filesystems: list[dict[str, Any]] | None = None) -> None:
         self.mode = mode
         self.token = token
         self.hostname = hostname
         self.drives = drives if drives is not None else [simple_drive("sda", "SER-A")]
         self.pools = pools  # None: /api/pools not advertised
+        self.filesystems = filesystems  # None: /api/filesystems not advertised
         self.version = version
         self.requests: list[tuple[str, str, str | None]] = []
 
@@ -330,9 +332,12 @@ def agent_handler(state: AgentState):
                 endpoints = ["/api/health", "/api/drives", "/api/drives/{id}"]
                 if state.pools is not None:
                     endpoints.append("/api/pools")
+                if state.filesystems is not None:
+                    endpoints.append("/api/filesystems")
                 health = {"status": "ok", "version": state.version, "os": "linux",
                           "uptime_seconds": 3542400, "endpoints": endpoints,
-                          "drives": len(state.drives), "filesystems": 0}
+                          "drives": len(state.drives),
+                          "filesystems": len(state.filesystems or [])}
                 if state.hostname:
                     health["hostname"] = state.hostname
                 _json_reply(self, 200, health)
@@ -349,6 +354,8 @@ def agent_handler(state: AgentState):
                 _json_reply(self, 200 if found else 404, found[0] if found else {"error": "nf"})
             elif self.path == "/api/pools" and state.pools is not None:
                 _json_reply(self, 200, state.pools)
+            elif self.path == "/api/filesystems" and state.filesystems is not None:
+                _json_reply(self, 200, state.filesystems)
             else:
                 _json_reply(self, 404, {"error": "not found"})
 
@@ -1133,6 +1140,9 @@ def fresh_field():
         state.requests.clear()
         state.mode = "agent" if address not in ("127.0.0.4", "127.0.0.5") else state.mode
         state.pools = None
+        state.filesystems = None
+        if address == "127.0.0.2":
+            state.drives = [simple_drive("sda", "NUC-1"), simple_drive("sdb", "NUC-2")]
         if address == "127.0.0.3":
             state.token = FIELD_PASSWORD
     yield
@@ -2120,3 +2130,224 @@ def test_stats_from_the_ata_table_when_top_level_is_missing(mod):
     smart = {"ata_smart_attributes": {"table": [
         attr(194, "36 (Min/Max 20/52)"), attr(9, "18240"), attr(12, "212")]}}
     assert mod._stats(smart) == {"temp_c": 36, "power_on_hours": 18240, "power_cycles": 212}
+
+
+# ── Cards: ids, filesystems, order, hide, remove, download ──────────────────
+
+def _fs(fs_id: str, mount: str, device: str, fstype: str = "ext4", pct: float = 41.0) -> dict[str, Any]:
+    """One filesystem as the agent's /api/filesystems lists it."""
+    total = 1_000_000_000_000
+    used = int(total * pct / 100)
+    return {"id": fs_id, "uuid": "", "mountpoint": mount, "device": device, "fstype": fstype,
+            "total_bytes": total, "used_bytes": used, "available_bytes": total - used,
+            "use_percent": pct, "status": "ok"}
+
+
+def test_attach_filesystems(mod):
+    items = [
+        {"type": "drive", "id": "sda", "drive": {"device_path": "/dev/sda"}},
+        {"type": "drive", "id": "nvme0", "drive": {"device_path": "/dev/nvme0n1"}},
+        {"type": "drive", "id": "nvme1", "drive": {"device_path": "/dev/nvme1"}},
+        {"type": "pool", "id": "pool.tank", "pool": {"name": "tank"}},
+    ]
+    found = [
+        _fs("fs-1", "/", "/dev/sda1"),
+        _fs("fs-2", "/boot", "/dev/nvme0n1p2", "vfat"),
+        _fs("fs-3", "/srv", "/dev/nvme1n1p1"),
+        _fs("fs-4", "/tank", "tank", "zfs"),
+        _fs("fs-5", "/tank/media", "tank/media", "zfs"),
+        _fs("fs-6", "/data", "/dev/mapper/vg-data", "xfs"),
+        _fs("fs-7", "/mnt/x", "/dev/sdaa1"),
+        _fs("fs-8", "/other", "other/set", "zfs"),
+        _fs("fs-9", "/whole", "/dev/sda"),
+    ]
+    left = mod.attach_filesystems("10.0.0.9:9099", items, found)
+    on = {i["id"]: [f["id"] for f in i["filesystems"]] for i in items}
+    assert on == {"sda": ["fs-1", "fs-9"], "nvme0": ["fs-2"], "nvme1": ["fs-3"],
+                  "pool.tank": ["fs-4", "fs-5"]}
+    assert [c["id"] for c in left] == ["fs-6", "fs-7", "fs-8"]
+    assert left[0] == {"type": "filesystem", "id": "fs-6", "card_id": "10.0.0.9:9099|fs:fs-6",
+                       "filesystem": found[5]}
+
+
+def test_card_ids(mod):
+    assert mod.drive_card_key({"serial": " S5GX "}, "nvme0") == "S5GX"
+    assert mod.drive_card_key({"serial": ""}, "sdb") == "id:sdb"
+    assert mod.card_id("10.0.10.20:9099", "pool:tank") == "10.0.10.20:9099|pool:tank"
+    assert mod.split_card_id("10.0.10.20:9099|pool:tank") == ("10.0.10.20:9099", "pool:tank")
+    assert mod.split_card_id("10.0.10.20:9099") == ("10.0.10.20:9099", None)
+
+
+@needs_rules
+def test_drives_card_ids_and_filesystems(proxy, field):
+    key = f"127.0.0.2:{field}"
+    FIELD["127.0.0.2"].drives[1]["serial"] = ""
+    FIELD["127.0.0.2"].pools = [{"name": "tank", "state": "ONLINE", "problem_vdevs": []}]
+    FIELD["127.0.0.2"].filesystems = [
+        _fs("fs-a", "/", "/dev/sda1", pct=82.0), _fs("fs-t", "/tank/media", "tank/media", "zfs"),
+        _fs("fs-l", "/data", "/dev/md0", "xfs")]
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    status, body = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert status == 200 and body["filesystems_status"] == "ok"
+    items = {i["id"]: i for i in body["items"]}
+    assert items["sda"]["card_id"] == f"{key}|NUC-1"
+    assert items["sdb"]["card_id"] == f"{key}|id:sdb"
+    assert items["pool.tank"]["card_id"] == f"{key}|pool:tank"
+    assert [f["mountpoint"] for f in items["sda"]["filesystems"]] == ["/"]
+    assert items["sdb"]["filesystems"] == []
+    assert [f["id"] for f in items["pool.tank"]["filesystems"]] == ["fs-t"]
+    assert [(c["type"], c["card_id"]) for c in body["filesystem_cards"]] == [
+        ("filesystem", f"{key}|fs:fs-l")]
+    # The fields the page already reads are unchanged.
+    assert {"type", "id", "drive", "verdict", "view", "lab"} <= set(items["sda"])
+    # Without the endpoint in the health answer, nothing is asked.
+    FIELD["127.0.0.2"].filesystems = None
+    FIELD["127.0.0.2"].requests.clear()
+    _, body = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert body["filesystems_status"] == "none" and body["filesystem_cards"] == []
+    assert not any(p == "/api/filesystems" for _, p, _ in FIELD["127.0.0.2"].requests)
+    status, body = proxy.get("/fleet/hosts/self/drives")
+    assert body["items"][0]["card_id"] == "self|SER-A"
+
+
+def test_cards_order(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    proxy.get("/fleet/hosts/self/drives")
+    STATE.calls.clear()
+    order = [f"{key}|NUC-2", "self|SER-A", "nope|x", f"{key}|NUC-2", f"{key}|NUC-1", 7, key]
+    status, body = proxy.request("PUT", "/cards/order", {"order": order})
+    assert status == 200
+    assert body["order"] == [f"{key}|NUC-2", "self|SER-A", f"{key}|NUC-1", key]
+    assert len(_option_writes()) == 1
+    assert STATE.options["card_order"] == body["order"]
+    assert STATE.options["hosts"] == [{"address": "127.0.0.2", "port": field}]
+    assert proxy.get("/cards") == (200, {"order": body["order"], "hidden": []})
+    # A later order keeps the stored cards the page did not send, after it.
+    status, body = proxy.request("PUT", "/cards/order", {"order": ["self|SER-A"]})
+    assert body["order"] == ["self|SER-A", f"{key}|NUC-2", f"{key}|NUC-1", key]
+    assert proxy.request("PUT", "/cards/order", {"order": "x"})[0] == 400
+
+
+def test_cards_without_order_options(proxy):
+    # Options written by 0.3.0 before cards have neither key.
+    assert proxy.get("/cards") == (200, {"order": [], "hidden": []})
+
+
+def test_card_hide_and_show(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    STATE.calls.clear()
+    cid = quote(f"{key}|NUC-1", safe="")
+    status, body = proxy.request("PATCH", f"/cards/{cid}", {"hidden": True})
+    assert status == 200 and body["hidden"] is True
+    assert STATE.options["hidden_cards"] == [f"{key}|NUC-1"]
+    assert proxy.request("PATCH", "/cards/self%7CSER-A", {"hidden": True})[0] == 200
+    assert STATE.options["hidden_cards"] == [f"{key}|NUC-1", "self|SER-A"]
+    assert len(_option_writes()) == 2
+    # Hiding what is hidden writes nothing.
+    assert proxy.request("PATCH", f"/cards/{cid}", {"hidden": True})[0] == 200
+    assert len(_option_writes()) == 2
+    status, body = proxy.request("PATCH", f"/cards/{cid}", {"hidden": False})
+    assert body["hidden_cards"] == ["self|SER-A"] and len(_option_writes()) == 3
+    assert proxy.get("/cards")[1]["hidden"] == ["self|SER-A"]
+    assert proxy.request("PATCH", "/cards/10.9.9.9%3A1%7Csda", {"hidden": True})[0] == 404
+    assert proxy.request("PATCH", f"/cards/{cid}", {"hidden": "yes"})[0] == 400
+
+
+@needs_rules
+def test_hidden_machine_becomes_hidden_cards(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field, "hidden": True})
+    _refresh_hosts(proxy)
+    STATE.calls.clear()
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "ok"
+    assert len(_option_writes()) == 1
+    assert STATE.options["hosts"] == [{"address": "127.0.0.2", "port": field}]
+    assert STATE.options["hidden_cards"] == [f"{key}|NUC-1", f"{key}|NUC-2"]
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    assert len(_option_writes()) == 1  # once
+
+
+@needs_rules
+def test_card_remove_field_drives_then_machine(proxy, field, data_dir):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    STATE.options["card_order"] = [f"{key}|NUC-1", "self|SER-A", f"{key}|NUC-2"]
+    STATE.options["hidden_cards"] = [f"{key}|NUC-2"]
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    STATE.calls.clear()
+    status, body = proxy.request("DELETE", f"/cards/{quote(f'{key}|NUC-1', safe='')}")
+    assert status == 200 and body == {"removed": f"{key}|NUC-1", "host_removed": False}
+    assert len(_option_writes()) == 1
+    assert STATE.options["hosts"] == [{"address": "127.0.0.2", "port": field, "removed": ["NUC-1"]}]
+    assert STATE.options["card_order"] == ["self|SER-A", f"{key}|NUC-2"]
+    # The removed drive stays off the page on the next read.
+    _, read = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert [i["id"] for i in read["items"]] == ["sdb"] and read["summary"]["drives"] == 1
+    # Its last card takes the machine with it: no longer stored or contacted.
+    status, body = proxy.request("DELETE", f"/cards/{quote(f'{key}|NUC-2', safe='')}")
+    assert body == {"removed": f"{key}|NUC-2", "host_removed": True}
+    assert STATE.options["hosts"] == [] and STATE.options["hidden_cards"] == []
+    assert STATE.options["card_order"] == ["self|SER-A"]
+    cache = json.loads((data_dir / "fleet-cache.json").read_text(encoding="utf-8"))
+    assert key not in cache["hosts"]
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[0] == 404
+    # Adding the machine again brings every drive back.
+    proxy.post("/fleet/hosts", {"hosts": [{"address": "127.0.0.2", "port": field}]})
+    _, read = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert [i["id"] for i in read["items"]] == ["sda", "sdb"]
+
+
+def test_card_remove_placeholder_and_refusals(proxy, field):
+    key = f"127.0.0.3:{field}"
+    _store({"address": "127.0.0.3", "port": field})
+    _refresh_hosts(proxy)
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "password_needed"
+    status, body = proxy.request("DELETE", f"/cards/{quote(key, safe='')}")
+    assert status == 200 and body["host_removed"] is True and STATE.options["hosts"] == []
+    status, body = proxy.request("DELETE", "/cards/self%7CSER-A")
+    assert status == 409 and body["error"] == "cannot_remove"
+    assert proxy.request("DELETE", "/cards/10.9.9.9%3A1%7Csda")[0] == 404
+    assert proxy.request("DELETE", "/cards/self")[0] == 404
+
+
+@needs_mock
+@needs_rules
+def test_card_replica_download_and_remove(proxy):
+    status, body = proxy.post("/replicas/add", {"files": ["shipped.smart-failed", "shipped.zfs-pool-degraded"]})
+    assert status == 201
+    _, read = proxy.get("/fleet/hosts/replicas/drives")
+    by_mock = {i["id"]: i["card_id"] for i in read["items"]}
+    drive_card = by_mock[body["cards"][0]["card_id"]]
+    pool_card = by_mock[body["cards"][1]["card_id"]]
+    assert drive_card.startswith("replicas|") and pool_card.startswith("replicas|pool:tank")
+    status, headers, raw = _raw(proxy, "GET", f"/cards/{quote(drive_card, safe='')}/file")
+    assert status == 200 and headers["content-disposition"].startswith("attachment;")
+    assert json.loads(raw)["format"] == "smart-sniffer-replica"
+    STATE.options["card_order"] = [pool_card]
+    for card in (drive_card, pool_card):
+        status, body = proxy.request("DELETE", f"/cards/{quote(card, safe='')}")
+        assert status == 200 and body == {"removed": card, "host_removed": False}
+    assert STATE.options["card_order"] == []
+    _, read = proxy.get("/fleet/hosts/replicas/drives")
+    assert {drive_card, pool_card}.isdisjoint({i["card_id"] for i in read["items"]})
+
+
+@needs_mock
+@needs_rules
+def test_card_download_real_drive_is_anonymised(proxy, mock_agent):
+    SELF_AGENT.drives = [_wwn_drive("sda", "SELF-SERIAL-88")]
+    proxy.get("/fleet/hosts/self/drives")
+    status, headers, raw = _raw(proxy, "GET", "/cards/self%7CSELF-SERIAL-88/file")
+    assert status == 200 and headers["content-disposition"].startswith("attachment;")
+    text = raw.decode()
+    assert "SELF-SERIAL-88" not in text and "77777777" not in text
+    doc = json.loads(text)
+    assert doc["format"] == "smart-sniffer-replica" and doc["origin"]["type"] == "saved"
+    assert proxy.get("/cards/self%7CNOPE/file")[0] == 404

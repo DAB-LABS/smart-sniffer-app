@@ -22,6 +22,11 @@ It also answers the Control Center's own routes:
   POST /replicas/save-as         save a real drive as a replica file
   GET  /replicas/<card>/file     download a replica as it reads now
   DELETE /replicas/<card>        take a replica off the page
+  GET  /cards                    the card order and the hidden cards
+  PUT  /cards/order              save the card order
+  PATCH /cards/<id>              hide or show one card
+  DELETE /cards/<id>             remove one card (not a drive of this machine)
+  GET  /cards/<id>/file          one card as a JSON file
 
 The verdict comes from the integration's own rule modules (attention.py,
 devstat.py, extract.py, pool_health.py), which the Dockerfile takes from the
@@ -1499,8 +1504,18 @@ def _normalize_hosts(raw: Any) -> list[dict[str, Any]]:
             "address": address, "port": port,
             "password": password if isinstance(password, str) else "",
             "hidden": item.get("hidden") is True,
+            "removed": _str_list(item.get("removed")),
         })
     return hosts
+
+
+def _str_list(raw: Any) -> list[str]:
+    """A list of distinct non-empty strings, in order; anything else is dropped."""
+    out: list[str] = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, str) and item and item not in out:
+            out.append(item)
+    return out
 
 
 def _serialize_host(host: dict[str, Any]) -> dict[str, Any]:
@@ -1509,7 +1524,117 @@ def _serialize_host(host: dict[str, Any]) -> dict[str, Any]:
         out["password"] = host["password"]
     if host.get("hidden"):
         out["hidden"] = True
+    if host.get("removed"):
+        out["removed"] = list(host["removed"])
     return out
+
+
+# ── Cards ───────────────────────────────────────────────────────────────────
+#
+# Every card on the page has an id that stays the same across reloads: the
+# host id ("self", "replicas" or "<address>:<port>"), a "|", then the key the
+# drive view already uses for Home Assistant: the drive's serial, else
+# "id:<drive id>"; "pool:<name>" for a pool; "fs:<filesystem id>" for a
+# filesystem that belongs to no drive or pool. A machine waiting for its
+# password (or never read) shows one card whose id is the host id alone.
+
+CARD_SEP = "|"
+
+
+def drive_card_key(drive: dict[str, Any], drive_id: str) -> str:
+    serial = drive.get("serial") if isinstance(drive, dict) else None
+    if isinstance(serial, str) and serial.strip():
+        return serial.strip()
+    return f"id:{drive_id}"
+
+
+def card_id(host_key: str, key: str) -> str:
+    return f"{host_key}{CARD_SEP}{key}"
+
+
+def split_card_id(text: str) -> tuple[str, str | None]:
+    """(host id, card key); the key is None for a machine's own card."""
+    host_key, sep, key = str(text).partition(CARD_SEP)
+    return host_key, (key if sep else None)
+
+
+def _part_of(device: str, drive_path: str) -> bool:
+    """True when a filesystem's block device is on this drive: the drive's
+    path itself, or it followed by a partition number (/dev/sda1,
+    /dev/nvme0n1p2, /dev/mmcblk0p1)."""
+    if not drive_path or not device.startswith(drive_path):
+        return False
+    rest = device[len(drive_path):]
+    return re.fullmatch(r"(?:n\d+)?(?:p?\d+)?", rest) is not None
+
+
+def attach_filesystems(host_key: str, items: list[dict[str, Any]],
+                       filesystems: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put each filesystem on the card it lives on, as item["filesystems"]:
+    a block device's on the drive whose path starts it, a ZFS dataset on its
+    pool's card. Returns the rest as FILESYSTEM cards."""
+    for item in items:
+        item["filesystems"] = []
+    drives = [i for i in items if i.get("type") == "drive"]
+    pools = {str((i.get("pool") or {}).get("name")): i for i in items if i.get("type") == "pool"}
+    leftover: list[dict[str, Any]] = []
+    for fs in filesystems:
+        device = str(fs.get("device") or "")
+        owner = None
+        if str(fs.get("fstype") or "").lower() == "zfs":
+            owner = pools.get(device.split("/", 1)[0])
+        else:
+            matches = [d for d in drives
+                       if _part_of(device, str((d.get("drive") or {}).get("device_path") or ""))]
+            if matches:
+                owner = max(matches, key=lambda d: len(str(d["drive"].get("device_path"))))
+        if owner is not None:
+            owner["filesystems"].append(fs)
+            continue
+        fs_id = str(fs.get("id") or fs.get("mountpoint") or len(leftover))
+        leftover.append({"type": "filesystem", "id": fs_id,
+                         "card_id": card_id(host_key, f"fs:{fs_id}"), "filesystem": fs})
+    return leftover
+
+
+def _drop_ids(state: dict[str, Any], gone: set[str]) -> dict[str, Any] | None:
+    """The state without these card ids in the order and the hidden list;
+    None (nothing to write) when neither has them."""
+    if not any(i in gone for i in state["card_order"] + state["hidden_cards"]):
+        return None
+    state["card_order"] = [i for i in state["card_order"] if i not in gone]
+    state["hidden_cards"] = [i for i in state["hidden_cards"] if i not in gone]
+    return state
+
+
+def _drop_cards(state: dict[str, Any], host_key: str, cid: str,
+                outcome: dict[str, Any]) -> dict[str, Any]:
+    """After a field card is removed: its id leaves the order and the hidden
+    list; when its machine went too, every id of that machine does."""
+    def gone(i: str) -> bool:
+        return i == cid or (bool(outcome.get("host")) and split_card_id(i)[0] == host_key)
+
+    state["card_order"] = [i for i in state["card_order"] if not gone(i)]
+    state["hidden_cards"] = [i for i in state["hidden_cards"] if not gone(i)]
+    return state
+
+
+def card_list(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every card of a drives read: its items, then its FILESYSTEM cards."""
+    return [c for c in (response.get("items") or []) + (response.get("filesystem_cards") or [])
+            if isinstance(c, dict) and c.get("card_id")]
+
+
+def without_removed(response: dict[str, Any], removed: list[str]) -> dict[str, Any]:
+    """A drives read without the cards removed with the trash; the summary
+    counted again over what is left."""
+    if not removed:
+        return response
+    gone = {card_id(str(response.get("id")), r) for r in removed}
+    items = [i for i in response.get("items") or [] if i.get("card_id") not in gone]
+    fs_cards = [c for c in response.get("filesystem_cards") or [] if c.get("card_id") not in gone]
+    return {**response, "items": items, "filesystem_cards": fs_cards,
+            "summary": summarize(items, response.get("status") == "ok")}
 
 
 # Options of older versions, removed at start when the Supervisor does not
@@ -1614,19 +1739,47 @@ class HostStore:
     def write(self, change) -> list[dict[str, Any]]:
         """Apply change() to the stored hosts and save them in one options
         write. change() returning None means nothing to save."""
+        def whole(state: dict[str, Any]) -> dict[str, Any] | None:
+            hosts = change(state["hosts"])
+            return None if hosts is None else {**state, "hosts": hosts}
+
+        return self.write_all(whole)["hosts"]
+
+    def cards(self) -> dict[str, Any]:
+        """The stored hosts, card order and hidden cards, read now."""
+        options = self._options()
+        hosts = _normalize_hosts(options.get("hosts"))
+        self.last_known = hosts
+        self._memo_at = time.monotonic()
+        return {"hosts": hosts, "card_order": _str_list(options.get("card_order")),
+                "hidden_cards": _str_list(options.get("hidden_cards"))}
+
+    def write_all(self, change) -> dict[str, Any]:
+        """One options write for hosts, card_order and hidden_cards together.
+
+        change() gets {"hosts", "card_order", "hidden_cards"} (copies) and
+        returns the new state, or None for nothing to save. Every other
+        option is written back as it was read."""
         with self.lock:
             options = self._options()
-            current = _normalize_hosts(options.get("hosts"))
-            hosts = change([dict(h) for h in current])
-            if hosts is None:
-                self.last_known = current
-                self._memo_at = time.monotonic()
-                return current
-            self._save({**options, "hosts": [_serialize_host(h) for h in hosts]})
-            self.last_known = hosts
+            current = {"hosts": _normalize_hosts(options.get("hosts")),
+                       "card_order": _str_list(options.get("card_order")),
+                       "hidden_cards": _str_list(options.get("hidden_cards"))}
+            state = change({"hosts": [dict(h) for h in current["hosts"]],
+                            "card_order": list(current["card_order"]),
+                            "hidden_cards": list(current["hidden_cards"])})
+            if state is None:
+                state = current
+            else:
+                saved = {**options, "hosts": [_serialize_host(h) for h in state["hosts"]]}
+                for key in ("card_order", "hidden_cards"):
+                    if state[key] or key in options:
+                        saved[key] = _str_list(state[key])
+                self._save(saved)
+                log(f"Field agents and cards saved ({len(state['hosts'])} agents stored)")
+            self.last_known = state["hosts"]
             self._memo_at = time.monotonic()
-            log(f"Field agents saved ({len(hosts)} stored)")
-            return hosts
+            return state
 
 
 # ── Reading an agent's drives ───────────────────────────────────────────────
@@ -1681,7 +1834,7 @@ def judge_pool(rules: Rules, pool: dict[str, Any], lab: dict[str, Any] | None,
 
 # Path prefixes that belong to the proxy itself: anything under them that no
 # route matches is a JSON 404, never the page.
-_APP_PREFIXES = ("/app/", "/evaluate", "/fleet/", "/ha/", "/lab/", "/replicas")
+_APP_PREFIXES = ("/app/", "/evaluate", "/fleet/", "/ha/", "/lab/", "/replicas", "/cards")
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -1725,6 +1878,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ("POST", r"/replicas/save-as", "_route_replicas_save_as"),
         ("GET", r"/replicas/(?P<card_id>[^/]+)/file", "_route_replica_file"),
         ("DELETE", r"/replicas/(?P<card_id>[^/]+)", "_route_replica_delete"),
+        ("GET", r"/cards", "_route_cards"),
+        ("PUT", r"/cards/order", "_route_cards_order"),
+        ("GET", r"/cards/(?P<cid>[^/]+)/file", "_route_card_file"),
+        ("PATCH", r"/cards/(?P<cid>[^/]+)", "_route_card_patch"),
+        ("DELETE", r"/cards/(?P<cid>[^/]+)", "_route_card_delete"),
     ]
 
     def log_message(self, format, *args):
@@ -2071,17 +2229,43 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     # ── /fleet/hosts/<id>/drives ──
 
-    def _route_host_drives(self, _parsed, key: str) -> None:
+    def _target(self, key: str) -> tuple[tuple[str, str, int, str], dict[str, Any] | None]:
+        """(kind, address, port, token) for self, replicas or a stored host,
+        and the stored host (None for self and replicas). 404 otherwise."""
         if key == "self":
-            target = ("self", "127.0.0.1", self.agent_port, self.token)
-        elif key == "replicas":
-            target = ("replicas", "127.0.0.1", self.mock_port, "")
-        else:
-            host = self.host_store.find(key)
-            if host is None:
-                raise ApiError(404, "not_found", "no such field agent")
-            target = ("field", host["address"], host["port"], host.get("password") or "")
-        self._send_json(200, self._read_agent(key, *target))
+            return ("self", "127.0.0.1", self.agent_port, self.token), None
+        if key == "replicas":
+            return ("replicas", "127.0.0.1", self.mock_port, ""), None
+        host = self.host_store.find(key)
+        if host is None:
+            raise ApiError(404, "not_found", "no such field agent")
+        return ("field", host["address"], host["port"], host.get("password") or ""), host
+
+    def _route_host_drives(self, _parsed, key: str) -> None:
+        target, host = self._target(key)
+        response = self._read_agent(key, *target)
+        if host is not None:
+            response = without_removed(response, host.get("removed") or [])
+            if host.get("hidden"):
+                self._migrate_hidden(key, response)
+        self._send_json(200, response)
+
+    def _migrate_hidden(self, key: str, response: dict[str, Any]) -> None:
+        """A machine hidden as a whole (0.3.0 before cards) hides each of its
+        cards instead, in one write; the machine's own hidden flag goes."""
+        ids = [c["card_id"] for c in card_list(response)] or [key]
+        try:
+            def change(state: dict[str, Any]) -> dict[str, Any]:
+                for host in state["hosts"]:
+                    if host_id(host["address"], host["port"]) == key:
+                        host["hidden"] = False
+                state["hidden_cards"] += [i for i in ids if i not in state["hidden_cards"]]
+                return state
+
+            self.host_store.write_all(change)
+            self.cache.update(key, hidden_since=None)
+        except ApiError as err:
+            log(f"Could not move {key}'s hidden flag to its cards: {err.message or err.code}")
 
     def _agent_hostname(self, kind: str, address: str, health: dict[str, Any]) -> str | None:
         name = health.get("hostname")
@@ -2096,8 +2280,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         return reverse_name(address) or address
 
     def _read_agent(self, key: str, kind: str, address: str, port: int, token: str) -> dict[str, Any]:
-        """One read of an agent: health, drive list, each drive, pools; every
-        drive and pool judged. On failure the last good read, marked stale."""
+        """One read of an agent: health, drive list, each drive, pools,
+        filesystems; every drive and pool judged, every card given its id.
+        On failure the last good read, marked stale."""
         def call(path: str, timeout: float = AGENT_READ_TIMEOUT) -> AgentReply:
             return agent_call(address, port, "GET", path, token=token,
                               connect_timeout=AGENT_HEALTH_TIMEOUT, read_timeout=timeout)
@@ -2173,6 +2358,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
             verdict, view = judge_pool(self.rules, pool_payload, lab, rules_ok)
             items.append({"type": "pool", "id": f"pool.{pool_payload.get('name')}",
                           "pool": pool_payload, "verdict": verdict, "view": view, "lab": lab})
+        for item in items:
+            card_key = (f"pool:{item['pool'].get('name')}" if item["type"] == "pool"
+                        else drive_card_key(item["drive"], item["id"]))
+            item["card_id"] = card_id(key, card_key)
+
+        # Disk space: each filesystem on the card it lives on, the rest as
+        # FILESYSTEM cards. Read only when the agent lists the endpoint.
+        filesystems: list[dict[str, Any]] = []
+        filesystems_status = "none"
+        if "/api/filesystems" in endpoints:
+            reply = call("/api/filesystems")
+            if reply.status == 200 and isinstance(reply.body, list):
+                filesystems_status = "ok"
+                filesystems = [f for f in reply.body if isinstance(f, dict)]
+            else:
+                filesystems_status = "failed"
+        fs_cards = attach_filesystems(key, items, filesystems)
 
         now = utc_now()
         response = {
@@ -2182,7 +2384,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                       sum(1 for i in items if i["type"] == "pool")),
             "summary": summarize(items, True),
             "items": items,
+            "filesystem_cards": fs_cards,
             "pools_status": pools_status,
+            "filesystems_status": filesystems_status,
             "rules_version": self.rules.version if rules_ok else None,
             "stale": False,
         }
@@ -2207,6 +2411,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
         cached = self.cache.get(key)
         last = cached.get("response") if isinstance(cached.get("response"), dict) else {}
         items = [{**item, "stale": True} for item in last.get("items") or []]
+        for item in items:  # a read cached before cards had ids
+            if not item.get("card_id"):
+                item["card_id"] = card_id(key, f"pool:{(item.get('pool') or {}).get('name')}"
+                                          if item.get("type") == "pool"
+                                          else drive_card_key(item.get("drive") or {}, str(item.get("id"))))
+        fs_cards = [{**c, "stale": True} for c in last.get("filesystem_cards") or []]
         agent = last.get("agent")
         if live is not None:
             counts = [live.get(k) if isinstance(live.get(k), int) and not isinstance(live.get(k), bool)
@@ -2218,7 +2428,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "agent": agent,
             "summary": summarize(items, False),
             "items": items,
+            "filesystem_cards": fs_cards,
             "pools_status": last.get("pools_status"),
+            "filesystems_status": last.get("filesystems_status"),
             "rules_version": last.get("rules_version") or self.rules.version,
             "stale": True,
         }
@@ -2301,15 +2513,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
         reply = self._mock_or_down("GET", self._replica_path(card_id) + "/replica")
         if reply.status != 200:
             raise ApiError(404, "not_found", "no such replica")
-        disposition = reply.headers.get("content-disposition") or (
-            f'attachment; filename="{re.sub(r"[^A-Za-z0-9._-]+", "-", card_id)}.json"')
+        self._send_file(reply, card_id)
+
+    def _send_file(self, reply: AgentReply | bytes, name: str) -> None:
+        """A JSON file as a download: the replica agent's answer (with its
+        own file name when it gives one) or bytes."""
+        raw = reply if isinstance(reply, bytes) else reply.raw
+        given = None if isinstance(reply, bytes) else reply.headers.get("content-disposition")
+        disposition = given or (
+            f'attachment; filename="{re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "card"}.json"')
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Disposition", disposition)
-        self.send_header("Content-Length", str(len(reply.raw)))
+        self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(reply.raw)
+        self.wfile.write(raw)
 
     def _route_replica_delete(self, _parsed, card_id: str) -> None:
         reply = self._mock_or_down("DELETE", self._replica_path(card_id))
@@ -2323,6 +2542,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         drive_id = body.get("drive_id") if isinstance(body, dict) else None
         if not isinstance(source, str) or not isinstance(drive_id, str) or not drive_id:
             raise ApiError(400, "bad_request", 'give {"host": "self" or a field agent id, "drive_id"}')
+        entry = self._save_replica_file(source, drive_id)
+        added = self._mock_or_down("POST", "/api/drives", body={"replica": entry.get("id")})
+        card = self._card_id(added.body) if added.status == 201 and isinstance(added.body, dict) else None
+        self._send_json(201, {"file": entry, "card_id": card})
+
+    def _save_replica_file(self, source: str, drive_id: str) -> dict[str, Any]:
+        """Read a real drive (self or a stored field agent), judge it and save
+        it as a replica file in the user folder, serial and WWN replaced by
+        the replica agent. Returns the file's listing entry."""
         if source == "self":
             address, port, token = "127.0.0.1", self.agent_port, self.token
         else:
@@ -2352,13 +2580,162 @@ class ProxyHandler(BaseHTTPRequestHandler):
         saved = self._mock_or_down("POST", "/api/replicas",
                                    body={"from_drive": drive, "verdict": verdict})
         if saved.status != 201 or not isinstance(saved.body, dict):
-            self._relay(saved)
-            return
-        entry = saved.body
-        added = self._mock_or_down("POST", "/api/drives", body={"replica": entry.get("id")})
-        card_id = self._card_id(added.body) if added.status == 201 and isinstance(added.body, dict) else None
+            body = saved.body if isinstance(saved.body, dict) else {}
+            extra = {k: v for k, v in body.items() if k not in ("error", "message")}
+            raise ApiError(saved.status or 502, str(body.get("error") or "replica_agent_failed"),
+                           body.get("message") or f"HTTP {saved.status}", **extra)
         log(f"Saved a replica of drive {drive_id}")
-        self._send_json(201, {"file": entry, "card_id": card_id})
+        return saved.body
+
+    # ── /cards ──
+
+    def _known_cards(self, hosts: list[dict[str, Any]]) -> set[str]:
+        """Every card id the last reads showed, and each stored machine's own
+        card (its password placeholder)."""
+        keys = ["self", "replicas"] + [host_id(h["address"], h["port"]) for h in hosts]
+        known = {k for k in keys[2:]}
+        for key in keys:
+            response = self.cache.get(key).get("response")
+            if isinstance(response, dict):
+                known |= {c["card_id"] for c in card_list(response)}
+        return known
+
+    def _route_cards(self, _parsed) -> None:
+        state = self.host_store.cards()
+        self._send_json(200, {"order": state["card_order"], "hidden": state["hidden_cards"]})
+
+    def _route_cards_order(self, _parsed) -> None:
+        body = self._read_json()
+        order = body.get("order") if isinstance(body, dict) else None
+        if not isinstance(order, list):
+            raise ApiError(400, "bad_request", 'give {"order": ["<card id>", ...]}')
+
+        def change(state: dict[str, Any]) -> dict[str, Any]:
+            hosts = {"self", "replicas"} | {host_id(h["address"], h["port"]) for h in state["hosts"]}
+            known = self._known_cards(state["hosts"])
+            wanted = [i for i in _str_list(order) if i in known]
+            # Cards the page did not send (a machine it could not read) keep
+            # their place after the ones it did, while their machine is stored.
+            kept = [i for i in state["card_order"]
+                    if i not in wanted and split_card_id(i)[0] in hosts]
+            state["card_order"] = wanted + kept
+            return state
+
+        state = self.host_store.write_all(change)
+        self._send_json(200, {"order": state["card_order"]})
+
+    def _check_card_host(self, cid: str, hosts: list[dict[str, Any]]) -> tuple[str, str | None]:
+        host_key, key = split_card_id(cid)
+        stored = {host_id(h["address"], h["port"]) for h in hosts}
+        if host_key not in ("self", "replicas") and host_key not in stored:
+            raise ApiError(404, "not_found", "no such card")
+        if host_key in ("self", "replicas") and key is None:
+            raise ApiError(404, "not_found", "no such card")
+        return host_key, key
+
+    def _route_card_patch(self, _parsed, cid: str) -> None:
+        body = self._read_json()
+        hidden = body.get("hidden") if isinstance(body, dict) else None
+        if not isinstance(hidden, bool):
+            raise ApiError(400, "bad_request", 'give {"hidden": true or false}')
+        self._check_card_host(cid, self.host_store.cards()["hosts"])
+
+        def change(state: dict[str, Any]) -> dict[str, Any] | None:
+            if (cid in state["hidden_cards"]) == hidden:
+                return None  # already so: no write
+            if hidden:
+                state["hidden_cards"].append(cid)
+            else:
+                state["hidden_cards"].remove(cid)
+            return state
+
+        state = self.host_store.write_all(change)
+        self._send_json(200, {"id": cid, "hidden": hidden, "hidden_cards": state["hidden_cards"]})
+
+    def _find_card(self, host_key: str, cid: str) -> dict[str, Any] | None:
+        """A card of the last read of its machine; read again when the last
+        read does not have it."""
+        response = self.cache.get(host_key).get("response")
+        found = next((c for c in card_list(response) if c["card_id"] == cid), None) \
+            if isinstance(response, dict) else None
+        if found is None:
+            target, _host = self._target(host_key)
+            found = next((c for c in card_list(self._read_agent(host_key, *target))
+                          if c["card_id"] == cid), None)
+        return found
+
+    def _route_card_delete(self, _parsed, cid: str) -> None:
+        host_key, key = self._check_card_host(cid, self.host_store.cards()["hosts"])
+        if host_key == "self":
+            raise ApiError(409, "cannot_remove", "A drive of this machine can be hidden, not removed.")
+        host_removed = False
+        if host_key == "replicas":
+            item = self._find_card("replicas", cid)
+            if item is None or item.get("type") == "filesystem":
+                raise ApiError(404, "not_found", "no such replica")
+            reply = self._mock_or_down("DELETE", self._replica_path(str(item["id"])))
+            if reply.status != 200:
+                raise ApiError(404, "not_found", "no such replica")
+            gone = {cid}
+        else:
+            response = self.cache.get(host_key).get("response")
+            shown = {split_card_id(c["card_id"])[1] for c in card_list(response)} \
+                if isinstance(response, dict) else set()
+            outcome: dict[str, Any] = {}
+
+            def change_host(state: dict[str, Any]) -> dict[str, Any]:
+                host = next((h for h in state["hosts"]
+                             if host_id(h["address"], h["port"]) == host_key), None)
+                if host is None:
+                    raise ApiError(404, "not_found", "no such field agent")
+                if key is not None and key not in host["removed"]:
+                    host["removed"].append(key)
+                # The last card of a machine takes the machine with it.
+                outcome["host"] = key is None or not (shown - set(host["removed"]))
+                if outcome["host"]:
+                    state["hosts"] = [h for h in state["hosts"] if h is not host]
+                return state
+
+            gone = {cid}
+            self.host_store.write_all(lambda state: _drop_cards(change_host(state), host_key,
+                                                                cid, outcome))
+            host_removed = bool(outcome.get("host"))
+            if host_removed:
+                self.cache.drop(host_key)
+                log(f"Field agent {host_key} removed with its last card")
+            self._send_json(200, {"removed": cid, "host_removed": host_removed})
+            return
+        # A replica's id leaves the order and the hidden list, if it was there.
+        self.host_store.write_all(lambda state: _drop_ids(state, gone))
+        self._send_json(200, {"removed": cid, "host_removed": host_removed})
+
+    def _route_card_file(self, _parsed, cid: str) -> None:
+        host_key, key = self._check_card_host(cid, self.host_store.hosts_quick())
+        if key is None:
+            raise ApiError(404, "not_found", "no such card")
+        item = self._find_card(host_key, cid)
+        if item is None or item.get("type") == "filesystem":
+            raise ApiError(404, "not_found", "no such card")
+        if host_key == "replicas":
+            reply = self._mock_or_down("GET", self._replica_path(str(item["id"])) + "/replica")
+            if reply.status != 200:
+                raise ApiError(404, "not_found", "no such replica")
+            self._send_file(reply, str(item["id"]))
+            return
+        if item.get("type") == "pool":
+            # A real agent reports a pool without its disk layout, which a
+            # replica file needs, so the file is the pool as the agent sent it.
+            pool = item.get("pool") or {}
+            doc = {"pool": pool, "filesystems": item.get("filesystems") or []}
+            self._send_file(json.dumps(doc, indent=2).encode(), f"pool-{pool.get('name')}")
+            return
+        # A real drive: saved as a replica file (serial and WWN replaced), and
+        # that file is the download.
+        entry = self._save_replica_file(host_key, str(item["id"]))
+        reply = self._mock_or_down("GET", f"/api/replicas/{quote(str(entry.get('id')), safe='')}")
+        if reply.status != 200:
+            raise ApiError(502, "replica_agent_failed", "the saved file could not be read back")
+        self._send_file(reply, str(entry.get("id")))
 
     # ── /ha/devices ──
 

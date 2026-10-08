@@ -14,5 +14,11 @@ configuration:
   hosts:
     name: Field Agents
     description: Other machines running the SMART Sniffer agent. Added from the Control Center.
+  card_order:
+    name: Card Order
+    description: The order of the cards in the Control Center. Set by dragging the cards there.
+  hidden_cards:
+    name: Hidden Cards
+    description: Cards hidden with the eye in the Control Center. Shown again from there.
 network:
   9099/tcp: SMART Sniffer Agent API
