@@ -20,25 +20,25 @@ SMART Sniffer has three parts:
 - **The Agent**: the same agent, installed on your other machines (a NAS, a Proxmox host, a workstation or a Mac). The app calls these field agents. See the [SMART Sniffer documentation](https://github.com/DAB-LABS/smart-sniffer) to install it.
 - **The Integration**: turns drive data into Home Assistant entities, sensors and alerts. Optional for the app.
 
-The verdict on the page (Attention, Maybe, Health OK) is the integration's own: the app is built with the integration's rule modules, so the page and Home Assistant always agree. The line under the Case file names the integration release the rules came from.
+The verdict on the page (Attention, Maybe, Health OK) is the integration's own: the app is built with the integration's rule modules, so the page and Home Assistant always agree. The line under the cards names the integration release the rules came from.
 
 ## Getting Started
 
 1. **Start this app.** It begins reading your Home Assistant machine's drives at once.
-2. **Open the Control Center** with **Open Web UI**, or turn on **Show in sidebar** on the app's Info page (see [Where it lives](#where-it-lives)). The **Case file** shows one card per drive.
+2. **Open the Control Center** with **Open Web UI**, or turn on **Show in sidebar** on the app's Info page (see [Where it lives](#where-it-lives)). It shows one card per drive.
 3. If a drive shows **Health not known**, or the app's log says **DRIVE ACCESS BLOCKED**, turn off **Protection Mode**: go to **Settings → Apps → SMART Sniffer → Protection mode**, switch it **OFF**, then restart the app (see [Protection Mode](#protection-mode) below).
-4. **Optional: add the integration.** Install the SMART Sniffer integration through HACS. A small exit glyph then appears after each drive's name on the page: grey means Home Assistant does not have this drive yet, and clicking it adds this machine's drives; blue opens the drive's device page in Home Assistant. Home Assistant may also discover the app's agent on its own and offer it under **Settings → Devices & Services**.
+4. **Optional: add the integration.** Install the SMART Sniffer integration through HACS. A small exit icon then appears beside each card's type label: grey means Home Assistant does not have this drive yet, and clicking it adds this machine's drives; blue opens the drive's device page in Home Assistant. Home Assistant may also discover the app's agent on its own and offer it under **Settings → Devices & Services**.
 5. If you prefer to add it by hand: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter the host and port from the app's startup log (`Integration host:`), for example `0449a086-smart-sniffer-agent` and port `9099`.
 
 ## The Control Center
 
-The page has three sections.
+The page is one grid of cards: one per drive and one per ZFS pool, from this machine, your field agents and the replicas, then the **+** card. The label at the top right of a card says where it comes from: `HAOS` for this machine, the machine's name for a field agent, `REPLICA`, `ZFS POOL`, or `FILESYSTEM` for a filesystem that belongs to no drive or pool (an LVM or md RAID volume, for example). A card shows where the drive is, its temperature, power-on hours and data written, its disk space, and its health. The chevron beside the health word opens **Details**: every counter, Data Read, Device Statistics, the disk space in full and every attribute or NVMe log field as smartctl reports it.
 
-- **Case file**: every drive this app's own agent reports, in the agent's order. Each card shows the header word, the temperature, power-on hours and power cycles, the counters that matter for that kind of drive, Data Written and Data Read, and the **Field report**, every attribute or NVMe log field as smartctl reports it.
-- **Field agents**: the agents on your other machines that you added, one card per machine, with a row per drive and ZFS pool.
-- **Replicas**: fake drives and pools, for testing Home Assistant.
+**Disk space.** Each filesystem on a drive (or ZFS dataset on a pool) gets a grey bar, up to three per card. Below 80% the bar says how full it is and the size; from 80% the percent sits inside the bar and the text beside it says how much is free; the number gets heavier at 90% and 95%, and at 95% the bar's outline turns dashed. Agents report disk space only for the mountpoints chosen when the agent was installed.
 
-Each card's header line carries one of four words:
+**Arranging cards.** Drag a card by the dots beside its title to move it (on a phone, hold the dots first), or focus the dots and use the arrow keys. The order is kept in the app's options. The eye at the foot of a card hides it for now; the eye beside **Refresh** shows how many are hidden, and shows them again, faded, with a closed eye to bring each back. The trash removes that one card for good, after asking. Drives of this machine cannot be removed, only hidden.
+
+Each card's health line carries one of four words:
 
 | Word | Meaning |
 |---|---|
@@ -47,41 +47,39 @@ Each card's header line carries one of four words:
 | **Health OK** (green) | Nothing to report. |
 | **Health not known** (grey) | The drive gives no usable SMART data (virtual disks and some USB bridges do this), or the agent is not answering. |
 
-The rows carry the detail once: the row that caused the word is marked in the gutter, red for Attention and a hollow gold square for Maybe, with what was expected written after the value. A row the drive does not report reads "not known".
+Under the word, a box lists every row that caused it, with what was expected and the value, red for Attention and gold for Maybe. In Details, a row the drive does not report reads "not known".
 
 The page reads this machine's drives and the replicas every 8 seconds while it is open, and your field agents when it opens, when you press **Refresh**, and every 15 minutes while it stays visible.
 
 ## Field Agents
 
-A field agent is another machine running the SMART Sniffer agent. Add them with the **+** card, the last card in the Field agents section.
+A field agent is another machine running the SMART Sniffer agent. Add them with the **+** card, the last card on the page. It has three parts: **Network**, **Add by hand** and **Replicas**, and one **Add** button for everything ticked in all three.
 
 **Nothing on your network is scanned until you ask.** Opening the + card starts a scan of the block your Home Assistant machine is on (for example `10.0.10.0/24`, taken from the Supervisor's network information) on port 9099. You can change the block and the port, and press **Scan** again. Blocks wider than /22 (1,022 addresses) are not scanned; the card offers your own /24 instead. For each address the scan asks only `GET /api/health` and `GET /api/drives`, with no password. The agents that answer are listed with their name, address, version and drive count; tick the ones you want.
 
 **Add by hand.** Type a host name or address and a port and press **Check** to add a machine the scan cannot reach, such as one on another subnet.
 
-Press **Add** to add everything ticked. The app stores field agents in its own options (the **Field Agents** option in the Configuration tab), so they are part of your Home Assistant backups. Adding, hiding or saving a password does not restart the app.
+Press **Add** to add everything ticked. The app stores field agents in its own options (the **Field Agents** option in the Configuration tab), so they are part of your Home Assistant backups. Adding, arranging, hiding or saving a password does not restart the app.
 
-**Passwords.** If the agent on that machine has a token set, its card asks for a password after you add it. The password is the `token:` line in the agent's config file on that machine. The app checks it with the agent before saving it, and never shows it again; the card shows a lock instead. Click the lock to enter a new one. Passwords are stored like the app's own Bearer Token option: in the app's options, masked in the Configuration tab.
+**Passwords.** If the agent on that machine has a token set, its card asks for a password after you add it. The password is the `token:` line in the agent's config file on that machine. Until then the machine shows one grey card with a password field. The app checks the password with the agent before saving it, and never shows it again; the card then becomes that machine's drive and pool cards. To change a saved password, edit the **Field Agents** option in the Configuration tab. Passwords are stored like the app's own Bearer Token option: in the app's options, masked in the Configuration tab.
 
-**When a machine stops answering**, its card says so and keeps showing the rows from the last good read, with the time it was last seen.
+**When a machine stops answering**, its cards keep the last readings, and their footers say when it was last seen and that it is not answering.
 
-**Hiding cards.** The eye at the foot of a card hides it. The eye in the section header shows how many are hidden; press it to see them again, faded, and click a card's eye to bring it back.
+**Removing a drive or a machine.** The trash on a field agent's drive or pool card removes that card, and it does not come back when the page reads the machine again. Removing the last card of a machine removes the machine: it is no longer contacted, and adding it again with + brings all its drives back. Removing does not remove anything from Home Assistant; do that under **Settings → Devices & Services → SMART Sniffer**.
 
-**Removing a field agent.** Remove it from the **Field Agents** list in the app's Configuration tab. Removing it there does not remove it from Home Assistant; do that under **Settings → Devices & Services → SMART Sniffer**.
-
-ZFS pools appear as rows on the card. The agent reports a pool's state and the disks with problems; replicas also show the pool's layout and every disk.
+The agent reports a pool's state and the disks with problems; replicas also show the pool's layout and every disk.
 
 ## Replicas
 
-Replicas are fake drives and pools with SMART data you control. They look like real drives to Home Assistant, so you can see how the integration's sensors, notifications and automations react to a failing drive without having one. Nothing in the Replicas section touches a real drive.
+Replicas are fake drives and pools with SMART data you control. They look like real drives to Home Assistant, so you can see how the integration's sensors, notifications and automations react to a failing drive without having one. Nothing a replica card does touches a real drive.
 
 **Adding replicas.** The + card lists the replica files under **Replicas**. Six ship with the app: a healthy SATA hard drive, one with reallocated sectors growing, one with uncorrectable errors reported in Device Statistics, an NVMe drive with wear, a degraded ZFS pool and a drive whose SMART health has failed. Tick the ones you want and press **Add**.
 
-**Scenarios.** Each replica card ends in a scenario bar: pick a scenario (for example Command timeouts, NVMe wear or Pool vanished) and press **Apply**. On a replica, the Raw column of the Field report can be edited too.
+**Scenarios.** Each replica card has a row of buttons, one per scenario (for example Command timeouts, Wear or Degraded); the filled one is the current scenario, and clicking another applies it at once. In a replica's Details, the Raw column can be edited too.
 
 **Your replica folder.** Your own replica files live in `/share/smart-sniffer/replicas`, so they survive app updates. Files you copy there (for example over the Samba share or SSH apps) appear in the + card the next time it opens. **Upload a replica** in the + card puts a `.json` replica file there for you; a replica file is at most 1 MB.
 
-**Save as replica.** A real drive's card (and an opened drive row on a field agent card) has **Save as replica**. It writes the drive's current readings to a new file in your replica folder and adds it as a replica card. In the copy:
+**Save as replica.** The download arrow at the foot of every drive and pool card saves that card as a JSON file. For a real drive it first writes the drive's current readings to a new file in your replica folder, and that file is what you get. In the copy:
 
 - the serial number is replaced with `REPLICA-` and eight random characters, everywhere it appears;
 - the WWN, the NVMe IEEE OUI identifier and each NVMe namespace's EUI-64 and NGUID are replaced with fake values;
@@ -90,17 +88,17 @@ Replicas are fake drives and pools with SMART data you control. They look like r
 
 Drives with no usable SMART data cannot be saved.
 
-**Download** saves a replica, with its current values, as a file you can keep or upload again. **Remove** takes the replica off the page; it does not touch Home Assistant.
+On a replica the arrow saves it with its current values, as a file you can keep or upload again. The trash takes the replica off the page; it does not touch Home Assistant. A real pool's file is the pool as its agent reports it, which is not a replica file, because an agent does not report a pool's disk layout.
 
-**Replicas in Home Assistant.** All replicas are served by one replica agent inside the app, so they share one integration entry. The first time you add a replica to Home Assistant (with the grey exit glyph on its card), every replica on the page comes with it; later replicas appear at the integration's next poll. The replica agent is not exposed on your network and does not advertise itself, so Home Assistant never discovers it on its own.
+**Replicas in Home Assistant.** All replicas are served by one replica agent inside the app, so they share one integration entry. The first time you add a replica to Home Assistant (with the grey exit icon on its card), every replica on the page comes with it; later replicas appear at the integration's next poll. The replica agent is not exposed on your network and does not advertise itself, so Home Assistant never discovers it on its own.
 
 ## Home Assistant
 
-With the integration installed, an exit glyph follows the title of each card:
+With the integration installed, an exit icon sits just left of each drive and pool card's type label:
 
-- **No glyph**: the integration is not installed, or Home Assistant cannot be reached from the app.
-- **Grey**: Home Assistant does not have this machine, field agent or replica yet. Click it and confirm to add it. A field agent is added with its saved password as the token.
-- **Blue**: in Home Assistant. On a field agent card it opens the agent's entry in the integration; on a drive or pool it opens the device page.
+- **No icon**: the integration is not installed, or Home Assistant cannot be reached from the app.
+- **Grey**: Home Assistant does not have this drive yet. Click it and confirm to add it; a field agent's drives are added all at once, with its saved password as the token.
+- **Blue**: in Home Assistant. It opens the drive's or pool's device page.
 
 Adding from the page needs the app's Home Assistant API access, which it has by default.
 
@@ -113,6 +111,8 @@ Adding from the page needs the app's Home Assistant API access, which it has by 
 | Scan Interval | `60` | How often the agent refreshes SMART data (seconds) |
 | Replica Agent Port | `9100` | Port of the replica agent inside the app. Not exposed on your network. |
 | Field Agents | _(empty)_ | Other machines running the SMART Sniffer agent. Added from the Control Center. |
+| Card Order | _(empty)_ | The order of the cards. Set by dragging them in the Control Center. |
+| Hidden Cards | _(empty)_ | Cards hidden with the eye in the Control Center. |
 
 Changing the Agent Port, Bearer Token or Scan Interval needs an app restart, as before. The Control Center reads the Field Agents list each time it loads it, so changes to that list need no restart.
 

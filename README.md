@@ -53,7 +53,7 @@ https://github.com/DAB-LABS/smart-sniffer-app
 1. Find **SMART Sniffer App** in the app store (you may need to refresh)
 2. Click **Install**
 3. Once installed, click **Start**
-4. Click **Open Web UI**, or turn on **Show in sidebar** to open the Control Center from the sidebar. The **Case file** shows one card per drive.
+4. Click **Open Web UI**, or turn on **Show in sidebar** to open the Control Center from the sidebar. It shows one card per drive.
 5. If a drive shows **Health not known**, or you see **"DRIVE ACCESS BLOCKED"** in the logs, turn off **Protection Mode**: go to **Settings > Apps > SMART Sniffer > Protection mode**, switch it **OFF**, then restart the app (see [Security & Permissions](#security--permissions) for details)
 
 ### Step 3 (optional): Install the Integration
@@ -64,7 +64,7 @@ The integration turns drive data into Home Assistant entities, history, notifica
 2. In HACS, click the **three-dot menu** > **Custom repositories**
 3. Add `https://github.com/DAB-LABS/smart-sniffer` with category **Integration**
 4. Search for **SMART Sniffer** in HACS, download it, and restart Home Assistant
-5. In the Control Center, click the grey exit glyph after a drive's name and confirm. This machine's drives are added to Home Assistant, and the glyph turns blue, linking to each drive's device page.
+5. In the Control Center, click the grey exit icon beside a drive card's type label and confirm. This machine's drives are added to Home Assistant, and the icon turns blue, linking to each drive's device page.
 6. Home Assistant may also discover the app's agent on its own under **Settings > Devices & Services**. To add it by hand: **Settings > Devices & Services > Add Integration > SMART Sniffer**, then enter the host and port from the app's startup log (`Integration host:`), for example `0449a086-smart-sniffer-agent` and port `9099`.
 
 ## How It Works
@@ -79,9 +79,10 @@ The SMART Sniffer integration, when installed, polls the same agents and creates
 
 ## The Control Center
 
-- **Case file**: every drive this app's own agent reports, with the header word (Attention, Maybe, Health OK or Health not known), the counters that matter for that drive, the data written and read, and the full Field report.
+One grid of cards, one per drive and per ZFS pool, from this machine (`HAOS`), your field agents and the replicas, each with its health word (Attention, Maybe, Health OK or Health not known), every row that caused it, its disk space, and Details for the full readings. Drag cards by their grip to arrange them; the eye hides a card for now, the trash removes it for good.
+
 - **Field agents**: your other machines running the agent. The **+** card scans your network for them when you open it, and only then; you can also add one by hand. Agents with a token ask for it on their card. They are stored in the app's options.
-- **Replicas**: fake drives and pools for testing Home Assistant. Six ship with the app; you can upload your own, drop files into `/share/smart-sniffer/replicas`, or save a real drive as a replica, with its serial number and WWN replaced.
+- **Replicas**: fake drives and pools for testing Home Assistant, switched between scenarios with one click. Six ship with the app; you can upload your own, drop files into `/share/smart-sniffer/replicas`, or save any card as a file, a real drive's with its serial number and WWN replaced.
 
 See [DOCS.md](smart_sniffer_agent/DOCS.md) for the details, including how to put the page in the sidebar or on a dashboard.
 
@@ -94,6 +95,8 @@ See [DOCS.md](smart_sniffer_agent/DOCS.md) for the details, including how to put
 | Scan Interval | `60` | How often SMART data is refreshed (seconds) |
 | Replica Agent Port | `9100` | Port of the replica agent inside the app. Not exposed on your network. |
 | Field Agents | _(empty)_ | Other machines running the SMART Sniffer agent. Added from the Control Center. |
+| Card Order | _(empty)_ | The order of the cards. Set by dragging them in the Control Center. |
+| Hidden Cards | _(empty)_ | Cards hidden with the eye in the Control Center. |
 
 ## Security & Permissions
 
