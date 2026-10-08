@@ -13,44 +13,46 @@ example http://127.0.0.1:8099/?HA=not_installed&HOSTS=none). The page's own
 requests carry no query string, so the server reads the switches from the
 Referer.
 
-    AGENT           up | down                 this app's agent (board 2.4, 1.2)
-    DRIVES          board | 0 | 1 | 2         Case file drives. board: a healthy NVMe and
-                                              a SATA drive with two rows at Attention
-                                              (2.1, 2.2); 0: the agent answers with none;
-                                              1: the NVMe; 2: the NVMe and a WDC with
-                                              Device Statistics
-    VDISK           0 | 1                     1: add a QEMU virtual disk (2.3)
+    AGENT           up | down                 this app's agent; down: the HAOS cards keep
+                                              their last readings, not answering
+    DRIVES          board | 0 | 1 | 2         HAOS drives. board: a healthy NVMe with / at
+                                              41% and /boot at 12%, and a SATA drive at
+                                              Attention; 0: none; 1: the NVMe; 2: the NVMe
+                                              and a WDC with Device Statistics
+    VDISK           0 | 1                     1: add a QEMU virtual disk
     RULES           ok | missing              missing: no verdicts, the rules line says so
     HA              installed | not_installed | unreachable
-                                              glyphs; no glyphs and no Integration link;
-                                              no glyphs
+                                              exit icons; none and no Integration link; none
     HA_LOOKUP       registry | entries_only   device links or entry links
-    HA_SELF         1 | 0                     this app's agent in HA (blue or grey glyph)
+    HA_SELF         1 | 0                     this app's agent in HA (blue or grey icons)
     ADD             ok | error                /ha/add succeeds or answers flow_failed
     NETWORK         supervisor | none | wide  prefill 10.0.10.0/24; null (page falls
-                                              back to its own address); 10.0.0.0/16 (3.5)
+                                              back to its own address); 10.0.0.0/16
     SCAN            normal | slow | none      rows arrive over 3 s; over 12 s; nothing
-                                              answers (3.3)
-    HOSTS           board | one | none        board: the seven board hosts; one: only
-                                              proxmox-01 (3.2, 3.6); none: first run (5)
-    POOL            online | degraded         proxmox-01's pool tank (3.1 or 3.14)
-    REPLICAS        board | 0                 the four of 4.3 to 4.6 with 4.3 in HA; none
+                                              answers
+    HOSTS           board | one | none        board: nas-01, studio-mac and backup-pi;
+                                              one: only proxmox-01; none: first run
+    POOL            online | degraded         the tank pools of nas-01 and proxmox-01
+    REPLICAS        board | 0                 three replicas (SMART failed, NVMe wear, a
+                                              degraded pool), the first in HA; none
     REPLICA_FOLDER  ok | missing | read_only  upload and save enabled or not
     LATENCY         seconds                   added to every route (default 0.02)
-    SLUG, HOSTNAME, HA_VERSION                as before: the app's slug, its agent host
-                                              name, Home Assistant's version (2025.x and
-                                              earlier give the /hassio/... link paths)
+    SLUG, HOSTNAME, HA_VERSION                the app's slug, its agent host name, Home
+                                              Assistant's version (2025.x and earlier
+                                              give the /hassio/... link paths)
 
-Writes (stored hosts, hidden state, passwords, replicas, HA adds) live in
-memory until the server stops. Each set of the switches that shape them
-(HOSTS, POOL, REPLICAS, HA, HA_SELF, DRIVES, VDISK) has its own copy; a
-POST to /dev/reset with the switches in its query string starts that copy
-afresh, as the page checks do before each page they open.
+Writes (stored hosts, card order, hidden and removed cards, passwords,
+replicas, HA adds) live in memory until the server stops. Each set of the
+switches that shape them (HOSTS, POOL, REPLICAS, HA, HA_SELF, DRIVES, VDISK)
+has its own copy; a POST to /dev/reset with the switches in its query string
+starts that copy afresh, as the page checks do before each page they open.
 
-The board's field agents: proxmox-01 (password saved, Maybe, pool),
-office-nuc (open), backup-pi (wants a password, it is fieldpass),
-nas-backup (26 drives, 3 pools), studio-mac (not answering, last answer
-3 h ago), nas-01 (in Home Assistant), printer-box (hidden 12 days ago).
+The board's field agents: nas-01 (six drives: one at Attention with five
+problem rows, one Maybe, one not judged; disk space at 82%, 91% and 97%; a
+raidz1 pool tank with three datasets; a filesystem on /dev/md1 that belongs
+to no drive; in Home Assistant except its two newest drives), studio-mac
+(not answering, last answer 3 h ago), backup-pi (wants a password, it is
+fieldpass).
 
 A scan of 10.0.10.0/24 on port 9099 finds office-nuc (10.0.10.61, open),
 backup-pi (10.0.10.52, 401) and proxmox-01 (10.0.10.21), at 0.8 s, 1.6 s
@@ -616,14 +618,24 @@ def self_drives(flags) -> list:
     return out
 
 
+def fs(fs_id, mount, device, pct, total_tb, fstype="ext4", status="ok"):
+    """One filesystem as the agent's /api/filesystems lists it."""
+    total = int(total_tb * 1e12)
+    used = int(total * pct / 100) if status == "ok" else 0
+    return {"id": fs_id, "uuid": "", "mountpoint": mount, "device": device, "fstype": fstype,
+            "total_bytes": total if status == "ok" else 0, "used_bytes": used,
+            "available_bytes": total - used if status == "ok" else 0,
+            "use_percent": float(pct) if status == "ok" else 0.0, "status": status}
+
+
+def self_filesystems(flags) -> list:
+    if flags["DRIVES"] == "0":
+        return []
+    return [fs("fs-6a1f03c2", "/", "/dev/nvme0n1p8", 41, 0.98),
+            fs("fs-0b77e1d4", "/boot", "/dev/nvme0n1p1", 12, 0.000033, "vfat")]
+
+
 # ── Field agents ─────────────────────────────────────────────────────────────
-
-def _exos(i, serial, temp, tb, **kw):
-    return ata_drive(f"sd{chr(97 + i)}", "Seagate Exos X18 16TB", serial, f"/dev/sd{chr(97 + i)}",
-                     temp=temp, poh=24000 + i * 13, cycles=40 + i,
-                     counters=kw.pop("counters", {5: 0, 197: 0, 198: 0, 187: 0, 188: 0, 196: 0}),
-                     written_tb=tb, **kw)
-
 
 def field_catalog(flags) -> dict:
     """Every agent the harness knows, by address. Built fresh for each world."""
@@ -666,54 +678,47 @@ def field_catalog(flags) -> dict:
                               temp=35, poh=2100, cycles=40, written_tb=2.40, read_tb=3.10)],
         "pools": None,
     }
-    exos = []
-    serials = ["ZR5A0Q02", "ZR5A0Q03", "ZR5A0Q11", "ZR5A0Q04", "ZR5A0Q19"]
-    exos.append(_exos(0, "ZR5A0Q02", 38, 401.5))
-    exos.append(_exos(1, "ZR5A0Q03", 37, 399.0))
-    exos.append(_exos(2, "ZR5A0Q11", 40, 412.8, counters={5: 0, 197: 0, 198: 8, 187: 0, 188: 0, 196: 0}))
-    exos.append(ata_drive("sdd", "WDC WUH721816ALE6L4", "2BKJ7Z0T", "/dev/sdd", temp=35, poh=20112,
-                          cycles=31, counters={5: 0, 197: 0, 198: 0, 196: 0}, written_tb=288.0))
-    exos.append(unsupported_drive("sde", "JMicron USB to SATA bridge", "DD56419883961", "/dev/sde"))
-    exos.append(_exos(5, "ZR5A0Q19", 41, 398.2, counters={5: 0, 197: 0, 198: 0, 187: 0, 188: 0, 196: 1}))
-    for i in range(6, 26):
-        serial = f"ZR5A0Q{20 + i:02d}"
-        serials.append(serial)
-        exos.append(_exos(i, serial, 36 + i % 4, 380.0 + i * 1.7))
-    cat["10.0.10.30"] = {
-        "hostname": "nas-backup", "version": "0.8.1", "os_name": "TrueNAS SCALE 24.10", "uptime": 112 * DAY,
-        "auth": "open", "drives": exos,
-        "pools": [refresh_pool(pool("tank", "raidz2", serials[:2] + [f"ZR5A0Q{20 + i:02d}" for i in range(6, 12)])),
-                  refresh_pool(pool("scratch", "mirror", ["ZR5A0Q40", "ZR5A0Q41"])),
-                  refresh_pool(pool("archive", "raidz1", [f"ZR5A0Q{20 + i:02d}" for i in range(12, 16)]))],
-    }
     cat["10.0.10.44"] = {
         "hostname": "studio-mac", "version": "0.8.0", "os_name": "macOS 15.1", "uptime": 30 * DAY,
         "auth": "open", "down": True, "last_answer": 3 * 3600 + 60,
         "drives": [nvme_drive("disk0", "APPLE SSD AP1024Z", "0ba01c2d4e5f6a7b", "/dev/disk0", temp=33,
-                              poh=8800, cycles=1500, written_tb=21.06, read_tb=30.2, last=3 * 3600 + 60),
-                   nvme_drive("disk4", "Samsung T7 Shield 2TB", "S6SLNS0W100200K", "/dev/disk4", temp=29,
-                              poh=900, cycles=310, written_tb=3.11, last=3 * 3600 + 60)],
+                              poh=8800, cycles=1500, written_tb=21.06, read_tb=30.2, last=3 * 3600 + 60)],
         "pools": None,
     }
+    nas_tank = pool("tank", "raidz1", ["sdc", "sdd", "sdf"], scrub_days=6)
+    if flags["POOL"] == "degraded":
+        nas_tank["state"] = "DEGRADED"
+        nas_tank["devices"][2].update(state="FAULTED", read=12, cksum=3)
+    refresh_pool(nas_tank)
     cat["10.0.10.20"] = {
-        "hostname": "nas-01", "version": "0.8.1", "os_name": "Unraid 7.0", "uptime": 19 * DAY,
+        "hostname": "nas-01", "version": "0.8.1", "os_name": "Debian 12", "uptime": 19 * DAY,
         "auth": "open",
         "drives": [
-            ata_drive("sdb", "WDC WD80EFZZ 8TB", "VK0ABCDE", "/dev/sdb", temp=42, poh=30100, cycles=60,
-                      counters={5: 0, 197: 2, 198: 0}, written_tb=96.30),
-            ata_drive("sdc", "WDC WD80EFZZ 8TB", "VK0FGHIJ", "/dev/sdc", temp=40, poh=30100, cycles=60,
-                      counters={5: 0, 197: 0, 198: 0}, written_tb=95.12),
+            ata_drive("sda", "WDC WD80EFZZ 8TB", "VK0ABCDE", "/dev/sda", temp=44, poh=41230, cycles=88,
+                      counters={5: 24, 197: 3, 198: 2, 187: 1, 188: 120}, written_tb=96.30, read_tb=310.4,
+                      filler=8),
+            ata_drive("sdb", "WDC WD80EFZZ 8TB", "VK0FGHIJ", "/dev/sdb", temp=41, poh=41230, cycles=88,
+                      counters={5: 0, 197: 0, 198: 0, 196: 1}, written_tb=95.12, filler=8),
+            ata_drive("sdc", "Seagate IronWolf 8TB", "ZA1B2C3D", "/dev/sdc", temp=38, poh=22140, cycles=41,
+                      counters={5: 0, 197: 0, 198: 0, 187: 0}, written_tb=48.70),
+            ata_drive("sdd", "Seagate IronWolf 8TB", "ZA1B2C3E", "/dev/sdd", temp=37, poh=22140, cycles=41,
+                      counters={5: 0, 197: 0, 198: 0, 187: 0}, written_tb=47.95),
+            unsupported_drive("sde", "JMicron USB to SATA bridge", "DD56419883961", "/dev/sde"),
             nvme_drive("nvme0", "Samsung SSD 990 EVO 1TB", "S7M3NS0X402118P", "/dev/nvme0n1", temp=45,
-                       poh=3100, cycles=70, written_tb=14.62),
+                       poh=3100, cycles=70, written_tb=14.62, read_tb=20.4),
         ],
-        "pools": [refresh_pool(pool("cache", "disk", ["S7M3NS0X402118P"]))],
-    }
-    cat["10.0.10.90"] = {
-        "hostname": "printer-box", "version": "0.7.2", "os_name": "Debian 12", "uptime": 200 * DAY,
-        "auth": "open",
-        "drives": [ata_drive("sda", "SanDisk SDSSDA240G", "171234A00123", "/dev/sda", temp=30, poh=21000,
-                             cycles=400, counters={5: 0, 187: 0}, written_tb=4.11)],
-        "pools": None,
+        "pools": [nas_tank],
+        "filesystems": [
+            fs("fs-1d2e3f40", "/mnt/disk1", "/dev/sda1", 82, 8.0, "xfs"),
+            fs("fs-2a3b4c50", "/mnt/disk2", "/dev/sdb1", 91, 8.0, "xfs"),
+            fs("fs-3c4d5e60", "/mnt/disk3", "/dev/sdb2", 97, 0.5, "xfs"),
+            fs("fs-4e5f6a70", "/mnt/usb", "/dev/sde1", 0, 2.0, "exfat", status="unavailable"),
+            fs("fs-5f6a7b80", "/mnt/cache", "/dev/nvme0n1p1", 23, 1.0, "btrfs"),
+            fs("fs-6a7b8c90", "/tank", "tank", 34, 15.8, "zfs"),
+            fs("fs-7b8c9da0", "/tank/media", "tank/media", 58, 15.8, "zfs"),
+            fs("fs-8c9daeb0", "/tank/backup", "tank/backup", 12, 15.8, "zfs"),
+            fs("fs-9daebfc0", "/mnt/user", "/dev/md1", 64, 24.0, "xfs"),
+        ],
     }
     # Check (Add by hand) answers for these two.
     cat["nas.lan"] = {
@@ -734,14 +739,11 @@ def field_catalog(flags) -> dict:
 
 
 BOARD_HOSTS = [  # address, password stored, hidden days
-    ("10.0.10.21", "fieldpass", None),
-    ("10.0.10.61", None, None),
-    ("10.0.10.52", None, None),
-    ("10.0.10.30", None, None),
-    ("10.0.10.44", None, None),
-    ("10.0.10.20", None, None),
-    ("10.0.10.90", None, 12),
+    ("10.0.10.20", None, None),   # nas-01: six drives and a pool, partly in Home Assistant
+    ("10.0.10.44", None, None),   # studio-mac: not answering, last answer 3 h ago
+    ("10.0.10.52", None, None),   # backup-pi: wants a password (fieldpass)
 ]
+ONE_HOST = [("10.0.10.21", "fieldpass", None)]
 
 # Scan answers on 10.0.10.0/24 port 9099: address, seconds after the start.
 SCAN_ROWS = [("10.0.10.61", 0.8), ("10.0.10.52", 1.6), ("10.0.10.21", 2.2)]
@@ -900,6 +902,24 @@ def file_kind(drive: dict) -> str | None:
     return None
 
 
+def saved_doc(drive: dict) -> dict:
+    """A real drive as a replica file, its serial replaced, as the replica
+    agent saves one."""
+    serial = "REPLICA-%08X" % random.randrange(16 ** 8)
+    text = json.dumps({"smart": drive["smart_data"], "devstat": drive["device_statistics"],
+                       "derived": drive["derived"]}).replace(drive["serial"], serial)
+    parts_doc = json.loads(text)
+    day = datetime.now().strftime("%Y-%m-%d")
+    return {"format": "smart-sniffer-replica", "version": 1, "name": f"{drive['model']}, saved {day}",
+            "kind": file_kind(drive),
+            "description": f"Saved from a real drive on {day}. Serial and WWN replaced.",
+            "origin": {"type": "saved", "saved_at": iso(0)},
+            "meta": {"model": drive["model"], "serial": serial, "protocol": drive["protocol"],
+                     "device_path": drive["device_path"]},
+            "smart": parts_doc["smart"], "devstat": parts_doc["devstat"], "derived": parts_doc["derived"],
+            "scenario": {"current": None}}
+
+
 # ── The world: everything the page can change ────────────────────────────────
 
 class World:
@@ -909,12 +929,14 @@ class World:
         self.catalog = field_catalog(flags)
         self.hosts: list[dict] = []
         self.options_writes = 0
-        hosts = {"board": BOARD_HOSTS, "one": BOARD_HOSTS[:1], "none": []}.get(flags["HOSTS"], [])
+        hosts = {"board": BOARD_HOSTS, "one": ONE_HOST, "none": []}.get(flags["HOSTS"], [])
         for address, password, hidden_days in hosts:
             self.hosts.append({"id": f"{address}:9099", "address": address, "port": 9099,
                                "password": password, "hidden": hidden_days is not None,
                                "hidden_since": iso(hidden_days * DAY) if hidden_days else None,
-                               "added_at": iso(30 * DAY)})
+                               "added_at": iso(30 * DAY), "removed": []})
+        self.card_order: list[str] = []
+        self.hidden_cards: list[str] = []
         self.self_cache: list | None = None
         self.self_last_answer = time.time() - 240
         self.scans: dict[str, dict] = {}
@@ -922,8 +944,7 @@ class World:
         self.replicas: list[dict] = []
         self.counter = 0
         if flags["REPLICAS"] == "board":
-            for fid in ("shipped.smart-failed", "shipped.nvme-wear",
-                        "shipped.sata-hdd-devstat-uncorrectables", "shipped.zfs-pool-degraded"):
+            for fid in ("shipped.smart-failed", "shipped.nvme-wear", "shipped.zfs-pool-degraded"):
                 self.add_replica(fid)
         # Home Assistant: target -> {"entry_id", "devices": {serial or pool:<name>: device id}}
         self.ha: dict[str, dict] = {}
@@ -934,8 +955,9 @@ class World:
                 self.ha["replicas"] = {"entry_id": "01J9REPLICAS",
                                        "devices": {"MOCK-SATA-0001": "d58c3a1f7e0b4c92a6f4b8e2d1c90a73"}}
             if any(h["address"] == "10.0.10.20" for h in self.hosts):
+                # nas-01 is in Home Assistant, but its two newest drives are not yet.
                 c = self.catalog["10.0.10.20"]
-                self.ha["10.0.10.20:9099"] = self._entry("01J9ZK4T6QH2W8XG5N3B7RVD0C", c["drives"],
+                self.ha["10.0.10.20:9099"] = self._entry("01J9ZK4T6QH2W8XG5N3B7RVD0C", c["drives"][:4],
                                                          c["pools"] or [])
 
     @staticmethod
@@ -1098,10 +1120,41 @@ def summarize(items: list, status: str) -> dict:
     return s
 
 
-def drives_response(host_id, kind, status, agent, items, read_at, last_answer, flags):
+def card_key(item: dict) -> str:
+    if item["type"] == "pool":
+        return f"pool:{item['pool']['name']}"
+    serial = str(item["drive"].get("serial") or "").strip()
+    return serial or f"id:{item['id']}"
+
+
+def with_cards(host_id: str, items: list, filesystems: list, removed=()) -> tuple[list, list]:
+    """Card ids, each filesystem on its drive or pool, the rest as FILESYSTEM
+    cards, and the removed cards left out: as the proxy answers."""
+    for item in items:
+        item["card_id"] = f"{host_id}|{card_key(item)}"
+    filesystems = copy.deepcopy(filesystems)
+    if PROXY is not None and callable(getattr(PROXY, "attach_filesystems", None)):
+        fs_cards = PROXY.attach_filesystems(host_id, items, filesystems)
+    else:
+        for item in items:
+            item["filesystems"] = []
+        fs_cards = [{"type": "filesystem", "id": f["id"], "card_id": f"{host_id}|fs:{f['id']}",
+                     "filesystem": f} for f in filesystems]
+    gone = {f"{host_id}|{r}" for r in removed}
+    return ([i for i in items if i["card_id"] not in gone],
+            [c for c in fs_cards if c["card_id"] not in gone])
+
+
+def drives_response(host_id, kind, status, agent, items, read_at, last_answer, flags,
+                    filesystems=(), removed=()):
+    items, fs_cards = with_cards(host_id, items, list(filesystems), removed)
+    if status != "ok":
+        for c in fs_cards:
+            c["stale"] = True
     return {"id": host_id, "kind": kind, "status": status, "read_at": read_at, "last_answer": last_answer,
             "stale": status != "ok", "agent": agent, "summary": summarize(items, status),
-            "items": items, "pools_status": "ok",
+            "items": items, "filesystem_cards": fs_cards, "pools_status": "ok",
+            "filesystems_status": "ok" if filesystems else "none",
             "rules_version": None if flags["RULES"] == "missing" else RULES_VERSION}
 
 
@@ -1122,11 +1175,12 @@ def self_response(flags, world: World) -> dict:
         for i in cached:
             i["stale"] = True
         last = datetime.fromtimestamp(world.self_last_answer, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return drives_response("self", "self", "unreachable", None, cached, None, last, flags)
+        return drives_response("self", "self", "unreachable", None, cached, None, last, flags,
+                               self_filesystems(flags))
     items = [drive_item(d, flags) for d in drives]
     world.self_cache = copy.deepcopy(items)
     world.self_last_answer = time.time()
-    return drives_response("self", "self", "ok", agent, items, iso(0), iso(0), flags)
+    return drives_response("self", "self", "ok", agent, items, iso(0), iso(0), flags, self_filesystems(flags))
 
 
 def field_response(flags, world: World, host: dict) -> dict:
@@ -1137,17 +1191,20 @@ def field_response(flags, world: World, host: dict) -> dict:
              "uptime_seconds": c["uptime"], "drives": len(c["drives"]),
              "pools": len(c["pools"] or [])}
     items = [drive_item(d, flags) for d in c["drives"]] + [pool_item(p, flags) for p in c["pools"] or []]
+    found = c.get("filesystems") or []
+    removed = host.get("removed") or []
     if c.get("down"):
         for i in items:
             i["stale"] = True
         return drives_response(host["id"], "field", "unreachable", None, items, None,
-                               iso(c["last_answer"]), flags) | {"agent": dict(agent, uptime_seconds=None)}
+                               iso(c["last_answer"]), flags, found, removed) | {
+            "agent": dict(agent, uptime_seconds=None)}
     if c["auth"] == "password":
         if not host.get("password"):
             return drives_response(host["id"], "field", "password_needed", agent, [], None, iso(0), flags)
         if host["password"] != c["password"]:
             return drives_response(host["id"], "field", "password_refused", agent, [], None, iso(0), flags)
-    return drives_response(host["id"], "field", "ok", agent, items, iso(0), iso(0), flags)
+    return drives_response(host["id"], "field", "ok", agent, items, iso(0), iso(0), flags, found, removed)
 
 
 def replicas_response(flags, world: World) -> dict:
@@ -1276,10 +1333,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._dispatch("DELETE")
 
+    def do_PUT(self):
+        self._dispatch("PUT")
+
     def _dispatch(self, method):
         route = self._route()
         head = route.split("/")[0]
-        if head not in ("api", "mock", "app", "evaluate", "ha", "fleet", "replicas", "dev"):
+        if head not in ("api", "mock", "app", "evaluate", "ha", "fleet", "replicas", "dev", "cards"):
             if method != "GET":
                 return self._err(405, "method_not_allowed")
             return self._static(route)
@@ -1335,6 +1395,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._replicas(method, parts[1:], flags, world)
         if head == "mock":
             return self._mock(method, parts[1:], flags, world)
+        if head == "cards":
+            return self._cards(method, parts[1:], flags, world)
         return self._err(404, "not_found")
 
     def _app_info(self, flags, world):
@@ -1585,25 +1647,11 @@ class Handler(BaseHTTPRequestHandler):
             drive = next((d for d in drives if d["id"] == drive_id), None)
             if drive is None:
                 return self._err(404, "not_found")
-            kind = file_kind(drive)
-            if kind is None:
+            if file_kind(drive) is None:
                 return self._err(409, "unsupported_drive")
             if folder != "ok":
                 return self._err(503, "replica_folder_unavailable")
-            serial = "REPLICA-%08X" % random.randrange(16 ** 8)
-            text = json.dumps({"smart": drive["smart_data"], "devstat": drive["device_statistics"],
-                               "derived": drive["derived"]}).replace(drive["serial"], serial)
-            parts_doc = json.loads(text)
-            name = f"{drive['model']}, saved {datetime.now().strftime('%Y-%m-%d')}"
-            doc = {"format": "smart-sniffer-replica", "version": 1, "name": name, "kind": kind,
-                   "description": f"Saved from a real drive on {datetime.now().strftime('%Y-%m-%d')}. "
-                                  "Serial and WWN replaced.",
-                   "origin": {"type": "saved", "saved_at": iso(0)},
-                   "meta": {"model": drive["model"], "serial": serial, "protocol": drive["protocol"],
-                            "device_path": drive["device_path"]},
-                   "smart": parts_doc["smart"], "devstat": parts_doc["devstat"], "derived": parts_doc["derived"],
-                   "scenario": {"current": None}}
-            entry = world.file_entry(doc, "user")
+            entry = world.file_entry(saved_doc(drive), "user")
             return self._send(201, {"file": entry, "card_id": world.add_replica(entry["id"])})
         if len(parts) == 2 and parts[1] == "file" and method == "GET":
             rec = world.replica(parts[0])
@@ -1619,6 +1667,99 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(404, "not_found")
             world.replicas.remove(rec)
             return self._send(200, {"removed": parts[0]})
+        return self._err(404, "not_found")
+
+    def _responses(self, flags, world) -> dict:
+        out = {"self": self_response(flags, world), "replicas": replicas_response(flags, world)}
+        for h in world.hosts:
+            out[h["id"]] = field_response(flags, world, h)
+        return out
+
+    @staticmethod
+    def _card_list(response: dict) -> list:
+        return (response.get("items") or []) + (response.get("filesystem_cards") or [])
+
+    def _cards(self, method, parts, flags, world):
+        """Card order, hidden cards, removal and download, as the proxy has them."""
+        if parts == [] and method == "GET":
+            return self._send(200, {"order": world.card_order, "hidden": world.hidden_cards})
+        if parts == ["order"] and method == "PUT":
+            order = (self._body() or {}).get("order")
+            if not isinstance(order, list):
+                return self._err(400, "bad_request")
+            known = {h["id"] for h in world.hosts}
+            for response in self._responses(flags, world).values():
+                known |= {c["card_id"] for c in self._card_list(response)}
+            wanted = []
+            for i in order:
+                if isinstance(i, str) and i in known and i not in wanted:
+                    wanted.append(i)
+            hosts = {"self", "replicas"} | {h["id"] for h in world.hosts}
+            world.card_order = wanted + [i for i in world.card_order
+                                         if i not in wanted and i.partition("|")[0] in hosts]
+            world.options_writes += 1
+            return self._send(200, {"order": world.card_order})
+        if not parts:
+            return self._err(404, "not_found")
+        cid = parts[0]
+        host_key, sep, key = cid.partition("|")
+        host = world.host(host_key)
+        if host is None and (host_key not in ("self", "replicas") or not sep):
+            return self._err(404, "not_found")
+        if len(parts) == 1 and method == "PATCH":
+            hidden = (self._body() or {}).get("hidden")
+            if not isinstance(hidden, bool):
+                return self._err(400, "bad_request")
+            if hidden and cid not in world.hidden_cards:
+                world.hidden_cards.append(cid)
+            if not hidden and cid in world.hidden_cards:
+                world.hidden_cards.remove(cid)
+            world.options_writes += 1
+            return self._send(200, {"id": cid, "hidden": hidden, "hidden_cards": world.hidden_cards})
+        response = self._responses(flags, world).get(host_key) or {}
+        item = next((c for c in self._card_list(response) if c["card_id"] == cid), None)
+        if len(parts) == 1 and method == "DELETE":
+            if host_key == "self":
+                return self._err(409, "cannot_remove", "A drive of this machine can be hidden, not removed.")
+            host_removed = False
+            if host_key == "replicas":
+                rec = world.replica(item["id"]) if item else None
+                if rec is None:
+                    return self._err(404, "not_found")
+                world.replicas.remove(rec)
+                gone = {cid}
+            else:
+                if sep and key not in host["removed"]:
+                    host["removed"].append(key)
+                left = {c["card_id"] for c in self._card_list(response)} - {cid}
+                host_removed = not sep or not left
+                if host_removed:
+                    world.hosts.remove(host)
+                gone = {i for i in world.card_order + world.hidden_cards
+                        if i == cid or (host_removed and i.partition("|")[0] == host_key)}
+            world.card_order = [i for i in world.card_order if i not in gone]
+            world.hidden_cards = [i for i in world.hidden_cards if i not in gone]
+            world.options_writes += 1
+            return self._send(200, {"removed": cid, "host_removed": host_removed})
+        if len(parts) == 2 and parts[1] == "file" and method == "GET":
+            if item is None or item["type"] == "filesystem":
+                return self._err(404, "not_found")
+            if host_key == "replicas":
+                rec = world.replica(item["id"])
+                doc = world.export(rec)
+                name = slugify(rec["body"]["name"] if rec["kind"] == "zfs_pool" else rec["name"])
+            elif item["type"] == "pool":
+                doc = {"pool": item["pool"], "filesystems": item.get("filesystems") or []}
+                name = f"pool-{item['pool']['name']}"
+            else:
+                if file_kind(item["drive"]) is None:
+                    return self._err(409, "unsupported_drive", "This drive gives no SMART data to copy.")
+                if flags["REPLICA_FOLDER"] != "ok":
+                    return self._err(503, "replica_folder_unavailable")
+                doc = saved_doc(item["drive"])
+                name = world.file_entry(doc, "user")["id"][len("user."):]
+            return self._send(200, body=json.dumps(doc, indent=2).encode(), headers={
+                "Content-Disposition": f'attachment; filename="{name}.json"'})
         return self._err(404, "not_found")
 
     def _mock(self, method, parts, flags, world):
