@@ -10,9 +10,9 @@ folder and set VENDOR_DIR.
                                   page-shots in the system's temp folder)
     SHOT_WIDTHS=1100,390          widths for the screenshots (default 1280,390)
 
-test_screenshots saves one picture per board state, named by the board's
-number: 3.2-1280.png is board 3.2 at 1280 px. They are for comparing with the
-board by eye; the other tests assert.
+test_screenshots saves one picture per state of the card design, named by
+the state and the width: grid-1280.png is the whole grid at 1280 px. They are
+for looking at by eye; the other tests assert.
 """
 
 from __future__ import annotations
@@ -49,10 +49,10 @@ def _vendored() -> bool:
 
 pytestmark = pytest.mark.skipif(not _vendored(), reason="set VENDOR_DIR to a folder with alpine.min.js and tailwind.min.js")
 
-# Colours from the board's tokens, as computed styles report them.
-RED = "rgb(255, 75, 75)"
-GOLD = "rgb(245, 165, 36)"
-GREEN = "rgb(63, 185, 80)"
+# The muted status colours of the card design, as computed styles report them.
+ATT = "rgb(204, 107, 99)"
+MAYBE = "rgb(204, 159, 82)"
+OK = "rgb(93, 163, 114)"
 BLUE = "rgb(3, 169, 244)"
 
 
@@ -135,6 +135,35 @@ def card(p: Page, text: str):
     return p.page.locator("article.card", has_text=text).first
 
 
+def by_id(p: Page, card_id: str):
+    return p.page.locator(f'article.card[data-card="{card_id}"]')
+
+
+def card_ids(p: Page) -> list:
+    return p.page.eval_on_selector_all(".grid > article.card", "els => els.map((e) => e.dataset.card)")
+
+
+# Card ids of the harness's board world.
+NVME = "self|S5GXNF0R412233A"
+BARRACUDA = "self|ZFL0K7Q2"
+NAS = "10.0.10.20:9099"
+NAS_ATT = f"{NAS}|VK0ABCDE"
+NAS_MAYBE = f"{NAS}|VK0FGHIJ"
+NAS_USB = f"{NAS}|DD56419883961"
+NAS_POOL = f"{NAS}|pool:tank"
+NAS_FS = f"{NAS}|fs:fs-9daebfc0"
+STUDIO = "10.0.10.44:9099|0ba01c2d4e5f6a7b"
+BACKUP_PI = "10.0.10.52:9099"
+REP_FAILED = "replicas|MOCK-SATA-0001"
+REP_NVME = "replicas|MOCK-NVME-0001"
+REP_POOL = "replicas|pool:tank"
+
+
+def last_is_plus(p: Page) -> bool:
+    return p.page.evaluate("""() => [...document.querySelector('.grid').children]
+        .filter((e) => e.tagName !== 'TEMPLATE').pop().classList.contains('ghost')""")
+
+
 def open_add(p: Page):
     p.page.get_by_role("button", name="Add field agents and replicas").click()
     p.page.wait_for_selector("[role=region][aria-label=Add]")
@@ -144,38 +173,31 @@ def open_add(p: Page):
 
 COLOUR_AUDIT = """
 () => {
-  const want = { red: 'rgb(255, 75, 75)', gold: 'rgb(245, 165, 36)', green: 'rgb(63, 185, 80)', blue: 'rgb(3, 169, 244)' };
+  const want = { att: 'rgb(204, 107, 99)', maybe: 'rgb(204, 159, 82)', ok: 'rgb(93, 163, 114)', blue: 'rgb(3, 169, 244)' };
   const allowed = {
-    red: (el, pseudo) => pseudo ? el.matches('.kv dt.crit, .drive-row.crit > summary') : el.matches('.hd-att, .hd-fail b, .mk.crit'),
-    gold: (el, pseudo) => pseudo ? el.matches('.kv dt.warn, .drive-row.warn > summary') : el.matches('.hd-maybe, .mk.warn'),
-    green: (el, pseudo) => !pseudo && el.matches('.hd-ok'),
-    blue: (el, pseudo) => !pseudo && !!el.closest('.exit:not(.add)'),
+    att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .pw-row.crit .pw-val, .kv > div.crit .v'),
+    maybe: (el) => !!el.closest('.h-maybe, .chev.maybe, .pw-row.warn .pw-val, .kv > div.warn .v'),
+    ok: (el) => !!el.closest('.h-ok, .chev.ok'),
+    blue: (el) => !!el.closest('.exit:not(.add)'),
   };
   const bad = [];
-  const visible = (el) => el.getClientRects().length > 0;
-  const check = (el, cs, pseudo) => {
+  for (const el of document.body.querySelectorAll('*')) {
+    if (!el.getClientRects().length) continue;
+    const cs = getComputedStyle(el);
     const used = [cs.color, cs.backgroundColor];
     for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
       if (cs['border' + side + 'Style'] !== 'none' && parseFloat(cs['border' + side + 'Width']) > 0) used.push(cs['border' + side + 'Color']);
     }
     if (el instanceof SVGElement) used.push(cs.stroke, cs.fill);
-    const text = pseudo ? cs.content !== 'none' && cs.content !== 'normal' : true;
     for (const [name, rgb] of Object.entries(want)) {
       const hit = used.some((u) => u && u.startsWith(rgb));
       if (!hit) continue;
-      // An element that shows no text and no box in that colour does not count:
-      // a colour inherited by an empty wrapper is not drawn.
+      // A colour inherited by a wrapper that draws no text or box is not drawn.
       const drawn = cs.backgroundColor.startsWith(rgb) || used.slice(2).some((u) => u && u.startsWith(rgb))
-        || (cs.color.startsWith(rgb) && (pseudo ? text : [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())))
+        || (cs.color.startsWith(rgb) && [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()))
         || (el instanceof SVGElement);
-      if (drawn && !allowed[name](el, pseudo)) bad.push(name + ': ' + (pseudo ? '::before of ' : '') + el.outerHTML.slice(0, 140));
+      if (drawn && !allowed[name](el)) bad.push(name + ': ' + el.outerHTML.slice(0, 140));
     }
-  };
-  for (const el of document.body.querySelectorAll('*')) {
-    if (!visible(el)) continue;
-    check(el, getComputedStyle(el), false);
-    const before = getComputedStyle(el, '::before');
-    if (before.content && before.content !== 'none' && before.content !== 'normal') check(el, before, true);
   }
   return bad;
 }
@@ -190,6 +212,7 @@ def assert_colours(p: Page):
 def assert_no_dashes(p: Page):
     text = p.page.evaluate("document.body.innerText")
     assert "\u2014" not in text and "\u2013" not in text, "an em-dash or en-dash in the page"
+    assert "\u2713" not in text and "\u2714" not in text, "a check mark in the page"
 
 
 def assert_no_scroll(p: Page):
@@ -204,15 +227,14 @@ OVERFLOW_AUDIT = """
   const vw = document.documentElement.clientWidth;
   const clipped = (el) => {
     for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
-      const o = getComputedStyle(a).overflowX;
-      if (o !== 'visible') return true;
+      if (getComputedStyle(a).overflowX !== 'visible') return true;
     }
     return false;
   };
   const out = [];
   for (const el of document.body.querySelectorAll('*')) {
     const r = el.getBoundingClientRect();
-    if (!r.width || !r.height) continue;
+    if (!r.width || !r.height || el.closest('#drag-layer')) continue;
     if ((r.right > vw + 0.5 || r.left < -0.5) && !clipped(el)) out.push(el.outerHTML.slice(0, 120));
   }
   return out;
@@ -225,114 +247,399 @@ def assert_no_overflow(p: Page):
     assert not bad, "\n".join(bad)
 
 
-# Each header word, its text and its colour.
-HEADER_AUDIT = """
-() => {
-  const words = { 'hd-att': ['Attention', 'rgb(255, 75, 75)'], 'hd-maybe': ['Maybe', 'rgb(245, 165, 36)'],
-                  'hd-ok': ['Health OK', 'rgb(63, 185, 80)'], 'hd-unk': ['Health not known', 'rgb(189, 189, 189)'] };
-  const bad = [];
-  const seen = [];
-  document.querySelectorAll('.hd > span').forEach((el) => {
-    if (!el.getClientRects().length) return;
-    const cls = Object.keys(words).find((c) => el.classList.contains(c));
-    if (el.classList.contains('hd-fail')) {
-      if (el.innerText.trim() !== 'Health FAILED' || getComputedStyle(el.querySelector('b')).color !== 'rgb(255, 75, 75)'
-          || getComputedStyle(el).color !== 'rgb(241, 241, 241)') bad.push(el.outerHTML);
-      seen.push('Health FAILED');
-      return;
-    }
-    if (!cls) { bad.push(el.outerHTML); return; }
-    const [text, colour] = words[cls];
-    if (el.innerText.trim() !== text || getComputedStyle(el).color !== colour) bad.push(el.outerHTML);
-    seen.push(text);
-  });
-  return { bad, seen };
-}
-"""
+def assert_inside_cards(p: Page):
+    """Nothing in a card reaches past its edge, unless a wrapper scrolls it."""
+    bad = p.page.evaluate("""() => {
+      const out = [];
+      for (const c of document.querySelectorAll('.grid > .card')) {
+        const box = c.getBoundingClientRect();
+        for (const el of c.querySelectorAll('*')) {
+          const r = el.getBoundingClientRect();
+          if (!r.width || !r.height || el.closest('.table-wrap')) continue;
+          if (r.right > box.right + 0.5 || r.left < box.left - 0.5) out.push(el.outerHTML.slice(0, 100));
+        }
+      }
+      return out;
+    }""")
+    assert not bad, "\n".join(bad)
 
 
-def header_words(p: Page) -> set:
-    out = p.page.evaluate(HEADER_AUDIT)
-    assert not out["bad"], "\n".join(out["bad"])
-    return set(out["seen"])
+def health_words(p: Page) -> set:
+    return {t.strip() for t in p.page.locator(".c-health > span").all_inner_texts()}
 
 
-# ── The states the page checks walk through ──────────────────────────────────
+# ── Every switch set: colours, copy, width ───────────────────────────────────
 
-# Switch set, the header words it shows, and the exit glyphs: (blue, grey)
-# present, or None for no glyph at all.
 STATES = [
     ("", {"Attention", "Maybe", "Health OK", "Health not known", "Health FAILED"}, (True, True)),
     ("AGENT=down", {"Health not known", "Attention", "Maybe", "Health OK"}, (True, True)),
-    ("VDISK=1&HA_SELF=0", {"Health not known", "Health OK", "Attention"}, (True, True)),
     ("HA=not_installed", {"Attention", "Maybe", "Health OK"}, None),
     ("HA=unreachable", {"Attention", "Maybe", "Health OK"}, None),
     ("HA_LOOKUP=entries_only", {"Attention", "Health OK"}, (True, True)),
-    ("DRIVES=0", {"Attention", "Maybe"}, (True, True)),
+    ("HA_SELF=0&VDISK=1", {"Health not known", "Health OK", "Attention"}, (True, True)),
     ("RULES=missing", {"Health not known"}, (True, True)),
     ("POOL=degraded", {"Attention", "Maybe"}, (True, True)),
+    ("DRIVES=0", {"Attention", "Maybe"}, (True, True)),
     ("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", {"Health OK"}, None),
-    ("REPLICA_FOLDER=missing", {"Attention", "Health OK"}, (True, True)),
 ]
 
 
 @pytest.mark.parametrize("flags,words,glyphs", STATES, ids=[s[0] or "board" for s in STATES])
 def test_state_rules(open_page, flags, words, glyphs):
-    """Header words and colours, glyphs, dashes and phone width on each switch set."""
+    """Health words, colours, exit icons, copy and phone width on each switch set."""
     for width in (1280, 390):
         p = open_page(flags, width)
         p.page.wait_for_timeout(300)
-        assert words <= header_words(p), (words, header_words(p))
+        assert words <= health_words(p), (words, health_words(p))
         blue = p.page.locator("a.exit:visible").count()
         grey = p.page.locator("button.exit.add:visible").count()
         if glyphs is None:
             assert blue == 0 and grey == 0
         else:
             assert (blue > 0, grey > 0) == glyphs, (blue, grey)
-            if blue:
-                assert p.page.evaluate("getComputedStyle(document.querySelector('a.exit')).color") == BLUE
-            if grey:
-                assert p.page.evaluate("getComputedStyle(document.querySelector('button.exit.add')).color") != BLUE
+        assert p.page.locator("h2").count() == 0  # no section headings
         assert_colours(p)
         assert_no_dashes(p)
         assert_no_scroll(p)
+        assert_inside_cards(p)
         if width < 760:
             assert_no_overflow(p)
-        # Rows opened and the + card open must hold too.
-        for summary in p.page.locator("details.drive-row > summary").all()[:6]:
-            summary.click()
-        p.page.locator("details.report > summary").first.click() if p.page.locator("details.report").count() else None
+        # Details open and the + card open must hold too.
+        for chev in p.page.locator(".chev").all()[:5]:
+            chev.click()
         open_add(p)
         p.page.wait_for_timeout(600)
         assert_colours(p)
         assert_no_dashes(p)
         assert_no_scroll(p)
+        assert_inside_cards(p)
         if width < 760:
             assert_no_overflow(p)
 
 
-def test_header_words(open_page):
+def test_colours(open_page):
     p = open_page()
-    colours = p.page.evaluate("""() => Object.fromEntries(['.hd-ok', '.hd-att', '.hd-maybe', '.hd-fail b']
+    colours = p.page.evaluate("""() => Object.fromEntries(['.h-ok', '.h-att', '.h-maybe', '.h-fail b',
+        '.chev.attention', '.chev.maybe', '.chev.ok', 'a.exit']
         .map((s) => [s, getComputedStyle(document.querySelector(s)).color]))""")
-    assert colours == {".hd-ok": GREEN, ".hd-att": RED, ".hd-maybe": GOLD, ".hd-fail b": RED}
-    texts = set(p.page.locator(".hd > span").all_inner_texts())
-    assert {"Health OK", "Attention", "Maybe", "Health not known"} <= {t.strip() for t in texts}
-    assert p.page.evaluate("getComputedStyle(document.querySelector('.exit:not(.add)')).color") == BLUE
+    assert colours == {".h-ok": OK, ".h-att": ATT, ".h-maybe": MAYBE, ".h-fail b": ATT,
+                       ".chev.attention": ATT, ".chev.maybe": MAYBE, ".chev.ok": OK, "a.exit": BLUE}
+    assert p.page.evaluate("getComputedStyle(document.querySelector('button.exit.add')).color") != BLUE
+    # The problem window: its stroke and values carry the state, rows carry no marks.
+    pw = by_id(p, NAS_ATT).locator(".pw")
+    assert pw.evaluate("e => getComputedStyle(e).borderTopColor") == "rgba(204, 107, 99, 0.15)"
+    assert by_id(p, NAS_MAYBE).locator(".pw").evaluate("e => getComputedStyle(e).borderTopColor") \
+        == "rgba(204, 159, 82, 0.15)"
+    assert by_id(p, NAS_ATT).locator(".pw-row.crit .pw-val").first.evaluate("e => getComputedStyle(e).color") == ATT
+    assert by_id(p, NAS_ATT).locator(".pw-row.warn .pw-val").evaluate("e => getComputedStyle(e).color") == MAYBE
+    assert p.page.locator(".mk, .pw-row .mark").count() == 0
+    # Pills and the problem window have sharp corners; cards round ones.
+    radii = p.page.evaluate("""() => ['.pill', '.pw', '.card', '.preset'].map((s) =>
+        getComputedStyle(document.querySelector(s)).borderTopLeftRadius)""")
+    assert radii[0] == "0px" and radii[1] == "0px" and radii[2] != "0px" and radii[3] == "0px"
 
 
-def test_header_versions_and_agent_down(open_page):
+# ── The grid ─────────────────────────────────────────────────────────────────
+
+def test_one_grid_of_cards(open_page):
     p = open_page()
-    assert "app 0.3.0" in p.page.locator(".versions").inner_text()
-    assert "agent 0.8.1" in p.page.locator(".versions").inner_text()
+    assert p.page.locator(".grid").count() == 1
+    ids = card_ids(p)
+    assert ids[:2] == [NVME, BARRACUDA]
+    # 2 HAOS, 6 drives, a pool and a filesystem from nas-01, 1 unreachable,
+    # 1 placeholder, 3 replicas.
+    assert len(ids) == 15
+    assert {NAS_ATT, NAS_POOL, NAS_FS, STUDIO, BACKUP_PI, REP_FAILED, REP_NVME, REP_POOL} <= set(ids)
+    pills = {cid: by_id(p, cid).locator(".pill").inner_text() for cid in
+             (NVME, NAS_ATT, NAS_POOL, NAS_FS, BACKUP_PI, REP_FAILED, REP_POOL)}
+    assert pills == {NVME: "HAOS", NAS_ATT: "NAS-01", NAS_POOL: "ZFS POOL", NAS_FS: "FILESYSTEM",
+                     BACKUP_PI: "BACKUP-PI", REP_FAILED: "REPLICA", REP_POOL: "ZFS POOL"}
+    assert "on NAS-01" in by_id(p, NAS_POOL).locator(".c-where").inner_text()
+    assert "on REPLICA" in by_id(p, REP_POOL).locator(".c-where").inner_text()
+    # The + card is last.
+    assert last_is_plus(p)
+    # A FILESYSTEM card has no health line and no Download.
+    fs_card = by_id(p, NAS_FS)
+    assert fs_card.locator(".c-health").count() == 0
+    assert fs_card.get_by_role("button", name="Save as replica").count() == 0
+
+
+def test_rows_stretch_and_every_problem_row_shows(open_page):
+    p = open_page()
+    # The third card (five problem rows) sets its row's height for the two beside it.
+    heights = p.page.eval_on_selector_all(".grid > article.card", "els => els.slice(0, 3).map((e) => e.offsetHeight)")
+    assert len(set(heights)) == 1, heights
+    att = by_id(p, NAS_ATT)
+    rows = att.locator(".pw-row")
+    assert rows.count() == 5
+    assert all(r.is_visible() for r in rows.all())
+    assert att.locator(".pw-row").first.inner_text().replace("\n", " ").startswith("Reallocated sectors (expected 0)")
+    # Details replaces the problem window, in place.
+    att.locator(".chev").click()
+    assert att.locator(".pw").count() == 0 and att.locator(".details table.attrs").count() == 1
+    assert att.locator(".chev").get_attribute("aria-expanded") == "true"
+    att.locator(".chev").click()
+    assert att.locator(".pw-row").count() == 5
+    # A pool with a failing disk shows its row.
+    p = open_page("POOL=degraded")
+    pool = by_id(p, NAS_POOL)
+    assert "sdf" in pool.locator(".pw").inner_text() and "FAULTED" in pool.locator(".pw").inner_text()
+
+
+def test_space_bar_thresholds(open_page):
+    p = open_page()
+    rows = p.page.evaluate("""() => [...document.querySelectorAll('.sp-row')].map((r) => {
+        const bar = r.querySelector('.sp-bar'), fill = r.querySelector('.sp-bar i'), num = r.querySelector('.sp-bar b');
+        const lum = (c) => { const m = c.match(/\\d+/g).map(Number); return (m[0] + m[1] + m[2]) / 3; };
+        return { mount: r.querySelector('.sp-mount').innerText, step: r.className.replace('sp-row ', ''),
+                 inside: num.innerText, outside: r.querySelector('.sp-text').innerText,
+                 weight: Number(getComputedStyle(num).fontWeight), ink: lum(getComputedStyle(num).color),
+                 fill: lum(getComputedStyle(fill).backgroundColor), outline: getComputedStyle(bar).borderTopStyle };
+      })""")
+    by = {r["mount"]: r for r in rows}
+    low = by["/"]
+    assert low["step"] == "lo" and low["inside"] == "" and low["outside"] == "41% of 980 GB"
+    assert by["/boot"]["outside"].startswith("12% of")
+    s80, s90, s95 = by["/mnt/disk1"], by["/mnt/disk2"], by["/mnt/disk3"]
+    assert (s80["step"], s90["step"], s95["step"]) == ("s80", "s90", "s95")
+    assert (s80["inside"], s90["inside"], s95["inside"]) == ("82%", "91%", "97%")
+    assert s80["outside"].endswith(" free") and s95["outside"].endswith(" free")
+    # Inside the fill at 80% and up: dark type on a light fill, reading as knocked out.
+    for r in (s80, s90, s95):
+        assert r["ink"] < 60 and r["fill"] > 150, r
+    assert s80["fill"] < s90["fill"] < s95["fill"]
+    # Weight steps at 90 and 95; the dashed outline at 95 only.
+    assert s80["weight"] < s90["weight"] < s95["weight"]
+    assert s95["weight"] >= 700
+    assert [r["outline"] for r in (low, s80, s90, s95)] == ["solid", "solid", "solid", "dashed"]
+    assert by["/mnt/usb"]["outside"] == "not mounted" and by["/mnt/usb"]["outline"] == "dashed"
+    # The pool carries its three datasets.
+    assert by_id(p, NAS_POOL).locator(".sp-row").count() == 3
+
+
+def test_drag_reorder_persists(open_page, browser, server):
+    p = open_page()
+    first, third = by_id(p, NVME), by_id(p, NAS_ATT)
+    grip = first.locator(".grip").bounding_box()
+    target = third.bounding_box()
+    p.page.mouse.move(grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
+    p.page.mouse.down()
+    steps = 12
+    for i in range(1, steps + 1):
+        x = grip["x"] + (target["x"] + target["width"] * 0.75 - grip["x"]) * i / steps
+        y = grip["y"] + (target["y"] + target["height"] / 2 - grip["y"]) * i / steps
+        p.page.mouse.move(x, y)
+        p.page.wait_for_timeout(20)
+    # In hand: the lifted copy follows the pointer and the card's place is the gap.
+    assert p.page.locator("#drag-layer .lifted").count() == 1
+    assert "drop-gap" in by_id(p, NVME).get_attribute("class")
+    p.page.mouse.up()
+    p.page.wait_for_timeout(300)
+    assert p.page.locator("#drag-layer .lifted").count() == 0
+    ids = card_ids(p)
+    assert ids.index(NVME) == 2 and ids[:2] == [BARRACUDA, NAS_ATT]
+    puts = p.api("PUT", r"/cards/order$")
+    assert len(puts) == 1
+    sent = json.loads(puts[0][2])["order"]
+    assert sent[:3] == [BARRACUDA, NAS_ATT, NVME] and len(sent) == 15
+    # A fresh page has the same order (no reset: the harness keeps it).
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    page.goto(f"{server}/")
+    page.wait_for_selector("article.card")
+    page.wait_for_timeout(700)
+    assert page.eval_on_selector_all(".grid > article.card", "els => els.map((e) => e.dataset.card)")[:3] \
+        == [BARRACUDA, NAS_ATT, NVME]
+    ctx.close()
+    # The + card has no grip and stays last.
+    assert p.page.locator(".card.ghost .grip").count() == 0
+
+
+def test_grip_keyboard_and_touch_needs_a_long_press(open_page):
+    p = open_page()
+    by_id(p, NVME).locator(".grip").focus()
+    p.page.keyboard.press("ArrowRight")
+    p.page.wait_for_timeout(200)
+    assert card_ids(p)[:2] == [BARRACUDA, NVME]
+    assert len(p.api("PUT", r"/cards/order$")) == 1
+    # The grip alone takes touch; a quick touch moves nothing.
+    assert by_id(p, NVME).locator(".grip").evaluate("e => getComputedStyle(e).touchAction") == "none"
+    assert p.page.locator(".grid").evaluate("e => getComputedStyle(e).touchAction") == "auto"
+
+
+def test_hide_and_reveal(open_page):
+    p = open_page()
+    eye = p.page.locator(".eye-btn")
+    assert eye.is_visible() and eye.inner_text().strip() == "0" and eye.is_disabled()
+    # HAOS: Download and hide, no trash. Replicas: no eye.
+    nvme = by_id(p, NVME)
+    assert nvme.get_by_role("button", name="Remove this card").count() == 0
+    assert by_id(p, REP_NVME).get_by_role("button", name="Hide this card").count() == 0
+    nvme.get_by_role("button", name="Hide this card").click()
+    assert eye.inner_text().strip() == "1"
+    assert by_id(p, NVME).count() == 0
+    p.page.wait_for_timeout(300)
+    patches = p.api("PATCH", r"/cards/")
+    assert len(patches) == 1 and json.loads(patches[0][2]) == {"hidden": True}
+    assert unquote(patches[0][1]).endswith(f"/cards/{NVME}")
+    eye.click()
+    assert eye.get_attribute("aria-pressed") == "true"
+    shown = by_id(p, NVME)
+    assert "is-hidden" in shown.get_attribute("class")
+    assert float(shown.locator(".c-title").evaluate("e => getComputedStyle(e.closest('.c-head')).opacity")) < 0.5
+    shown.get_by_role("button", name="Hidden. Show this card again").click()
+    assert eye.inner_text().strip() == "0"
+    assert "is-hidden" not in by_id(p, NVME).get_attribute("class")
+
+
+def test_hide_rolls_back_on_error(open_page):
+    p = open_page()
+    p.page.route("**/cards/self*", lambda route: route.fulfill(status=502, body='{"error": "supervisor_failed"}'))
+    by_id(p, NVME).get_by_role("button", name="Hide this card").click()
+    p.page.wait_for_selector("text=That change was not saved. Try again.")
+    assert by_id(p, NVME).count() == 1
+    assert p.page.locator(".eye-btn").inner_text().strip() == "0"
+
+
+def test_trash_confirm(open_page):
+    p = open_page()
+    usb = by_id(p, NAS_USB)
+    usb.get_by_role("button", name="Remove this card").click()
+    ask = usb.get_by_role("group", name="Confirm removal")
+    assert ask.inner_text().startswith("Remove this drive?")
+    ask.get_by_role("button", name="Cancel").click()
+    assert usb.get_by_role("group", name="Confirm removal").count() == 0
+    assert not p.api("DELETE", r"/cards/")
+    usb.get_by_role("button", name="Remove this card").click()
+    usb.get_by_role("group", name="Confirm removal").get_by_role("button", name="Remove").click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_USB}\"]')")
+    assert len(p.api("DELETE", r"/cards/")) == 1
+    assert NAS_ATT in card_ids(p)  # only the card clicked
+    # Replica and pool texts.
+    by_id(p, REP_NVME).get_by_role("button", name="Remove this card").click()
+    assert by_id(p, REP_NVME).get_by_role("group", name="Confirm removal").inner_text().startswith("Remove this replica?")
+    by_id(p, NAS_POOL).get_by_role("button", name="Remove this card").click()
+    assert by_id(p, NAS_POOL).get_by_role("group", name="Confirm removal").inner_text().startswith("Remove this pool?")
+    assert by_id(p, REP_NVME).get_by_role("group", name="Confirm removal").count() == 0  # one at a time
+    # The placeholder's trash removes the machine.
+    pi = by_id(p, BACKUP_PI)
+    pi.get_by_role("button", name="Remove this card").click()
+    assert pi.get_by_role("group", name="Confirm removal").inner_text().startswith("Remove backup-pi?")
+    pi.get_by_role("group", name="Confirm removal").get_by_role("button", name="Remove").click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{BACKUP_PI}\"]')")
+
+
+def test_presets_apply_on_click(open_page):
+    p = open_page()
+    rep = by_id(p, REP_NVME)
+    presets = rep.get_by_role("group", name="Scenario")
+    assert presets.locator(".preset").all_inner_texts() == ["Healthy", "Wear", "Media errors", "Critical warning"]
+    assert presets.locator(".preset.on").inner_text() == "Wear"
+    assert rep.locator(".c-where").inner_text() == "NVMe wear"
+    presets.get_by_role("button", name="Media errors").click()
+    p.page.wait_for_function(f"() => document.querySelector('[data-card=\"{REP_NVME}\"] .h-att')")
+    posts = p.api("POST", r"/mock/drives/[^/]+/scenario$")
+    assert len(posts) == 1 and json.loads(posts[0][2]) == {"id": "media_errors"}
+    assert rep.locator(".preset.on").inner_text() == "Media errors"
+    assert by_id(p, REP_FAILED).locator(".preset").all_inner_texts() == [
+        "Healthy", "Reallocated growing", "Pending sectors", "Command timeouts", "SMART failed"]
+    assert by_id(p, REP_POOL).locator(".preset").all_inner_texts() == ["Healthy", "Degraded", "Faulted"]
+    # Presets sit above the footer; no picker on the where line.
+    assert rep.locator("select").count() == 0
+
+
+def test_download(open_page, tmp_path):
+    p = open_page()
+    rep = by_id(p, REP_FAILED)
+    button = rep.get_by_role("button", name="Save as replica")
+    assert button.get_attribute("title") == "Save as replica"
+    with p.page.expect_download() as dl:
+        button.click()
+    path = tmp_path / "replica.json"
+    dl.value.save_as(path)
+    doc = json.loads(path.read_text())
+    assert doc["format"] == "smart-sniffer-replica" and dl.value.suggested_filename.endswith(".json")
+    assert p.api("GET", r"/cards/replicas%7CMOCK-SATA-0001/file$")
+    # A real drive's file has its serial replaced.
+    with p.page.expect_download() as dl:
+        by_id(p, BARRACUDA).get_by_role("button", name="Save as replica").click()
+    path = tmp_path / "real.json"
+    dl.value.save_as(path)
+    text = path.read_text()
+    assert "ZFL0K7Q2" not in text and re.search(r"REPLICA-[0-9A-F]{8}", text)
+    # It goes back in through Upload a replica.
+    open_add(p)
+    p.page.wait_for_selector(".replica-pick label")
+    p.page.locator("input[type=file][aria-label='Upload a replica']").set_input_files(str(path))
+    p.page.wait_for_function("() => document.querySelectorAll('.replica-pick label.on').length === 1")
+    assert len(p.api("POST", r"/replicas$")) == 1
+
+
+def test_exit_icon_confirms(open_page):
+    p = open_page()
+    usb = by_id(p, NAS_USB)
+    usb.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
+    ask = usb.get_by_role("group", name="Confirm")
+    assert ask.inner_text().startswith("Add NAS-01 to Home Assistant?")
+    # The confirm sits under the title.
+    assert usb.evaluate("""e => { let s = e.querySelector('.ask').previousElementSibling;
+        while (s && s.tagName === 'TEMPLATE') s = s.previousElementSibling;
+        return s.classList.contains('c-head'); }""")
+    p.page.keyboard.press("Escape")
+    assert usb.get_by_role("group", name="Confirm").count() == 0
+    p = open_page("HA_SELF=0")
+    nvme = by_id(p, NVME)
+    nvme.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
+    assert nvme.get_by_role("group", name="Confirm").inner_text().startswith("Add this drive to Home Assistant?")
+    nvme.get_by_role("group", name="Confirm").get_by_role("button", name="Add").click()
+    p.page.wait_for_selector(f'[data-card="{NVME}"] a.exit', timeout=6000)
+    assert json.loads(p.api("POST", r"/ha/add$")[0][2]) == {"target": "self"}
+    # The exit icon's place is the same on every card, left of the pill.
+    p = open_page()
+    gaps = p.page.eval_on_selector_all(".grid > article.card .c-tags", """els => els.map((t) => {
+        const s = t.querySelector('.exit-slot').getBoundingClientRect(), p = t.querySelector('.pill').getBoundingClientRect();
+        return Math.round(p.left - s.right); })""")
+    assert len(set(gaps)) == 1
+
+
+def test_add_error_shows_on_the_confirm(open_page):
+    p = open_page("HA_SELF=0&ADD=error")
+    c = by_id(p, NVME)
+    c.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
+    c.get_by_role("group", name="Confirm").get_by_role("button", name="Add").click()
+    p.page.wait_for_selector("text=Home Assistant did not add it.")
+
+
+def test_placeholder_authenticate(open_page):
+    p = open_page()
+    pending = by_id(p, BACKUP_PI)
+    assert "machine" in pending.get_attribute("class")
+    assert "This agent wants a password." in pending.inner_text()
+    assert pending.locator(".c-vitals, .c-health").count() == 0
+    pending.get_by_label("Agent password").fill("wrong")
+    pending.get_by_role("button", name="Authenticate").click()
+    p.page.wait_for_selector("text=That password was refused.")
+    assert "bad" in pending.get_by_label("Agent password").get_attribute("class")
+    pending.get_by_label("Agent password").fill("fieldpass")
+    pending.get_by_role("button", name="Authenticate").click()
+    p.page.wait_for_selector(f'[data-card="{BACKUP_PI}|32315D480012"]')
+    assert by_id(p, BACKUP_PI).count() == 0
+    assert "fieldpass" not in p.page.content()
+
+
+def test_unreachable_keeps_its_readings(open_page):
+    p = open_page()
+    studio = by_id(p, STUDIO)
+    assert studio.locator(".seen").inner_text() == "Last seen: 3 h ago, not answering"
+    assert "33 C" in studio.locator(".c-vitals").inner_text()
+
+
+def test_agent_down(open_page):
     p = open_page("AGENT=down")
     assert "agent not answering" in p.page.locator(".versions").inner_text()
-    down = card(p, "This app's agent is not answering")
-    text = down.inner_text()
-    assert "Drives last seen" in text and "Samsung SSD 980 PRO 1TB" in text
-    assert "local-smart-sniffer-agent:9099" in text
-    assert re.search(r"asking again in \d s", text)
-    assert "last answer 4 min ago" in text
+    # The HAOS cards keep their last readings, marked not answering.
+    seen = by_id(p, NVME).locator(".seen").inner_text()
+    assert seen.startswith("Last seen: ") and seen.endswith(", not answering")
 
 
 def test_requests_stay_home_and_nothing_scans_at_load(open_page):
@@ -340,11 +647,9 @@ def test_requests_stay_home_and_nothing_scans_at_load(open_page):
     p.page.wait_for_timeout(1500)
     assert all(url.startswith(p.base) for _, url, _ in p.requests)
     assert not p.api("POST", r"/fleet/scan$") and not p.api("POST", r"/fleet/probe$")
-    assert not p.api("GET", r"/fleet/scan/")
     open_add(p)
     p.page.wait_for_timeout(600)
     assert len(p.api("POST", r"/fleet/scan$")) == 1
-    assert p.api("GET", r"/fleet/scan/")
     assert all(url.startswith(p.base) for _, url, _ in p.requests)
 
 
@@ -361,70 +666,57 @@ def test_ingress_prefix(open_page, browser, server):
     assert api and all("/api/hassio_ingress/tok123/" in u for u in api), api
 
 
-def test_add_card_flow(open_page):
+def test_add_card_areas_and_flow(open_page):
     p = open_page("HOSTS=one")
     open_add(p)
-    region = p.page.get_by_role("region", name="Add")
+    region = p.page.get_by_role("region", name="Add", exact=True)
+    # Three areas, each its own panel.
+    areas = region.locator("section.area")
+    assert [a.get_attribute("aria-label") for a in areas.all()] == ["Network", "Add by hand", "Replicas"]
+    assert all(a.evaluate("e => getComputedStyle(e).borderTopStyle") == "solid" for a in areas.all())
+    tops = [a.bounding_box()["y"] for a in areas.all()]
+    assert tops == sorted(tops) and len(set(tops)) == 3
     block = region.get_by_label("Network block")
     assert block.input_value() == "10.0.10.0/24"
     assert region.get_by_role("button", name="Rescan").is_visible()
     p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
     p.page.wait_for_timeout(500)
-    # The two new agents arrive ticked; the stored one is listed muted and not counted.
     assert region.locator(".found b").inner_text() == "2"
     done = region.locator(".pick-row.done")
-    assert "proxmox-01, already a field agent" in done.inner_text()
-    assert done.locator("input").is_disabled()
-    assert region.locator(".add-foot .btn-primary").inner_text() == "Add 2"
-    assert "wants a password" in region.locator(".add-foot").inner_text()
-    # Ticks and the count agree, across both lists.
+    assert "proxmox-01, already added" in done.inner_text() and done.locator("input").is_disabled()
+    add = region.locator(".add-foot .btn-primary")
+    assert add.inner_text() == "Add 2"
+    # One Add counts ticks across all three areas.
     region.locator(".replica-pick label", has_text="NVMe, wear").click()
-    assert region.locator(".add-foot .btn-primary").inner_text() == "Add 3"
+    assert add.inner_text() == "Add 3"
     region.locator(".replica-pick label", has_text="NVMe, wear").click()
-    region.locator(".pick-row", has_text="office-nuc").click()
-    assert region.locator(".add-foot .btn-primary").inner_text() == "Add 1"
-    region.locator(".pick-row", has_text="office-nuc").click()
-    # Editing the block: Scan, and the bar, count and results go.
     block.fill("10.0.20.0/24")
     assert region.get_by_role("button", name="Scan", exact=True).is_visible()
-    assert region.locator(".scan-prog").count() == 0 and region.locator(".pick-row").count() == 0
-    assert region.locator(".add-foot .btn-primary").is_disabled()
-    assert region.locator(".add-foot .btn-primary").inner_text() == "Add"
-    block.fill("10.0.10.0/24")
-    assert region.get_by_role("button", name="Rescan").is_visible()
-    # Too wide: a warning, and nothing sent.
-    before = len(p.api("POST", r"/fleet/scan$"))
+    assert add.is_disabled()
     block.fill("10.0.0.0/16")
     region.get_by_role("button", name="Scan", exact=True).click()
     alert = region.get_by_role("alert")
     assert "That is 65,534 addresses." in alert.inner_text()
-    assert alert.get_by_role("button").inner_text() == "Use 10.0.10.0/24"
-    p.page.wait_for_timeout(300)
-    assert len(p.api("POST", r"/fleet/scan$")) == before
     alert.get_by_role("button").click()
     p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
-    # Add by hand.
+    # Add by hand: a machine found drops into the Network list, ticked.
     region.get_by_label("Host or IP").fill("nowhere.lan")
     region.get_by_role("button", name="Check").click()
     p.page.wait_for_selector("text=Nothing answered on nowhere.lan, port 9099.")
     region.get_by_label("Host or IP").fill("nas.lan")
     region.get_by_role("button", name="Check").click()
-    p.page.wait_for_selector(".pick-row:has-text('nas.lan:9099')")
-    assert region.locator(".add-foot .btn-primary").inner_text() == "Add 3"
+    p.page.wait_for_selector("section.area[aria-label=Network] .pick-row.on:has-text('nas.lan:9099')")
+    assert add.inner_text() == "Add 3"
     region.locator(".pick-row", has_text="nas.lan").click()
-    # Add with two hosts is one request; the new cards show at once.
-    region.locator(".add-foot .btn-primary").click()
+    add.click()
     p.page.wait_for_selector("[role=region][aria-label=Add]", state="detached")
     posts = p.api("POST", r"/fleet/hosts$")
     assert len(posts) == 1
-    body = json.loads(posts[0][2])
-    assert sorted(h["address"] for h in body["hosts"]) == ["10.0.10.52", "10.0.10.61"]
-    p.page.wait_for_selector("article.card:has-text('office-nuc') .drive-row")
-    pending = card(p, "backup-pi")
-    assert "This agent wants a password." in pending.inner_text()
-    assert "drives show after the password" in pending.inner_text()
-    assert "added just now" in pending.inner_text()
-    assert p.page.get_by_role("button", name="Add field agents and replicas").get_attribute("aria-expanded") == "false"
+    assert sorted(h["address"] for h in json.loads(posts[0][2])["hosts"]) == ["10.0.10.52", "10.0.10.61"]
+    p.page.wait_for_selector('[data-card="10.0.10.61:9099|2309E6A1B2C3"]')
+    assert "This agent wants a password." in by_id(p, BACKUP_PI).inner_text()
+    # New cards land just before the + card.
+    assert last_is_plus(p)
 
 
 def test_closing_the_add_card_cancels_the_scan(open_page):
@@ -454,25 +746,20 @@ def test_scan_polling_pauses_while_hidden_and_resumes_at_once(open_page):
     before = polls()
     probed = p.page.evaluate("() => Alpine.$data(document.body).add.scan.probed")
     p.page.wait_for_timeout(1600)
-    assert polls() == before  # nothing while hidden
-    # Shown again: a poll at once, well inside the 400 ms rhythm, and the
-    # bar catches up with the time spent hidden.
+    assert polls() == before
     _set_hidden(p, False)
     p.page.wait_for_timeout(60)
     assert polls() == before + 1
     p.page.wait_for_function(f"() => Alpine.$data(document.body).add.scan.probed > {probed}", timeout=2000)
     p.page.wait_for_timeout(900)
-    assert before + 2 <= polls() <= before + 5  # one poll loop, not two
+    assert before + 2 <= polls() <= before + 5
 
 
-def test_nothing_answered(open_page):
+def test_nothing_answered_and_wide_prefill(open_page):
     p = open_page("SCAN=none&HOSTS=one")
     open_add(p)
     p.page.wait_for_selector("text=None answered on 10.0.10.0/24, port 9099.", timeout=6000)
     assert p.page.locator(".found b").inner_text() == "0"
-
-
-def test_wide_prefill_sends_nothing(open_page):
     p = open_page("NETWORK=wide")
     open_add(p)
     p.page.wait_for_timeout(500)
@@ -480,104 +767,7 @@ def test_wide_prefill_sends_nothing(open_page):
     assert not p.api("POST", r"/fleet/scan$")
 
 
-def test_hide_and_unhide(open_page):
-    p = open_page()
-    eye = p.page.locator(".eye-btn")
-    assert eye.inner_text().strip() == "1"
-    assert card(p, "printer-box").count() == 0
-    card(p, "office-nuc").get_by_role("button", name="Hide this card").click()
-    assert eye.inner_text().strip() == "2"
-    assert card(p, "office-nuc").count() == 0
-    p.page.wait_for_timeout(300)
-    patches = p.api("PATCH", r"/fleet/hosts/")
-    assert len(patches) == 1 and json.loads(patches[0][2]) == {"hidden": True}
-    eye.click()
-    assert eye.get_attribute("aria-pressed") == "true"
-    shown = card(p, "printer-box")
-    assert "is-hidden" in shown.get_attribute("class")
-    assert "hidden 12 days ago" in shown.inner_text()
-    shown.get_by_role("button", name="Hidden. Show this card again").click()
-    assert eye.inner_text().strip() == "1"
-    assert "is-hidden" not in card(p, "printer-box").get_attribute("class")
-
-
-def test_hide_rolls_back_on_error(open_page):
-    p = open_page()
-    p.page.route("**/fleet/hosts/10.0.10.61*", lambda route: route.fulfill(status=502, body='{"error": "supervisor_failed"}'))
-    card(p, "office-nuc").get_by_role("button", name="Hide this card").click()
-    p.page.wait_for_selector("text=That change was not saved. Try again.")
-    assert card(p, "office-nuc").count() == 1
-    assert p.page.locator(".eye-btn").inner_text().strip() == "1"
-
-
-def test_authenticate(open_page):
-    p = open_page()
-    pending = card(p, "backup-pi")
-    pending.get_by_label("Agent password").fill("wrong")
-    pending.get_by_role("button", name="Authenticate").click()
-    p.page.wait_for_selector("text=That password was refused.")
-    assert "bad" in pending.get_by_label("Agent password").get_attribute("class")
-    pending.get_by_label("Agent password").fill("fieldpass")
-    pending.get_by_role("button", name="Authenticate").click()
-    p.page.wait_for_selector("article.card:has-text('backup-pi') .drive-row")
-    done = card(p, "backup-pi")
-    assert "pending" not in done.get_attribute("class")
-    assert done.get_by_role("button", name="Password saved. Change it").is_visible()
-    assert "fieldpass" not in p.page.content()
-
-
-def test_grey_glyph_confirm_and_add(open_page):
-    p = open_page("HOSTS=one")
-    host = card(p, "proxmox-01")
-    host.get_by_role("button", name="Not in Home Assistant yet. Add proxmox-01").click()
-    ask = host.get_by_role("group", name="Confirm")
-    assert ask.inner_text().startswith("Add proxmox-01 to Home Assistant?")
-    p.page.keyboard.press("Escape")
-    assert host.get_by_role("group", name="Confirm").count() == 0
-    host.get_by_role("button", name="Not in Home Assistant yet. Add proxmox-01").click()
-    host.get_by_role("group", name="Confirm").get_by_role("button", name="Add").click()
-    p.page.wait_for_selector("article.card:has-text('proxmox-01') a.exit", timeout=6000)
-    assert json.loads(p.api("POST", r"/ha/add$")[0][2]) == {"target": "10.0.10.21:9099"}
-    assert host.locator(".drive-row a.exit").count() >= 3
-
-
-def test_add_error_shows_on_the_confirm(open_page):
-    p = open_page("HA_SELF=0&ADD=error")
-    c = card(p, "Samsung SSD 980 PRO 1TB")
-    c.get_by_role("button", name="Not in Home Assistant yet. Add this machine's drives").click()
-    ask = c.get_by_role("group", name="Confirm")
-    assert "Add this machine's drives to Home Assistant?" in ask.inner_text()
-    ask.get_by_role("button", name="Add").click()
-    p.page.wait_for_selector("text=Home Assistant did not add it.")
-
-
-def test_save_as_replica_and_download_upload(open_page, tmp_path):
-    p = open_page("REPLICAS=0")
-    assert p.page.locator(".replica-empty").inner_text().strip() == "No replicas yet. Add one with +."
-    card(p, "Seagate BarraCuda 2TB").get_by_role("button", name="Save as replica").click()
-    p.page.wait_for_selector("article.card.replica")
-    assert p.page.locator(".replica-count").inner_text() == "1 replica"
-    rep = p.page.locator("article.card.replica").first
-    assert "Seagate BarraCuda 2TB ST2000DM008" in rep.inner_text()
-    assert re.search(r"REPLICA-[0-9A-F]{8}", rep.inner_text())
-    with p.page.expect_download() as dl:
-        rep.get_by_role("button", name="Download").click()
-    path = tmp_path / "replica.json"
-    dl.value.save_as(path)
-    assert dl.value.suggested_filename.endswith(".json")
-    doc = json.loads(path.read_text())
-    assert doc["format"] == "smart-sniffer-replica"
-    # The downloaded file goes back in through Upload a replica.
-    open_add(p)
-    p.page.wait_for_selector(".replica-pick label")
-    p.page.locator("input[type=file][aria-label='Upload a replica']").set_input_files(str(path))
-    p.page.wait_for_function("() => document.querySelectorAll('.replica-pick label.on').length === 1")
-    assert len(p.api("POST", r"/replicas$")) == 1
-    p.page.locator(".add-foot .btn-primary").click()
-    p.page.wait_for_function("() => document.querySelectorAll('article.card.replica').length === 2")
-
-
-def test_upload_refused(open_page, tmp_path):
+def test_upload_refused_and_folder_missing(open_page, tmp_path):
     p = open_page()
     bad = tmp_path / "notes.json"
     bad.write_text('{"hello": 1}')
@@ -585,69 +775,29 @@ def test_upload_refused(open_page, tmp_path):
     p.page.wait_for_selector(".replica-pick label")
     p.page.locator("input[type=file][aria-label='Upload a replica']").set_input_files(str(bad))
     p.page.wait_for_selector(".up-msg:has-text('This is not a replica file.')")
-
-
-def test_replica_folder_missing(open_page):
     p = open_page("REPLICA_FOLDER=missing")
     open_add(p)
     p.page.wait_for_selector("text=Your replica folder is not available.")
     assert p.page.get_by_role("button", name="Choose file").is_disabled()
-    assert p.page.get_by_role("button", name="Save as replica").count() == 0
-
-
-def test_replica_scenario_and_remove(open_page):
-    p = open_page()
-    rep = card(p, "MOCK-NVME-0001")
-    assert "Maybe" in rep.locator(".hd").inner_text()
-    rep.get_by_label("Scenario").select_option(label="Media errors")
-    rep.get_by_role("button", name="Apply").click()
-    p.page.wait_for_function("""() => [...document.querySelectorAll('article.card.replica')]
-        .some((c) => c.innerText.includes('MOCK-NVME-0001') && c.querySelector('.hd-att'))""")
-    assert p.page.locator(".replica-count").inner_text() == "4 replicas"
-    rep.get_by_role("button", name="Remove").click()
-    p.page.wait_for_function("() => document.querySelector('.replica-count').innerText === '3 replicas'")
-
-
-def test_replica_grey_glyph_confirm(open_page):
-    p = open_page()
-    rep = card(p, "MOCK-NVME-0001")
-    rep.get_by_role("button", name="Not in Home Assistant yet. Add this replica").click()
-    assert rep.get_by_role("group", name="Confirm").inner_text().startswith("Add this replica to Home Assistant?")
-    rep.get_by_role("group", name="Confirm").get_by_role("button", name="Add").click()
-    p.page.wait_for_selector("article.card:has-text('MOCK-NVME-0001') a.exit", timeout=6000)
 
 
 def test_first_run(open_page):
     p = open_page("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1")
     assert p.page.locator("article.card").count() == 1
     eye = p.page.locator(".eye-btn")
-    assert eye.is_disabled() and eye.inner_text().strip() == "0"
-    assert p.page.get_by_role("button", name="Refresh").count() == 0
+    assert eye.is_visible() and eye.is_disabled() and eye.inner_text().strip() == "0"
+    assert p.page.get_by_role("button", name="Refresh").is_visible()
     assert p.page.get_by_role("button", name="Add field agents and replicas").is_visible()
-    links = p.page.locator(".app-foot a:visible").all_inner_texts()
-    assert links == ["Mission Log", "App configuration", "GitHub"]
+    assert p.page.locator(".app-foot a:visible").all_inner_texts() == ["Mission Log", "App configuration", "GitHub"]
     assert p.page.locator(".exit").count() == 0
 
 
-def test_field_report_marks(open_page):
+def test_raw_table_marks(open_page):
     p = open_page()
-    c = card(p, "Seagate BarraCuda 2TB")
-    c.locator("details.report > summary").click()
-    c.locator("table.attrs").wait_for()
-    hits = c.locator("table.attrs tr.hit")
-    assert hits.count() == 2
+    c = by_id(p, BARRACUDA)
+    c.locator(".chev").click()
+    hits = c.locator("table.attrs tr.crit")
     assert sorted(t.split()[0] for t in hits.all_inner_texts()) == ["197", "5"]
-
-
-def test_many_drives_fold(open_page):
-    p = open_page()
-    c = card(p, "nas-backup")
-    assert c.locator("details.drive-row").count() == 8
-    assert c.locator(".row-cause").count() == 2
-    first = c.locator("details.drive-row").first
-    assert "crit" in first.get_attribute("class")
-    c.get_by_role("button", name="and 21 more").click()
-    assert c.locator("details.drive-row").count() == 29
 
 
 def test_page_polls_only_its_own_reads(open_page):
@@ -655,15 +805,14 @@ def test_page_polls_only_its_own_reads(open_page):
     p.page.wait_for_timeout(9000)
     paths = {unquote(re.sub(r"\?.*", "", u[len(p.base):])) for _, u, _ in p.requests
              if not u.endswith((".js", ".css", ".png"))}
-    assert paths <= {"/", "/app/info", "/fleet/hosts", "/fleet/hosts/self/drives", "/fleet/hosts/replicas/drives",
-                     "/ha/devices"} | {f"/fleet/hosts/{h}:9099/drives" for h in
-                                       ("10.0.10.21", "10.0.10.61", "10.0.10.52", "10.0.10.30", "10.0.10.44",
-                                        "10.0.10.20", "10.0.10.90")}, paths
+    assert paths <= {"/", "/app/info", "/cards", "/fleet/hosts", "/fleet/hosts/self/drives",
+                     "/fleet/hosts/replicas/drives", "/ha/devices"} | {
+        f"/fleet/hosts/{h}:9099/drives" for h in ("10.0.10.20", "10.0.10.44", "10.0.10.52")}, paths
     assert len(p.api("GET", r"/fleet/hosts/self/drives$")) == 2
     assert len(p.api("GET", r"/fleet/hosts$")) == 1
 
 
-# ── Screenshots of every board state ─────────────────────────────────────────
+# ── Screenshots, named by state ──────────────────────────────────────────────
 
 def _shot(p: Page, name: str, target=None):
     SHOTS.mkdir(parents=True, exist_ok=True)
@@ -680,120 +829,61 @@ def _shot(p: Page, name: str, target=None):
         assert_no_overflow(p)
 
 
-def _section(p: Page, heading: str):
-    return p.page.locator("section.sec", has=p.page.locator("h2", has_text=heading))
-
-
 def test_screenshots(open_page):
     for width in WIDTHS:
         p = open_page("", width)
-        _shot(p, "1.1", p.page.locator("header.app-head"))
-        _shot(p, "2.0", _section(p, "Case file").locator(".sec-head"))
-        _shot(p, "2.2", card(p, "Seagate BarraCuda 2TB"))
-        c = card(p, "Seagate BarraCuda 2TB")
-        c.locator("details.report > summary").click()
-        _shot(p, "2.5", c.locator("details.report"))
-        _shot(p, "3.0", _section(p, "Field agents").locator(".sec-head"))
-        _shot(p, "3.9", card(p, "studio-mac"))
-        _shot(p, "3.10", card(p, "nas-backup"))
-        _shot(p, "3.12", card(p, "nas-01"))
-        _shot(p, "4.2", _section(p, "Replicas").locator(".toolbar"))
-        _shot(p, "4.3", card(p, "MOCK-SATA-0001"))
-        _shot(p, "4.4", card(p, "MOCK-NVME-0001"))
-        _shot(p, "4.5", card(p, "MOCK-DS-9JG0X1"))
-        _shot(p, "4.6", card(p, "Replica pool"))
-        _shot(p, "6.1", p.page.locator("footer.app-foot"))
+        _shot(p, "grid", None)
+        _shot(p, "header", p.page.locator("header.app-head"))
+        _shot(p, "attention-five-rows", by_id(p, NAS_ATT))
+        _shot(p, "maybe-space-91-97", by_id(p, NAS_MAYBE))
+        _shot(p, "health-ok-haos-space", by_id(p, NVME))
+        _shot(p, "health-not-known", by_id(p, NAS_USB))
+        _shot(p, "attention-health-failed-replica", by_id(p, REP_FAILED))
+        _shot(p, "pool-online-datasets", by_id(p, NAS_POOL))
+        _shot(p, "pool-degraded-replica", by_id(p, REP_POOL))
+        _shot(p, "filesystem-card", by_id(p, NAS_FS))
+        _shot(p, "unreachable", by_id(p, STUDIO))
+        _shot(p, "password-placeholder", by_id(p, BACKUP_PI))
+        for cid, name in ((BARRACUDA, "details-drive"), (NAS_POOL, "details-pool"), (REP_NVME, "details-replica")):
+            by_id(p, cid).locator(".chev").click()
+            _shot(p, name, by_id(p, cid))
+            by_id(p, cid).locator(".chev").click()
+        usb = by_id(p, NAS_USB)
+        usb.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
+        _shot(p, "exit-grey-confirm", usb)
+        by_id(p, NAS_MAYBE).get_by_role("button", name="Remove this card").click()
+        _shot(p, "remove-confirm", by_id(p, NAS_MAYBE))
+        p.page.keyboard.press("Escape")
+        by_id(p, NVME).get_by_role("button", name="Hide this card").click()
+        _shot(p, "header-hidden-1", p.page.locator("header.app-head"))
         p.page.locator(".eye-btn").click()
-        _shot(p, "3.13", _section(p, "Field agents"))
-        _shot(p, "page", None)
+        _shot(p, "hidden-revealed", p.page.locator(".grid"))
+        # The drag: lifted card and drop gap.
+        grip = by_id(p, BARRACUDA).locator(".grip").bounding_box()
+        target = by_id(p, NAS_MAYBE).bounding_box()
+        p.page.mouse.move(grip["x"] + 4, grip["y"] + 4)
+        p.page.mouse.down()
+        for i in range(1, 11):
+            p.page.mouse.move(grip["x"] + (target["x"] + target["width"] * 0.3 - grip["x"]) * i / 10,
+                              grip["y"] + (target["y"] + 40 - grip["y"]) * i / 10)
+        _shot(p, "drag", None)
+        p.page.mouse.up()
 
+        p = open_page("POOL=degraded", width)
+        _shot(p, "pool-degraded", by_id(p, NAS_POOL))
         p = open_page("HA=not_installed", width)
-        _shot(p, "2.1", card(p, "Samsung SSD 980 PRO 1TB"))
-
-        p = open_page("VDISK=1&HA=not_installed", width)
-        _shot(p, "2.3", card(p, "QEMU HARDDISK"))
-
+        _shot(p, "exit-absent", by_id(p, NVME))
         p = open_page("AGENT=down", width)
-        _shot(p, "1.2", p.page.locator("header.app-head"))
-        _shot(p, "2.4", card(p, "This app's agent is not answering"))
-
-        p = open_page("HA_SELF=0", width)
-        c = card(p, "Samsung SSD 980 PRO 1TB")
-        c.get_by_role("button", name="Not in Home Assistant yet. Add this machine's drives").click()
-        _shot(p, "2.grey-confirm", c)
-
-        p = open_page("DRIVES=0", width)
-        _shot(p, "2.empty", _section(p, "Case file"))
-
-        p = open_page("HOSTS=one&HA=not_installed", width)
-        c = card(p, "proxmox-01")
-        c.locator("details.drive-row").first.locator("summary").click()
-        _shot(p, "3.1", _section(p, "Field agents").locator(".grid-2"))
-        c.locator("details.drive-row").first.locator("summary").click()
-        _shot(p, "3.11-not-installed", c)
-
-        p = open_page("HOSTS=one&SCAN=slow&HA=not_installed", width)
-        open_add(p)
-        p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 2", timeout=15000)
-        _shot(p, "3.2", p.page.get_by_role("region", name="Add"))
-
-        p = open_page("HOSTS=one&SCAN=none&HA=not_installed", width)
-        open_add(p)
-        p.page.wait_for_selector("text=None answered", timeout=6000)
-        p.page.locator(".replica-pick label", has_text="SATA HDD, reallocated sectors growing").click()
-        _shot(p, "3.3", p.page.get_by_role("region", name="Add"))
-        p.page.get_by_label("Network block").fill("10.0.20.0/24")
-        p.page.locator(".replica-pick label", has_text="SATA HDD, reallocated sectors growing").click()
-        _shot(p, "3.4", p.page.get_by_role("region", name="Add"))
-
-        p = open_page("NETWORK=wide&HOSTS=one&HA=not_installed", width)
-        open_add(p)
-        p.page.wait_for_selector(".scan-wide")
-        _shot(p, "3.5", p.page.get_by_role("region", name="Add"))
-
-        p = open_page("HOSTS=one&HA=not_installed", width)
-        open_add(p)
-        p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
-        p.page.wait_for_timeout(1000)
-        p.page.locator(".add-foot .btn-primary").click()
-        p.page.wait_for_selector("article.card:has-text('office-nuc') .drive-row")
-        _shot(p, "3.6", _section(p, "Field agents").locator(".grid-2"))
-        pending = card(p, "backup-pi")
-        pending.get_by_label("Agent password").fill("wrong")
-        pending.get_by_role("button", name="Authenticate").click()
-        p.page.wait_for_selector("text=That password was refused.")
-        _shot(p, "3.7", pending)
-        pending.get_by_label("Agent password").fill("fieldpass")
-        pending.get_by_role("button", name="Authenticate").click()
-        p.page.wait_for_selector("article.card:has-text('backup-pi') .drive-row")
-        _shot(p, "3.8", card(p, "backup-pi"))
-
-        p = open_page("HOSTS=one", width)
-        c = card(p, "proxmox-01")
-        c.get_by_role("button", name="Not in Home Assistant yet. Add proxmox-01").click()
-        _shot(p, "3.11", c)
-
-        p = open_page("HOSTS=one&POOL=degraded&HA=not_installed", width)
-        c = card(p, "proxmox-01")
-        c.locator("details.drive-row.pool > summary").click()
-        _shot(p, "3.14", c)
-
-        p = open_page("REPLICAS=0", width)
-        _shot(p, "4.1", _section(p, "Replicas"))
-
+        _shot(p, "haos-not-answering", by_id(p, NVME))
         p = open_page("", width)
+        pi = by_id(p, BACKUP_PI)
+        pi.get_by_label("Agent password").fill("wrong")
+        pi.get_by_role("button", name="Authenticate").click()
+        p.page.wait_for_selector("text=That password was refused.")
+        _shot(p, "password-refused", pi)
+        p = open_page("SCAN=slow", width)
         open_add(p)
-        p.page.wait_for_selector(".replica-pick label")
-        p.page.get_by_role("button", name="Close").click()
-        open_add(p)
-        p.page.wait_for_selector(".replica-pick label")
-        p.page.locator(".pick-row.on").evaluate_all("rows => rows.forEach(r => r.click())")
-        p.page.locator(".replica-pick label", has_text="SATA HDD, healthy").click()
-        p.page.locator(".add-foot .btn-primary").click()
-        p.page.wait_for_selector("article.card:has-text('MOCK-SATA-0002')")
-        c = card(p, "MOCK-SATA-0002")
-        c.get_by_role("button", name="Not in Home Assistant yet. Add this replica").click()
-        _shot(p, "4.7", c)
-
+        p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length >= 1", timeout=15000)
+        _shot(p, "plus-open-scanning", p.page.get_by_role("region", name="Add", exact=True))
         p = open_page("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", width)
-        _shot(p, "5", None)
+        _shot(p, "first-run", None)

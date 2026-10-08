@@ -1,48 +1,30 @@
 /* SMART Sniffer Control Center: the page's Alpine component, its API client
    and its formatting. Served as a static file by the proxy; no build step.
 
-   The proxy does the judging: every drive arrives with the integration's
-   verdict and a "view" that names its rows and their marks, so nothing here
-   matches rules. The page only reads the network when asked: Scan, Rescan
-   and Check, and reads of stored hosts. */
+   One grid of cards: one per drive, per ZFS pool and per filesystem that
+   belongs to no drive, from this machine (HAOS), every field agent and the
+   replica agent, then the + card. The proxy does the judging: every drive
+   arrives with the integration's verdict, a "view" that names its rows and
+   their marks, its filesystems and a card id that stays the same across
+   reloads, so nothing here matches rules. The card order and the hidden
+   cards are kept by the proxy in the app options.
 
-/* Partials. A <template data-use="tpl-x"> receives a copy of <template
-   id="tpl-x">'s content before Alpine starts, so a card's markup is written
-   once in index.html and used by more than one list. This script is loaded
-   with defer ahead of Alpine, so it runs first. */
-(function expandPartials() {
-  const done = new Set();
-  function source(id) {
-    const tpl = document.getElementById(id);
-    if (!tpl) return null;
-    if (!done.has(id)) {
-      done.add(id);
-      expand(tpl.content);
-    }
-    return tpl.content;
-  }
-  function expand(root) {
-    root.querySelectorAll('template').forEach((t) => {
-      const id = t.dataset.use;
-      if (id && !t.content.childElementCount) {
-        const src = source(id);
-        if (src) t.content.appendChild(src.cloneNode(true));
-      }
-      expand(t.content);
-    });
-  }
-  expand(document);
-})();
+   The page only reads the network when asked: Scan, Rescan and Check, and
+   reads of stored hosts. */
 
-// Row keys of the drive view, and where each one sits in the Field report.
+// Row keys of the drive view, and where each one sits in the raw table.
 const ATA_IDS = { reallocated: 5, pending: 197, offline_unc: 198, reported_unc: 187, cmd_timeout: 188,
   realloc_events: 196, spin_retries: 10, wear: 177 };
-// Device Statistics entries that stand in for a missing attribute: page and
-// offset of each gap-fill row of the drive view.
 const DEVSTAT_ROWS = { reported_unc_devstat: [4, 8], reallocated_devstat: [3, 32], wear_devstat: [7, 8] };
 const NVME_FIELDS = { critical_warning: 'critical_warning', media_errors: 'media_errors',
   available_spare: 'available_spare', wear: 'percentage_used' };
+// Short names for the replica preset buttons, by scenario id.
+const PRESET_NAMES = { healthy: 'Healthy', reallocated_growing: 'Reallocated growing',
+  pending_sectors: 'Pending sectors', command_timeouts: 'Command timeouts', smart_failed: 'SMART failed',
+  degraded: 'Degraded', faulted: 'Faulted', nvme_wear: 'Wear', media_errors: 'Media errors',
+  critical_warning: 'Critical warning', devstat_uncorrectables: 'Uncorrectables' };
 const NONE = { kind: 'none', href: null };
+const LONG_PRESS_MS = 450;
 const enc = encodeURIComponent;
 
 function parseBlock(text) {
@@ -69,27 +51,30 @@ function cc() {
     selfLastGood: null,
     selfLastAnswer: null,
     replicas: null,
-    replicasLoaded: false,
     repBusy: false,
     repFailed: false,
     replicasNext: 0,
     replicaFiles: null,
     hosts: [],
-    hostsLoaded: false,
-    hostsEverRead: false,
     hostsNext: 0,
     hostData: {},
-    hostRead: {},
     optimistic: {},
     ha: null,
     haTimers: [],
     scanTimer: null,
     scanPolling: false,
     now: Date.now(),
+    // Cards: the stored order and hidden ids, cards removed while their
+    // source reads again, and the drag in progress.
+    order: [],
+    hidden: [],
+    gone: {},
     showHidden: false,
-    hideErr: '',
+    pageErr: '',
     hostsErr: '',
-    ui: { open: {}, confirm: null, pw: {}, pwState: {}, pwOpen: {}, more: {}, scen: {}, busy: {}, note: {} },
+    drag: null,
+    dragOrder: null,
+    ui: { open: {}, confirm: null, ask: null, pw: {}, pwState: {}, busy: {}, note: {} },
     add: {
       open: false, block: '', port: '9099', scan: null, scanId: null, last: null, wide: null, error: '',
       ticks: {}, manualHost: '', manualPort: '9099', manualRows: [], manualNone: null, checking: false,
@@ -99,6 +84,7 @@ function cc() {
     // ── Start and timers ────────────────────────────────────────────
     init() {
       this.loadInfo();
+      this.loadCards();
       this.loadSelf();
       this.loadReplicas();
       this.loadHosts();
@@ -110,7 +96,9 @@ function cc() {
         this.resumeScan();
       });
       document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && this.ui.confirm) this.closeConfirm();
+        if (e.key !== 'Escape') return;
+        if (this.ui.confirm) this.closeConfirm();
+        if (this.ui.ask) this.ui.ask = null;
       });
     },
 
@@ -158,6 +146,15 @@ function cc() {
       }
     },
 
+    async loadCards() {
+      const r = await this.request('cards');
+      if (r.ok && r.data) {
+        this.order = r.data.order || [];
+        this.hidden = r.data.hidden || [];
+        if (!this.hidden.length) this.showHidden = false;
+      }
+    },
+
     async loadSelf() {
       this.selfBusy = true;
       const r = await this.request('fleet/hosts/self/drives');
@@ -165,14 +162,13 @@ function cc() {
       this.selfLoaded = true;
       this.selfNext = Date.now() + 8000;
       if (r.ok && r.data) {
-        (r.data.items || []).forEach((i) => { i._src = 'self'; });
         this.self = r.data;
         this.selfFailed = false;
         if (r.data.status === 'ok') {
-          this.selfLastGood = r.data.items;
+          this.selfLastGood = r.data;
           this.selfLastAnswer = Date.now();
         } else {
-          if (r.data.items && r.data.items.length) this.selfLastGood = r.data.items;
+          if ((r.data.items || []).length) this.selfLastGood = r.data;
           if (r.data.last_answer) this.selfLastAnswer = Date.parse(r.data.last_answer);
         }
       } else {
@@ -186,13 +182,11 @@ function cc() {
       this.repBusy = false;
       this.replicasNext = Date.now() + 8000;
       if (r.ok && r.data) {
-        (r.data.items || []).forEach((i) => { i._src = 'replicas'; });
         this.replicas = r.data;
         this.repFailed = r.data.status !== 'ok';
       } else {
         this.repFailed = true;
       }
-      this.replicasLoaded = true;
     },
 
     async loadReplicaFiles() {
@@ -210,18 +204,15 @@ function cc() {
       }
       this.hostsErr = '';
       this.hosts = r.data.hosts || [];
-      this.hostsLoaded = true;
-      const first = !this.hostsEverRead;
-      this.hostsEverRead = true;
-      await Promise.all(this.hosts.map((h) => this.loadHost(h.id, first)));
+      const migrating = this.hosts.some((h) => h.hidden);
+      await Promise.all(this.hosts.map((h) => this.loadHost(h.id)));
+      // A machine hidden as a whole becomes hidden cards on its first read.
+      if (migrating) this.loadCards();
     },
 
-    async loadHost(id, first = false) {
+    async loadHost(id) {
       const r = await this.request(`fleet/hosts/${enc(id)}/drives`);
-      if (r.ok && r.data) {
-        this.hostData[id] = r.data;
-        this.hostRead[id] = { at: Date.now(), first };
-      }
+      if (r.ok && r.data) this.hostData[id] = r.data;
     },
 
     async loadHa() {
@@ -237,6 +228,7 @@ function cc() {
     refresh() {
       this.loadHosts();
       this.loadHa();
+      this.loadCards();
     },
 
     // ── App pages in Home Assistant ─────────────────────────────────
@@ -270,6 +262,18 @@ function cc() {
       const v = bytes / 1e12;
       return `${v >= 100 ? v.toFixed(1) : v.toFixed(2)} TB`;
     },
+    // Disk space: decimal units, as df -H and the agent's totals.
+    bytes(n) {
+      if (typeof n !== 'number') return '';
+      const units = [[1e12, 'TB'], [1e9, 'GB'], [1e6, 'MB'], [1e3, 'kB']];
+      for (const [size, unit] of units) {
+        if (n >= size) {
+          const v = n / size;
+          return `${v >= 100 ? Math.round(v) : v.toFixed(1).replace(/\.0$/, '')} ${unit}`;
+        }
+      }
+      return `${n} B`;
+    },
     ago(t) {
       const ms = typeof t === 'number' ? t : Date.parse(t);
       if (!ms) return '';
@@ -291,15 +295,6 @@ function cc() {
     get agentDown() {
       return this.selfLoaded && (this.selfFailed || (this.self && this.self.status !== 'ok'));
     },
-
-    // ── Drive cards (Case file and Replicas) ─────────────────────────
-    get selfItems() {
-      return this.self && this.self.status === 'ok' ? this.self.items || [] : [];
-    },
-    get lastSeenNames() {
-      return (this.selfLastGood || []).map((i) => (i.drive && i.drive.model) || (i.pool && `ZFS pool ${i.pool.name}`))
-        .filter(Boolean).join(', ') || 'none yet';
-    },
     get agentAddress() {
       const i = this.info || {};
       return `${i.hostname || 'the agent'}:${i.agent_port || 9099}`;
@@ -315,50 +310,207 @@ function cc() {
       if (this.info) return 'rules from the integration are not loaded, so no drive is judged; the Mission Log says why';
       return '';
     },
+    get selfEmpty() {
+      return !this.agentDown && this.self && this.self.status === 'ok'
+        && !(this.self.items || []).length && !(this.self.filesystem_cards || []).length;
+    },
 
-    hdr(it) {
-      if (it.type === 'pool') {
-        if (this.vanished(it)) return 'unknown';
-        const s = it.verdict && it.verdict.state;
-        return s === 'YES' ? 'attention' : s === 'NO' ? 'ok' : 'unknown';
+    // ── The cards ───────────────────────────────────────────────────
+    // A card: { id, kind, src, it, h, fs }. kind is drive, pool,
+    // filesystem, machine (a field agent with nothing to show: waiting for
+    // its password, never read, not answering) or down (this app's agent
+    // not answering before its first answer). src is self, field or replicas.
+    cardsFrom(src, data, h) {
+      const out = [];
+      ((data && data.items) || []).forEach((it) => {
+        out.push({ id: it.card_id || `${src === 'field' ? h.id : src}|${it.id}`, kind: it.type, src, it, h, fs: null });
+      });
+      ((data && data.filesystem_cards) || []).forEach((f) => {
+        out.push({ id: f.card_id, kind: 'filesystem', src, it: f, h, fs: f.filesystem });
+      });
+      return out;
+    },
+    get allCards() {
+      const out = [];
+      if (this.selfLoaded) {
+        const live = this.self && this.self.status === 'ok' ? this.self : null;
+        const data = live || this.selfLastGood;
+        if (data && ((data.items || []).length || (data.filesystem_cards || []).length)) {
+          out.push(...this.cardsFrom('self', data, null));
+        } else if (this.agentDown) {
+          out.push({ id: 'self', kind: 'down', src: 'self', it: null, h: null, fs: null });
+        }
       }
-      return (it.view && it.view.header) || 'unknown';
+      this.hosts.forEach((h) => {
+        const d = this.hostData[h.id];
+        const cards = this.pending(h) ? [] : this.cardsFrom('field', d, h);
+        if (cards.length) out.push(...cards);
+        else if (!(d && d.status === 'ok')) out.push({ id: h.id, kind: 'machine', src: 'field', it: null, h, fs: null });
+      });
+      if (this.replicas) out.push(...this.cardsFrom('replicas', this.replicas, null));
+      return out.filter((c) => !this.gone[c.id]);
     },
-    vanished(it) {
-      return !!((it.view && it.view.vanished) || (it.lab && it.lab.vanished));
+    // The stored order first; cards it does not know keep their place among
+    // themselves, after it and before the + card.
+    get orderedCards() {
+      const cards = this.allCards;
+      const order = this.dragOrder || this.order;
+      const at = new Map(order.map((id, i) => [id, i]));
+      return cards.map((c, i) => ({ c, i, o: at.has(c.id) ? at.get(c.id) : Infinity }))
+        .sort((a, b) => (a.o - b.o) || (a.i - b.i)).map((x) => x.c);
     },
-    failed(it) {
-      return it.type === 'drive' && !!(it.view && it.view.health_failed);
+    get shownCards() {
+      return this.orderedCards.filter((c) => this.showHidden || !this.isHidden(c));
     },
-    title(it) {
-      if (it.type === 'pool') return `ZFS pool ${it.pool.name}`;
-      return (it.drive && it.drive.model) || (it.lab && it.lab.name) || it.id;
+    isHidden(c) {
+      return this.hidden.includes(c.id);
+    },
+    get hiddenCount() {
+      const ids = new Set(this.allCards.map((c) => c.id));
+      return this.hidden.filter((id) => ids.has(id)).length;
+    },
+    toggleShowHidden() {
+      if (!this.hiddenCount && !this.showHidden) return;
+      this.showHidden = !this.showHidden;
+    },
+    cardClass(c) {
+      return {
+        machine: c.kind === 'machine' || c.kind === 'down',
+        stale: this.unanswered(c),
+        'is-hidden': this.isHidden(c),
+        'drop-gap': !!(this.drag && this.drag.id === c.id),
+        open: this.isOpen(c),
+      };
+    },
+
+    // Where a card comes from.
+    machine(c) {
+      if (c.src === 'self') return 'HAOS';
+      if (c.src === 'replicas') return 'REPLICA';
+      return this.hostName(c.h).toUpperCase();
+    },
+    pill(c) {
+      if (c.kind === 'pool') return 'ZFS POOL';
+      if (c.kind === 'filesystem') return 'FILESYSTEM';
+      return this.machine(c);
+    },
+    title(c) {
+      if (c.kind === 'down') return "This app's agent is not answering";
+      if (c.kind === 'machine') return this.hostName(c.h);
+      if (c.kind === 'filesystem') return c.fs.mountpoint;
+      if (c.kind === 'pool') return c.it.pool.name;
+      return (c.it.drive && c.it.drive.model) || (c.it.lab && c.it.lab.name) || c.it.id;
+    },
+    // The where line, as parts shown with a gap between them.
+    where(c) {
+      const it = c.it || {};
+      const addr = c.h ? `${c.h.address}:${c.h.port}` : '';
+      if (c.kind === 'down') return [this.agentAddress];
+      if (c.kind === 'machine') return [addr];
+      if (c.kind === 'filesystem') {
+        return [c.src === 'field' ? addr : null, c.fs.device, c.fs.fstype].filter(Boolean);
+      }
+      if (c.kind === 'pool') {
+        const layout = this.poolLayout(it);
+        if (c.src === 'replicas') return [this.scenarioName(it), layout, 'on REPLICA'].filter(Boolean);
+        if (c.src === 'self') return [layout, 'on HAOS'].filter(Boolean);
+        return [addr, layout, `on ${this.machine(c)}`].filter(Boolean);
+      }
+      if (c.src === 'replicas') return [this.scenarioName(it) || (it.lab && it.lab.name) || ''];
+      const drive = it.drive || {};
+      if (c.src === 'field') return [addr, drive.device_path].filter(Boolean);
+      return [drive.device_path, this.proto(drive)].filter(Boolean);
     },
     proto(drive) {
       const dev = (drive.smart_data && drive.smart_data.device) || {};
       if (drive.protocol === 'ATA' && dev.type === 'sat') return 'SATA';
       return drive.protocol || '';
     },
+    vitals(c) {
+      const it = c.it || {};
+      if (c.kind === 'pool') {
+        const p = it.pool || {};
+        const out = [this.poolState(it)];
+        if (p.last_scrub_end) out.push(`scrub ${this.ago(p.last_scrub_end)}`);
+        return out.filter(Boolean);
+      }
+      if (c.kind !== 'drive') return [];
+      const s = (it.view && it.view.stats) || {};
+      const out = [];
+      if (typeof s.temp_c === 'number') out.push(`${s.temp_c} C`);
+      if (typeof s.power_on_hours === 'number') out.push(`${this.num(s.power_on_hours)} h`);
+      const w = this.vol(it, 'written');
+      if (w) out.push(`${this.tb(w.bytes)} written`);
+      return out;
+    },
+
+    // Health: attention, maybe, ok, unknown; null for a card with no health line.
+    health(c) {
+      if (c.kind === 'filesystem' || c.kind === 'machine') return null;
+      if (c.kind === 'down') return 'unknown';
+      const it = c.it;
+      if (c.kind === 'pool') {
+        if (this.vanished(it)) return 'unknown';
+        const s = it.verdict && it.verdict.state;
+        return s === 'YES' ? 'attention' : s === 'NO' ? 'ok' : 'unknown';
+      }
+      return (it.view && it.view.header) || 'unknown';
+    },
+    failed(c) {
+      return c.kind === 'drive' && !!(c.it.view && c.it.view.health_failed);
+    },
+    vanished(it) {
+      return !!((it.view && it.view.vanished) || (it.lab && it.lab.vanished));
+    },
+    hasDetails(c) {
+      return c.kind === 'drive' || c.kind === 'pool';
+    },
+    isOpen(c) {
+      return !!this.ui.open[c.id];
+    },
+    toggleOpen(c) {
+      this.ui.open[c.id] = !this.ui.open[c.id];
+    },
+
+    // The problem window: every flagged row, no paging.
+    problems(c) {
+      if (c.kind === 'drive') {
+        return this.rows(c.it).filter((r) => r.mark === 'crit' || r.mark === 'warn')
+          .map((r) => ({ key: r.key, label: r.name, expect: r.expect, value: r.value, mark: r.mark }));
+      }
+      if (c.kind === 'pool') {
+        if (!this.poolBad(c.it)) return [];
+        const out = [];
+        const state = this.poolState(c.it);
+        if (state && state !== 'ONLINE') {
+          out.push({ key: 'state', label: 'Pool state', expect: 'expected ONLINE', value: state, mark: 'crit' });
+        }
+        this.poolDisks(c.it).filter((d) => d.bad).forEach((d) => {
+          const errs = [['read', d.read], ['write', d.write], ['cksum', d.cksum]].filter(([, n]) => n)
+            .map(([k, n]) => `${this.num(n)} ${k}`);
+          out.push({ key: `disk:${d.name}`, label: d.name, expect: 'expected ONLINE, no errors',
+            value: [d.state, ...errs].join(', '), mark: 'crit' });
+        });
+        return out;
+      }
+      return [];
+    },
+    problemTone(c) {
+      return this.problems(c).some((p) => p.mark === 'crit') ? 'crit' : 'warn';
+    },
+
     rows(it) {
       return (it.view && it.view.rows) || [];
-    },
-    marked(it) {
-      return this.rows(it).filter((r) => r.mark === 'crit' || r.mark === 'warn');
-    },
-    stats(it) {
-      return (it.view && it.view.stats) || {};
-    },
-    volNote(vol, replica) {
-      const src = String(vol.source || '');
-      if (src.includes('attribute')) {
-        return replica ? `served as attribute ${vol.attribute_id || 241}` : `from attribute ${vol.attribute_id || 241}`;
-      }
-      if (src.includes('nvme')) return replica ? 'served in the NVMe log' : 'from the NVMe log';
-      return replica ? 'served from Device Statistics' : 'from Device Statistics';
     },
     vol(it, which) {
       const v = it.view && it.view.volumes && it.view.volumes[which];
       return v && typeof v.bytes === 'number' ? v : null;
+    },
+    volNote(vol) {
+      const src = String(vol.source || '');
+      if (src.includes('attribute')) return `from attribute ${vol.attribute_id || 241}`;
+      if (src.includes('nvme')) return 'from the NVMe log';
+      return 'from Device Statistics';
     },
     // "present", "absent", "not applicable (NVMe)", "off (os)", "unavailable: timeout"
     devstatText(it) {
@@ -374,33 +526,10 @@ function cc() {
       if (v === 'unavailable') return reason ? `unavailable: ${reason}` : 'unavailable';
       return v;
     },
-    unsupportedNote(it) {
-      return it.type === 'drive' && this.hdr(it) === 'unknown' && !!it.verdict;
-    },
-    devstatNote(it) {
-      return it._src === 'replicas' && it.lab && it.lab.kind === 'ata_devstat'
-        && this.rows(it).some((r) => r.key === 'reported_unc_devstat' && r.mark === 'crit');
-    },
-    readAt(it) {
-      return (it.drive && it.drive.last_updated) || (this.replicas && this.replicas.read_at) || (this.self && this.self.read_at);
-    },
-    canSave(it) {
-      return it.type === 'drive' && !!(it.view && it.view.can_save) && this.folderOk;
-    },
-
-    // Field report
-    reportSummary(it) {
-      const rep = (it.view && it.view.report) || {};
-      const replica = it._src === 'replicas';
-      if (it.type === 'pool') return replica ? 'pool and disk states, editable' : 'pool and disk states';
-      if (this.hdr(it) === 'unknown' && !rep.count) return 'nothing to show';
-      if (replica && it.lab && it.lab.kind === 'ata_devstat') return 'attributes and Device Statistics page 4, Raw editable';
-      if (rep.kind === 'nvme') return replica ? `every field, ${rep.count}, Raw editable` : `every field the drive reports, ${rep.count}`;
-      if (rep.kind === 'ata') return replica ? `every attribute, ${rep.count}, Raw editable` : `every attribute, ${rep.count}`;
-      return 'nothing to show';
+    unsupportedNote(c) {
+      return c.kind === 'drive' && this.health(c) === 'unknown' && !!c.it.verdict;
     },
     reportKind(it) {
-      if (it.type === 'pool') return 'pool';
       const sd = (it.drive && it.drive.smart_data) || {};
       if (sd.nvme_smart_health_information_log) return 'nvme';
       if (((sd.ata_smart_attributes || {}).table || []).length) return 'ata';
@@ -431,8 +560,7 @@ function cc() {
         name: k, value: Array.isArray(v) ? v.join(' ') : String(v), editable: typeof v === 'number', mark: byField[k] || null,
       }));
     },
-    // The Device Statistics pages that hold a gap-fill reading (page 4 on a
-    // drive with no attribute 187), each entry marked as its row is.
+    // The Device Statistics pages that hold a gap-fill reading.
     devstatTable(it) {
       const marks = this.markOf(it);
       const byEntry = {};
@@ -448,8 +576,7 @@ function cc() {
         if (!pages.has(p.number)) return;
         (p.table || []).forEach((e) => {
           const key = `${p.number}.${e.offset}`;
-          out.push({ key, page: p.number, name: e.name, value: e.value,
-            editable: key === '4.8', mark: byEntry[key] || null });
+          out.push({ key, page: p.number, name: e.name, value: e.value, editable: key === '4.8', mark: byEntry[key] || null });
         });
       });
       return out;
@@ -462,12 +589,7 @@ function cc() {
     poolLayout(it) {
       const v = it.view || {};
       if (v.layout) return v.layout;
-      const vdev = it.lab && it.lab.vdev;
-      const devs = it.lab && it.lab.devices;
-      if (!vdev || !devs) return null;
-      if (devs.length === 1) return 'single disk';
-      const words = { 2: 'two-disk', 3: 'three-disk', 4: 'four-disk' };
-      return `${words[devs.length] || `${devs.length}-disk`} ${vdev.type}`;
+      return null;
     },
     poolState(it) {
       return (it.view && it.view.state) || (it.pool && it.pool.state) || '';
@@ -478,72 +600,221 @@ function cc() {
       const bad = (d) => d.state !== 'ONLINE' || !!(d.read || d.write || d.cksum);
       if (disks) return disks.map((d) => ({ ...d, bad: d.mark === 'crit' || bad(d) }));
       // A real agent lists only its problem vdevs.
-      return ((it.pool && it.pool.problem_vdevs) || []).map((p) => {
-        const d = { name: p.name, state: p.state, read: p.read_errors || 0, write: p.write_errors || 0,
-          cksum: p.checksum_errors || 0 };
-        return { ...d, bad: bad(d) };
-      });
+      return ((it.pool && it.pool.problem_vdevs) || []).filter((p) => !/^(mirror|raidz|draid|spare|log|cache)/.test(String(p.type || '')))
+        .map((p) => {
+          const d = { name: p.name, state: p.state, read: p.read_errors || 0, write: p.write_errors || 0,
+            cksum: p.checksum_errors || 0 };
+          return { ...d, bad: bad(d) };
+        });
     },
     poolFoot(it) {
       const p = it.pool || {};
-      const parts = [];
-      if (this.poolBad(it)) parts.push('Expected every disk ONLINE with no errors.');
-      if (p.last_scrub_end) {
-        let s = `Last scrub ${this.ago(p.last_scrub_end)}`;
-        if (it._src !== 'replicas' && p.last_scrub_repaired === 0) s += ', nothing repaired';
-        else if (p.last_scrub_repaired) s += `, ${this.num(p.last_scrub_repaired)} repaired`;
-        parts.push(`${s}.`);
+      if (!p.last_scrub_end) return '';
+      let s = `Last scrub ${this.ago(p.last_scrub_end)}`;
+      if (p.last_scrub_repaired) s += `, ${this.num(p.last_scrub_repaired)} repaired`;
+      else if (p.last_scrub_repaired === 0) s += ', nothing repaired';
+      return `${s}.`;
+    },
+
+    // ── Disk space ──────────────────────────────────────────────────
+    spaces(c) {
+      if (c.kind === 'filesystem') return [c.fs];
+      return (c.it && c.it.filesystems) || [];
+    },
+    spaceShown(c) {
+      return this.spaces(c).slice(0, 3);
+    },
+    spaceMore(c) {
+      return Math.max(0, this.spaces(c).length - 3);
+    },
+    pct(f) {
+      return Math.round(Number(f.use_percent) || 0);
+    },
+    // The bar's step: lo below 80%; s80, s90, s95 as the fill brightens and
+    // the number weighs more; na for a filesystem that is not mounted.
+    spaceStep(f) {
+      if (f.status === 'unavailable') return 'na';
+      const p = this.pct(f);
+      if (p >= 95) return 's95';
+      if (p >= 90) return 's90';
+      if (p >= 80) return 's80';
+      return 'lo';
+    },
+    spaceInside(f) {
+      const step = this.spaceStep(f);
+      return step === 'lo' || step === 'na' ? '' : `${this.pct(f)}%`;
+    },
+    spaceText(f) {
+      const step = this.spaceStep(f);
+      if (step === 'na') return 'not mounted';
+      if (step === 'lo') return `${this.pct(f)}% of ${this.bytes(f.total_bytes)}`;
+      return `${this.bytes(f.available_bytes)} free`;
+    },
+    spaceUsed(f) {
+      if (f.status === 'unavailable') return 'not mounted';
+      return `${this.bytes(f.used_bytes)} used of ${this.bytes(f.total_bytes)} total`;
+    },
+    spaceFill(f) {
+      return f.status === 'unavailable' ? 0 : Math.min(100, Math.max(0, Number(f.use_percent) || 0));
+    },
+
+    // ── Footer and corner icons ─────────────────────────────────────
+    unanswered(c) {
+      if (c.src === 'self') return this.agentDown;
+      if (c.src === 'field') {
+        const d = this.hostData[c.h.id];
+        return !!(d && d.status === 'unreachable');
       }
-      return parts.join(' ');
+      return this.repFailed;
+    },
+    lastSeen(c) {
+      let at = null;
+      if (c.src === 'self') {
+        at = this.agentDown ? this.selfLastAnswer
+          : (c.it && c.it.drive && c.it.drive.last_updated) || (this.self && this.self.read_at);
+      } else if (c.src === 'field') {
+        const d = this.hostData[c.h.id];
+        if (!d) {
+          const added = Date.parse(c.h.added_at);
+          return !added || this.now - added < 60000 ? 'Added just now' : `Added ${this.ago(added)}`;
+        }
+        at = d.status === 'ok' ? d.read_at : d.last_answer;
+      } else {
+        at = this.replicas && (this.replicas.read_at || this.replicas.last_answer);
+      }
+      const when = at ? this.ago(at) : 'not yet';
+      return `Last seen: ${when}${this.unanswered(c) ? ', not answering' : ''}`;
+    },
+    canDownload(c) {
+      return c.kind === 'drive' || c.kind === 'pool';
+    },
+    canHide(c) {
+      return c.src !== 'replicas' && c.kind !== 'down';
+    },
+    canRemove(c) {
+      return c.src !== 'self';
+    },
+    removeText(c) {
+      if (c.src === 'replicas') return 'Remove this replica?';
+      if (c.kind === 'pool') return 'Remove this pool?';
+      if (c.kind === 'filesystem') return 'Remove this filesystem?';
+      if (c.kind === 'machine') return `Remove ${this.hostName(c.h)}?`;
+      return 'Remove this drive?';
     },
 
-    // Open state of rows and reports, by key, kept across reads.
-    isOpen(key, dflt = false) {
-      return key in this.ui.open ? this.ui.open[key] : dflt;
-    },
-    setOpen(key, value) {
-      if (this.ui.open[key] !== value) this.ui.open[key] = value;
+    async setHidden(c, hidden) {
+      const was = this.hidden.slice();
+      this.hidden = hidden ? was.concat([c.id]) : was.filter((id) => id !== c.id);
+      if (!this.hiddenCount) this.showHidden = false;
+      this.pageErr = '';
+      const r = await this.request(`cards/${enc(c.id)}`, { method: 'PATCH', body: { hidden } });
+      if (!r.ok) {
+        this.hidden = was;
+        this.pageErr = 'That change was not saved. Try again.';
+      }
     },
 
-    // ── Exit glyph and its confirm ──────────────────────────────────
-    // scope: card (a Case file or replica card), host (a host card's title),
-    // row (a drive or pool row in a host card).
-    glyph(target, key, scope) {
+    askRemove(c) {
+      this.ui.confirm = null;
+      this.ui.ask = this.ui.ask && this.ui.ask.id === c.id ? null : { id: c.id, busy: false, err: '' };
+    },
+    asked(c) {
+      return !!(this.ui.ask && this.ui.ask.id === c.id);
+    },
+    async confirmRemove(c) {
+      const a = this.ui.ask;
+      if (!a || a.busy) return;
+      a.busy = true;
+      a.err = '';
+      const r = await this.request(`cards/${enc(c.id)}`, { method: 'DELETE' });
+      a.busy = false;
+      if (!r.ok) {
+        a.err = 'It was not removed. Try again.';
+        return;
+      }
+      this.ui.ask = null;
+      this.gone[c.id] = true;
+      this.order = this.order.filter((id) => id !== c.id);
+      this.hidden = this.hidden.filter((id) => id !== c.id);
+      if (c.src === 'replicas') {
+        await this.loadReplicas();
+      } else if (r.data && r.data.host_removed) {
+        this.hosts = this.hosts.filter((h) => h.id !== c.h.id);
+        delete this.hostData[c.h.id];
+      } else {
+        await this.loadHost(c.h.id);
+      }
+      delete this.gone[c.id];
+    },
+
+    async download(c) {
+      const key = `dl:${c.id}`;
+      this.ui.note[key] = '';
+      try {
+        const resp = await fetch(`${this.baseUrl}cards/${enc(c.id)}/file`);
+        if (!resp.ok) {
+          let code = '';
+          try { code = (await resp.json()).error; } catch (e) { code = ''; }
+          this.ui.note[key] = {
+            replica_folder_unavailable: 'Your replica folder is not available.',
+            unsupported_drive: 'This drive has no SMART data to copy.',
+            not_answering: 'The agent did not answer.',
+          }[code] || 'It was not saved. Try again.';
+          setTimeout(() => { this.ui.note[key] = ''; }, 5000);
+          return;
+        }
+        const blob = await resp.blob();
+        const cd = resp.headers.get('Content-Disposition') || '';
+        const m = /filename="?([^";]+)"?/.exec(cd);
+        const name = m ? m[1] : `${String(c.id).replace(/[^a-z0-9]+/gi, '-')}.json`;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      } catch (e) { /* the next read shows the state */ }
+    },
+
+    // ── Exit icon and its confirm ───────────────────────────────────
+    target(c) {
+      if (c.src === 'self') return 'self';
+      if (c.src === 'replicas') return 'replicas';
+      return c.h.id;
+    },
+    glyph(c) {
+      if (!['drive', 'pool'].includes(c.kind)) return NONE;
       const ha = this.ha;
       if (!ha || ha.installed !== true || ha.reachable === false) return NONE;
-      const t = ha.targets && ha.targets[target];
-      if (!t) return scope === 'row' ? NONE : { kind: 'grey', href: null };
-      if (scope === 'host') return { kind: 'blue', href: t.entry_url };
+      const t = ha.targets && ha.targets[this.target(c)];
+      if (!t) return { kind: 'grey', href: null };
+      const it = c.it;
+      const key = c.kind === 'pool' ? `pool:${it.pool.name}` : it.drive && (it.drive.serial || `id:${it.id}`);
       const dev = key && t.devices && t.devices[key];
       if (dev) return { kind: 'blue', href: `/config/devices/device/${dev}` };
       if (ha.lookup === 'entries_only') return { kind: 'blue', href: t.entry_url };
-      return scope === 'row' ? NONE : { kind: 'grey', href: null };
+      return { kind: 'grey', href: null };
     },
-    cardGlyph(it) {
-      const target = it._src === 'replicas' ? 'replicas' : 'self';
-      const key = it.type === 'pool' ? `pool:${it.pool.name}` : it.drive && (it.drive.serial || `id:${it.id}`);
-      return this.glyph(target, key, 'card');
-    },
-    cardAskKey(it) {
-      return `card:${it._src}:${it.id}`;
-    },
-    askCard(it) {
-      if (it._src === 'replicas') {
+    askText(c) {
+      if (c.src === 'replicas') {
         let text = 'Add this replica to Home Assistant?';
         const others = ((this.replicas && this.replicas.items) || []).length - 1;
         const entry = this.ha && this.ha.targets && this.ha.targets.replicas;
         if (!entry && others > 0) text += ` The other ${this.plural(others, 'replica comes', 'replicas come')} with it.`;
-        this.ask(this.cardAskKey(it), 'replicas', text);
-      } else {
-        this.ask(this.cardAskKey(it), 'self', "Add this machine's drives to Home Assistant?");
+        return text;
       }
+      if (c.src === 'field') return `Add ${this.machine(c)} to Home Assistant?`;
+      return 'Add this drive to Home Assistant?';
     },
-    ask(key, target, text) {
-      if (this.ui.confirm && this.ui.confirm.key === key) { this.closeConfirm(); return; }
-      this.ui.confirm = { key, target, text, busy: false, err: '' };
+    askAdd(c) {
+      this.ui.ask = null;
+      if (this.ui.confirm && this.ui.confirm.id === c.id) { this.closeConfirm(); return; }
+      this.ui.confirm = { id: c.id, target: this.target(c), text: this.askText(c), busy: false, err: '' };
     },
-    asking(key) {
-      return !!(this.ui.confirm && this.ui.confirm.key === key);
+    asking(c) {
+      return !!(this.ui.confirm && this.ui.confirm.id === c.id);
     },
     closeConfirm() {
       this.ui.confirm = null;
@@ -558,6 +829,7 @@ function cc() {
       const result = r.data && r.data.result;
       if (r.ok && ['created', 'already_added', 'reloaded'].includes(result)) {
         this.ui.confirm = null;
+        this.loadHa();
         this.haSoon();
         return;
       }
@@ -571,16 +843,6 @@ function cc() {
     },
 
     // ── Field agents ────────────────────────────────────────────────
-    get hiddenCount() {
-      return this.hosts.filter((h) => h.hidden).length;
-    },
-    get visibleHosts() {
-      return this.hosts.filter((h) => !h.hidden || this.showHidden);
-    },
-    toggleShowHidden() {
-      if (!this.hiddenCount) return;
-      this.showHidden = !this.showHidden;
-    },
     data(h) {
       return this.hostData[h.id] || null;
     },
@@ -594,166 +856,18 @@ function cc() {
       const s = this.status(h);
       return s === 'password_needed' || s === 'password_refused';
     },
-    hostClass(h) {
-      const s = this.status(h);
-      return { unreach: s === 'unreachable', pending: this.pending(h), 'is-hidden': h.hidden };
-    },
     hostName(h) {
       const d = this.data(h);
       const o = this.optimistic[h.id];
       return (d && d.agent && d.agent.hostname) || (o && o.hostname) || h.address;
     },
-    agentVer(h) {
-      const d = this.data(h);
-      const o = this.optimistic[h.id];
-      return (d && d.agent && d.agent.version) || (o && o.version) || '';
-    },
-    // The OS name when the agent sends one; a card waiting for its password
-    // shows only what the scan said (board 3.6).
-    osName(h) {
-      const d = this.data(h);
-      if (this.pending(h)) return '';
-      return (d && d.agent && d.agent.os_name) || '';
-    },
-    hostHeader(h) {
-      const d = this.data(h);
-      if (!d || this.pending(h)) return null;
-      if (d.status === 'unreachable') return 'unknown';
-      return (d.summary && d.summary.header) || 'unknown';
-    },
-    hostGlyph(h) {
+    machineText(c) {
+      const h = c.h;
       const s = this.status(h);
-      if (s !== 'ok') return NONE;
-      return this.glyph(h.id, null, 'host');
-    },
-    rowGlyph(h, it) {
-      const key = it.type === 'pool' ? `pool:${it.pool.name}` : it.drive && (it.drive.serial || `id:${it.id}`);
-      return this.glyph(h.id, key, 'row');
-    },
-    hostDrives(h) {
-      const d = this.data(h);
-      if (d && d.summary && (d.status === 'ok' || d.status === 'unreachable')) return d.summary.drives;
-      if (d && d.agent && typeof d.agent.drives === 'number') return d.agent.drives;
-      const o = this.optimistic[h.id];
-      return o ? o.drives : null;
-    },
-    hostPools(h) {
-      const d = this.data(h);
-      return d && d.summary ? d.summary.pools : 0;
-    },
-    uptime(h) {
-      const d = this.data(h);
-      const s = d && d.agent && d.agent.uptime_seconds;
-      if (typeof s !== 'number') return null;
-      return s >= 86400 ? { n: Math.floor(s / 86400), unit: 'days' } : { n: Math.floor(s / 3600), unit: 'h' };
-    },
-    rank(it) {
-      const s = it.verdict && it.verdict.state;
-      if (s === 'YES') return 0;
-      if (s === 'MAYBE') return 1;
-      if (it.type === 'pool') return 2;
-      if (s === 'UNSUPPORTED') return 3;
-      return 4;
-    },
-    sortedRows(h) {
-      const d = this.data(h);
-      const items = (d && d.items) || [];
-      return items.map((it, i) => ({ it, i })).sort((a, b) => this.rank(a.it) - this.rank(b.it) || a.i - b.i)
-        .map((x) => x.it);
-    },
-    showRows(h) {
-      const rows = this.sortedRows(h);
-      return rows.length > 8 && !this.ui.more[h.id] ? rows.slice(0, 8) : rows;
-    },
-    folded(h) {
-      const rows = this.sortedRows(h);
-      return rows.length > 8 && !this.ui.more[h.id] ? rows.slice(8) : [];
-    },
-    foldText(h) {
-      const rest = this.folded(h);
-      const drives = rest.filter((i) => i.type === 'drive').length;
-      const pools = rest.filter((i) => i.type === 'pool').length;
-      const parts = [];
-      if (drives) parts.push(this.plural(drives, 'drive', 'drives'));
-      if (pools) parts.push(this.plural(pools, 'pool', 'pools'));
-      const calm = rest.every((i) => this.rank(i) > 1);
-      return `${parts.join(' and ')}${calm ? ', none needs attention' : ''}`;
-    },
-    hasPools(h) {
-      const d = this.data(h);
-      return !!(d && (d.items || []).some((i) => i.type === 'pool'));
-    },
-    showCounts(h) {
-      return this.sortedRows(h).length > 8;
-    },
-    rowClass(it) {
-      if (it.type === 'pool') return { pool: true, crit: this.poolBad(it) };
-      const s = it.verdict && it.verdict.state;
-      return { crit: s === 'YES', warn: s === 'MAYBE', unsup: s === 'UNSUPPORTED' };
-    },
-    rowKey(h, it) {
-      return `row:${h.id}:${it.id}`;
-    },
-    // A pool row's open state: in a host card it starts closed, on a pool
-    // replica (no host) it starts open.
-    poolKey(h, it) {
-      return h ? this.rowKey(h, it) : `rep:${it.id}`;
-    },
-    tempText(it) {
-      if (it.verdict && it.verdict.state === 'UNSUPPORTED') return 'not known';
-      const t = this.stats(it).temp_c;
-      return typeof t === 'number' ? `${t} C` : '';
-    },
-    writtenText(it) {
-      const v = this.vol(it, 'written');
-      return v ? this.tb(v.bytes) : '';
-    },
-    powerOn(it) {
-      const s = this.stats(it);
-      const parts = [];
-      if (typeof s.power_on_hours === 'number') parts.push(`${this.num(s.power_on_hours)} h`);
-      if (typeof s.power_cycles === 'number') parts.push(`${this.num(s.power_cycles)} cycles`);
-      return parts.join(', ');
-    },
-    hostFoot(h) {
-      const d = this.data(h);
-      if (h.hidden) {
-        const r = this.hostRead[h.id];
-        return r ? `read ${this.ago(r.at)}` : '';
-      }
-      if (this.pending(h) || this.status(h) === 'reading') {
-        const at = Date.parse(h.added_at);
-        return !at || this.now - at < 60000 ? 'added just now' : `added ${this.ago(at)}`;
-      }
-      if (d && d.status === 'unreachable') return d.last_answer ? `last answer ${this.ago(d.last_answer)}` : 'not answering';
-      const r = this.hostRead[h.id];
-      if (!r) return '';
-      return r.first ? `read when the page opened, ${this.ago(r.at)}` : `read ${this.ago(r.at)}`;
-    },
-    hostAskText(h) {
-      return `Add ${this.hostName(h)} to Home Assistant?`;
-    },
-
-    async toggleHidden(h) {
-      const was = h.hidden;
-      const since = h.hidden_since;
-      h.hidden = !was;
-      h.hidden_since = h.hidden ? new Date().toISOString() : null;
-      if (!this.hiddenCount) this.showHidden = false;
-      this.hideErr = '';
-      const r = await this.request(`fleet/hosts/${enc(h.id)}`, { method: 'PATCH', body: { hidden: !was } });
-      if (!r.ok) {
-        h.hidden = was;
-        h.hidden_since = since;
-        this.hideErr = 'That change was not saved. Try again.';
-        return;
-      }
-      if (r.data && r.data.host) Object.assign(h, r.data.host);
-      if (was) this.loadHost(h.id);
-    },
-
-    pwShown(h) {
-      return this.pending(h) || !!this.ui.pwOpen[h.id];
+      if (this.pending(h)) return '';
+      if (s === 'unreachable') return 'Not answering, and not seen yet.';
+      if (s === 'reading') return 'Reading its drives.';
+      return 'It reports no drives.';
     },
     pwRefused(h) {
       return this.ui.pwState[h.id] === 'refused' || (this.status(h) === 'password_refused' && !this.ui.pwState[h.id]);
@@ -773,7 +887,6 @@ function cc() {
       if (r.ok) {
         this.ui.pw[h.id] = '';
         this.ui.pwState[h.id] = null;
-        this.ui.pwOpen[h.id] = false;
         if (r.data && r.data.host) Object.assign(h, r.data.host);
         await this.loadHost(h.id);
         return;
@@ -782,24 +895,147 @@ function cc() {
       this.ui.pwState[h.id] = code === 'password_refused' ? 'refused' : code === 'not_answering' ? 'noanswer' : 'error';
     },
 
-    async saveReplica(host, it, key) {
-      if (this.ui.busy[key]) return;
-      this.ui.busy[key] = true;
-      this.ui.note[key] = '';
-      const r = await this.request('replicas/save-as', { method: 'POST', body: { host, drive_id: it.drive.id } });
-      this.ui.busy[key] = false;
-      if (r.ok) {
-        this.ui.note[key] = 'Saved to Replicas';
-        this.loadReplicas();
-      } else {
-        const code = r.data && r.data.error;
-        this.ui.note[key] = {
-          replica_folder_unavailable: 'Your replica folder is not available.',
-          unsupported_drive: 'This drive has no SMART data to copy.',
-          not_answering: 'The agent did not answer.',
-        }[code] || 'It was not saved. Try again.';
+    // ── Replica presets ─────────────────────────────────────────────
+    scenOptions(it) {
+      const opts = (it.lab && it.lab.scenario && it.lab.scenario.options) || [];
+      // A pool offers Healthy, Degraded and Faulted.
+      return it.pool ? opts.filter((o) => o.id !== 'vanished') : opts;
+    },
+    scenCurrent(it) {
+      return (it.lab && it.lab.scenario && it.lab.scenario.current) || '';
+    },
+    scenarioName(it) {
+      const cur = this.scenCurrent(it);
+      const o = ((it.lab && it.lab.scenario && it.lab.scenario.options) || []).find((x) => x.id === cur);
+      return o ? o.label : '';
+    },
+    presetName(o) {
+      return PRESET_NAMES[o.id] || o.label;
+    },
+    mockPath(it) {
+      return it.pool ? `mock/pools/${enc(it.pool.name)}` : `mock/drives/${enc(it.drive.id)}`;
+    },
+    async applyPreset(c, o) {
+      const it = c.it;
+      if (this.ui.busy[`scen:${c.id}`] || o.id === this.scenCurrent(it)) return;
+      this.ui.busy[`scen:${c.id}`] = true;
+      await this.request(`${this.mockPath(it)}/scenario`, { method: 'POST', body: { id: o.id } });
+      await this.loadReplicas();
+      this.ui.busy[`scen:${c.id}`] = false;
+    },
+    async editRaw(it, kind, field, text) {
+      const n = Number(String(text).trim());
+      if (!Number.isFinite(n)) return;
+      if (kind === 'ata' || kind === 'nvme') await this.request(`${this.mockPath(it)}/smart`, { method: 'PATCH', body: { [field]: n } });
+      else if (kind === 'devstat') await this.request(`${this.mockPath(it)}/devstat`, { method: 'PATCH', body: { reported_uncorrectable: n } });
+      this.loadReplicas();
+    },
+
+    // ── Drag to reorder ─────────────────────────────────────────────
+    // Pointer events, not HTML5 drag and drop, so it works on touch in the
+    // Home Assistant app. A mouse drags from the grip at once; a finger
+    // must hold the grip first, so a scroll never moves a card.
+    gripDown(e, c) {
+      if (e.button !== undefined && e.button !== 0) return;
+      const el = e.currentTarget.closest('article');
+      if (e.pointerType !== 'touch') {
+        e.preventDefault();
+        this.startDrag(c, el, e.clientX, e.clientY);
+        return;
       }
-      setTimeout(() => { this.ui.note[key] = ''; }, 5000);
+      const x0 = e.clientX;
+      const y0 = e.clientY;
+      let timer = null;
+      const stop = () => {
+        clearTimeout(timer);
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', stop);
+        window.removeEventListener('pointercancel', stop);
+      };
+      const move = (ev) => { if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 8) stop(); };
+      timer = setTimeout(() => { stop(); this.startDrag(c, el, x0, y0); }, LONG_PRESS_MS);
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', stop);
+      window.addEventListener('pointercancel', stop);
+    },
+    startDrag(c, el, x, y) {
+      if (this.drag || !el) return;
+      const r = el.getBoundingClientRect();
+      const lifted = el.cloneNode(true);
+      lifted.classList.add('lifted');
+      lifted.removeAttribute('data-card');
+      Object.assign(lifted.style, { width: `${r.width}px`, height: `${r.height}px`, left: `${r.left}px`, top: `${r.top}px` });
+      document.getElementById('drag-layer').appendChild(lifted);
+      const start = this.orderedCards.map((x2) => x2.id);
+      this.dragOrder = start.slice();
+      const onMove = (ev) => this.dragMove(ev);
+      const onUp = () => this.dragEnd();
+      this.drag = { id: c.id, offX: x - r.left, offY: y - r.top, lifted, start, onMove, onUp };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+    },
+    dragMove(ev) {
+      const d = this.drag;
+      if (!d) return;
+      ev.preventDefault();
+      d.lifted.style.left = `${ev.clientX - d.offX}px`;
+      d.lifted.style.top = `${ev.clientY - d.offY}px`;
+      const edge = 60;
+      if (ev.clientY < edge) window.scrollBy(0, -12);
+      else if (ev.clientY > window.innerHeight - edge) window.scrollBy(0, 12);
+      for (const el of document.querySelectorAll('.grid > article[data-card]')) {
+        const id = el.dataset.card;
+        if (id === d.id) continue;
+        const r = el.getBoundingClientRect();
+        if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) continue;
+        const before = ev.clientX < r.left + r.width / 2;
+        const order = this.dragOrder.filter((x) => x !== d.id);
+        const at = order.indexOf(id) + (before ? 0 : 1);
+        order.splice(at, 0, d.id);
+        if (order.join('\n') !== this.dragOrder.join('\n')) this.dragOrder = order;
+        break;
+      }
+    },
+    dragEnd() {
+      const d = this.drag;
+      if (!d) return;
+      window.removeEventListener('pointermove', d.onMove);
+      window.removeEventListener('pointerup', d.onUp);
+      window.removeEventListener('pointercancel', d.onUp);
+      d.lifted.remove();
+      const order = this.dragOrder;
+      this.drag = null;
+      this.dragOrder = null;
+      if (order.join('\n') !== d.start.join('\n')) this.saveOrder(order);
+    },
+    // The grip by keyboard: arrows move the card one place.
+    gripKey(e, c) {
+      const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
+      if (!step) return;
+      e.preventDefault();
+      const shown = this.shownCards.map((x) => x.id);
+      const i = shown.indexOf(c.id);
+      const j = i + step;
+      if (i < 0 || j < 0 || j >= shown.length) return;
+      const order = this.orderedCards.map((x) => x.id).filter((x) => x !== c.id);
+      const at = order.indexOf(shown[j]) + (step > 0 ? 1 : 0);
+      order.splice(at, 0, c.id);
+      this.saveOrder(order);
+      this.$nextTick(() => {
+        const el = document.querySelector(`.grid > article[data-card="${CSS.escape(c.id)}"] .grip`);
+        if (el) el.focus();
+      });
+    },
+    async saveOrder(order) {
+      const was = this.order;
+      this.order = order;
+      this.pageErr = '';
+      const r = await this.request('cards/order', { method: 'PUT', body: { order } });
+      if (!r.ok) {
+        this.order = was;
+        this.pageErr = 'The new order was not saved. Try again.';
+      }
     },
 
     // ── The + card ──────────────────────────────────────────────────
@@ -1035,72 +1271,6 @@ function cc() {
       this.closeAdd();
       if (rows.length) this.loadHosts();
       if (files.length) this.loadReplicas();
-    },
-
-    // ── Replicas ────────────────────────────────────────────────────
-    get repItems() {
-      return (this.replicas && this.replicas.items) || [];
-    },
-    scenOptions(it) {
-      return (it.lab && it.lab.scenario && it.lab.scenario.options) || [];
-    },
-    scenSel(it) {
-      return this.ui.scen[it.id] || (it.lab && it.lab.scenario && it.lab.scenario.current) || '';
-    },
-    mockPath(it) {
-      return it.type === 'pool' ? `mock/pools/${enc(it.pool.name)}` : `mock/drives/${enc(it.drive.id)}`;
-    },
-    async applyScenario(it) {
-      const id = this.scenSel(it);
-      if (!id) return;
-      this.ui.busy[`scen:${it.id}`] = true;
-      await this.request(`${this.mockPath(it)}/scenario`, { method: 'POST', body: { id } });
-      this.ui.busy[`scen:${it.id}`] = false;
-      delete this.ui.scen[it.id];
-      this.loadReplicas();
-    },
-    async editRaw(it, kind, field, text) {
-      const n = Number(String(text).trim());
-      if (!Number.isFinite(n)) return;
-      if (kind === 'ata') await this.request(`${this.mockPath(it)}/smart`, { method: 'PATCH', body: { [field]: n } });
-      else if (kind === 'nvme') await this.request(`${this.mockPath(it)}/smart`, { method: 'PATCH', body: { [field]: n } });
-      else if (kind === 'devstat') await this.request(`${this.mockPath(it)}/devstat`, { method: 'PATCH', body: { reported_uncorrectable: n } });
-      this.loadReplicas();
-    },
-    async editPool(it, disk, field, text) {
-      let body;
-      if (disk === null) body = { state: String(text).trim().toUpperCase() };
-      else if (field === 'state') body = { devices: [{ name: disk, state: String(text).trim().toUpperCase() }] };
-      else {
-        const n = Number(String(text).trim());
-        if (!Number.isFinite(n)) return;
-        body = { devices: [{ name: disk, [field]: n }] };
-      }
-      await this.request(this.mockPath(it), { method: 'PATCH', body });
-      this.loadReplicas();
-    },
-    async download(it) {
-      try {
-        const resp = await fetch(`${this.baseUrl}replicas/${enc(it.id)}/file`);
-        if (!resp.ok) return;
-        const blob = await resp.blob();
-        const cd = resp.headers.get('Content-Disposition') || '';
-        const m = /filename="?([^";]+)"?/.exec(cd);
-        const name = m ? m[1] : `${String(it.id).replace(/[^a-z0-9]+/gi, '-')}.json`;
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 2000);
-      } catch (e) { /* the next read shows the state */ }
-    },
-    async removeReplica(it) {
-      const r = await this.request(`replicas/${enc(it.id)}`, { method: 'DELETE' });
-      if (r.ok && this.replicas) this.replicas.items = this.replicas.items.filter((x) => x.id !== it.id);
-      this.loadReplicas();
     },
   };
 }

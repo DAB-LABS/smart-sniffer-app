@@ -18,181 +18,13 @@
   <symbol id="exit" viewBox="0 0 14 14"><path d="M6.2 2.2H2.2v9.6h9.6V7.8"/><path d="M8.6 1.6h3.8v3.8M12.4 1.6 6.6 7.4"/></symbol>
   <symbol id="eye" viewBox="0 0 16 16"><path d="M1.2 8C3 4.9 5.3 3.4 8 3.4s5 1.5 6.8 4.6C13 11.1 10.7 12.6 8 12.6S3 11.1 1.2 8Z"/><circle cx="8" cy="8" r="2.1"/></symbol>
   <symbol id="eye-shut" viewBox="0 0 16 16"><path d="M1.2 8C3 4.9 5.3 3.4 8 3.4s5 1.5 6.8 4.6C13 11.1 10.7 12.6 8 12.6S3 11.1 1.2 8Z"/><path d="M2.6 13.4 13.4 2.6"/></symbol>
+  <symbol id="trash" viewBox="0 0 16 16"><path d="M2.5 4.2h11M6.2 4.2V2.6h3.6v1.6M3.9 4.2l.7 9.2h6.8l.7-9.2M6.6 6.8v4.4M9.4 6.8v4.4"/></symbol>
+  <symbol id="download" viewBox="0 0 16 16"><path d="M8 2.2v8M4.6 7.2 8 10.6l3.4-3.4M2.6 11.6v2h10.8v-2"/></symbol>
+  <symbol id="grip" viewBox="0 0 10 16"><circle cx="3" cy="3" r="1.2"/><circle cx="7" cy="3" r="1.2"/><circle cx="3" cy="8" r="1.2"/><circle cx="7" cy="8" r="1.2"/><circle cx="3" cy="13" r="1.2"/><circle cx="7" cy="13" r="1.2"/></symbol>
+  <symbol id="chevron" viewBox="0 0 20 12"><path d="M2 2l8 8 8-8"/></symbol>
   <symbol id="glass" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4.5 4.5"/></symbol>
 </svg>
 
-<!-- ═══ Partials, copied into the lists that use them by cc.js ═══ -->
-
-<!-- A pool row, in a host card (h is the host) and on a pool replica (h is null). -->
-<template id="tpl-pool-row">
-  <details class="drive-row pool" :class="{ crit: poolBad(it) }" :open="isOpen(poolKey(h, it), !h)" @toggle="setOpen(poolKey(h, it), $el.open)">
-    <summary><span class="m"><span class="mn" x-text="'ZFS pool ' + it.pool.name"></span><template x-if="h && rowGlyph(h, it).kind === 'blue'"><a class="exit" :href="rowGlyph(h, it).href" target="_top" aria-label="Open this pool in Home Assistant" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template></span><span class="s"><span x-text="poolLayout(it) ? poolLayout(it) + ', ' : ''"></span><b x-show="poolBad(it)" x-text="poolState(it)"></b><span x-show="!poolBad(it)" x-text="poolState(it)"></span></span></summary>
-    <template x-if="isOpen(poolKey(h, it), !h)">
-      <div class="drive-more">
-        <template x-if="poolDisks(it).length">
-          <div class="pool-disks" role="table" :aria-label="'Disks in pool ' + it.pool.name">
-            <div class="pd head" role="row"><span></span><span>Disk</span><span>State</span><span class="r">Read</span><span class="r">Write</span><span class="r">Cksum</span></div>
-            <template x-for="d in poolDisks(it)" :key="d.name">
-              <div class="pd" :class="{ crit: d.bad }" role="row"><span :class="d.bad ? 'mk crit' : ''"></span><span class="n" x-text="d.name"></span><span x-text="d.state"></span><span class="r" x-text="d.read"></span><span class="r" x-text="d.write"></span><span class="r" x-text="d.cksum"></span></div>
-            </template>
-          </div>
-        </template>
-        <p class="pool-foot" x-show="poolFoot(it)" x-text="poolFoot(it)"></p>
-      </div>
-    </template>
-  </details>
-</template>
-
-<!-- A drive card: Case file (it._src 'self') and Replicas (it._src 'replicas'). -->
-<template id="tpl-drive">
-  <article class="card" :class="{ replica: it._src === 'replicas' }">
-    <div class="case-top">
-      <div>
-        <div class="model"><template x-if="it.type === 'pool'"><span>ZFS pool <span class="mono" x-text="it.pool.name"></span></span></template><template x-if="it.type !== 'pool'"><span x-text="title(it)"></span></template><template x-if="it._src === 'replicas'"><span> <span class="tag">replica</span></span></template><template x-if="cardGlyph(it).kind === 'blue'"><a class="exit" :href="cardGlyph(it).href" target="_top" :aria-label="it._src === 'replicas' ? 'Open this replica in Home Assistant' : 'Open this drive in Home Assistant'" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template><template x-if="cardGlyph(it).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking(cardAskKey(it)) ? 'true' : 'false'" :aria-label="it._src === 'replicas' ? 'Not in Home Assistant yet. Add this replica' : 'Not in Home Assistant yet. Add this machine\'s drives'" title="Not in Home Assistant yet" @click="askCard(it)"><svg aria-hidden="true"><use href="#exit"/></svg></button></template></div>
-        <template x-if="it.type === 'drive'">
-          <div class="ident"><span class="serial sel" x-text="it.drive.serial"></span><span x-text="it.drive.device_path"></span><span class="proto" x-show="proto(it.drive)" x-text="proto(it.drive)"></span></div>
-        </template>
-        <template x-if="it.type === 'pool'">
-          <div class="ident"><span>Replica pool</span><span class="proto">ZFS</span></div>
-        </template>
-        <div class="hd">
-          <template x-if="hdr(it) === 'attention'"><span class="hd-att">Attention</span></template>
-          <template x-if="hdr(it) === 'attention' && failed(it)"><span class="hd-fail">Health <b>FAILED</b></span></template>
-          <template x-if="hdr(it) === 'maybe'"><span class="hd-maybe">Maybe</span></template>
-          <template x-if="hdr(it) === 'ok'"><span class="hd-ok">Health OK</span></template>
-          <template x-if="hdr(it) === 'unknown'"><span class="hd-unk"><span class="mk unk"></span>Health not known</span></template>
-        </div>
-        <template x-if="unsupportedNote(it)"><p class="case-note">The agent can see this drive, but it gives no SMART health data to watch. Virtual disks and some USB bridges do this.</p></template>
-        <template x-if="devstatNote(it)"><p class="case-note ds">The first time, Home Assistant also sends a one-time note: First reading from this drive's Device Statistics.</p></template>
-        <template x-if="it.type === 'pool' && vanished(it)"><p class="case-note">Not served to Home Assistant, which reports this pool as missing.</p></template>
-        <template x-if="it.type === 'drive' && hdr(it) !== 'unknown'">
-          <div class="stats"><template x-if="typeof stats(it).temp_c === 'number'"><span><b x-text="stats(it).temp_c"></b> C</span></template><template x-if="typeof stats(it).power_on_hours === 'number'"><span><b x-text="num(stats(it).power_on_hours)"></b> h</span></template><template x-if="typeof stats(it).power_cycles === 'number'"><span><b x-text="num(stats(it).power_cycles)"></b> cycles</span></template></div>
-        </template>
-      </div>
-      <img class="lens" src="img/casefile-lens-ink.png" alt="" width="132" height="132">
-    </div>
-    <template x-if="asking(cardAskKey(it))">
-      <div class="ha-ask flat" role="group" aria-label="Confirm"><span x-text="ui.confirm.text"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.confirm.busy" @click="confirmAdd()">Add</button><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Cancel</button></span><span class="ask-err" x-show="ui.confirm.err" x-text="ui.confirm.err"></span></div>
-    </template>
-    <template x-if="it.type === 'drive'">
-      <dl class="kv">
-        <template x-for="r in rows(it)" :key="r.key + r.name">
-          <div><dt :class="r.mark" x-text="r.name"></dt><dd><span x-text="r.value"></span><template x-if="r.expect && (r.mark === 'crit' || r.mark === 'warn')"><span class="exp" x-text="', ' + r.expect"></span></template><template x-if="r.note"><span class="note" x-text="r.note"></span></template></dd></div>
-        </template>
-        <span class="group"></span>
-        <div><dt>Data Written</dt><dd><template x-if="vol(it, 'written')"><span><span x-text="tb(vol(it, 'written').bytes)"></span><span class="note" x-text="volNote(vol(it, 'written'), it._src === 'replicas')"></span></span></template><template x-if="!vol(it, 'written')"><span class="muted">this drive does not report it</span></template></dd></div>
-        <template x-if="it._src !== 'replicas' || vol(it, 'read')">
-          <div><dt>Data Read</dt><dd><template x-if="vol(it, 'read')"><span><span x-text="tb(vol(it, 'read').bytes)"></span><span class="note" x-text="volNote(vol(it, 'read'), it._src === 'replicas')"></span></span></template><template x-if="!vol(it, 'read')"><span class="muted">this drive does not report it</span></template></dd></div>
-        </template>
-        <div><dt>Device Statistics</dt><dd x-text="devstatText(it)"></dd></div>
-      </dl>
-    </template>
-    <template x-if="it.type === 'pool'">
-      <div class="host-body" x-data="{ h: null }">
-        <template x-if="true" data-use="tpl-pool-row"></template>
-      </div>
-    </template>
-    <details class="report" :open="isOpen('rep-report:' + it._src + ':' + it.id)" @toggle="setOpen('rep-report:' + it._src + ':' + it.id, $el.open)">
-      <summary>Field report <span class="dim" x-text="reportSummary(it)"></span></summary>
-      <template x-if="isOpen('rep-report:' + it._src + ':' + it.id) && reportKind(it) === 'ata'">
-        <div>
-          <div class="table-wrap">
-            <table class="attrs">
-              <thead><tr><th class="g"></th><th class="num">ID</th><th>Name</th><th class="num">Value</th><th class="num">Worst</th><th class="num">Thresh</th><th class="num">Raw</th></tr></thead>
-              <tbody>
-                <template x-for="a in ataTable(it)" :key="a.id">
-                  <tr :class="{ hit: a.mark }"><td class="g"><span class="mk" :class="a.mark" x-show="a.mark"></span></td><td class="num" x-text="a.id"></td><td x-text="a.name"></td><td class="num" x-text="a.value"></td><td class="num" x-text="a.worst"></td><td class="num" x-text="a.thresh"></td><td class="num"><template x-if="it._src !== 'replicas'"><span x-text="a.raw"></span></template><template x-if="it._src === 'replicas'"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(it, 'ata', a.name, $event.target.value)"></template></td></tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-          <template x-if="devstatTable(it).length">
-            <div class="table-wrap">
-              <table class="attrs">
-                <thead><tr><th class="g"></th><th class="num">Page</th><th>Device Statistics</th><th class="num">Value</th></tr></thead>
-                <tbody>
-                  <template x-for="e in devstatTable(it)" :key="e.key">
-                    <tr :class="{ hit: e.mark }"><td class="g"><span class="mk" :class="e.mark" x-show="e.mark"></span></td><td class="num" x-text="e.page"></td><td x-text="e.name"></td><td class="num"><template x-if="!(it._src === 'replicas' && e.editable)"><span x-text="e.value"></span></template><template x-if="it._src === 'replicas' && e.editable"><input class="input raw-in" :value="e.value" inputmode="numeric" :aria-label="'Value of ' + e.name" @change="editRaw(it, 'devstat', null, $event.target.value)"></template></td></tr>
-                  </template>
-                </tbody>
-              </table>
-            </div>
-          </template>
-        </div>
-      </template>
-      <template x-if="isOpen('rep-report:' + it._src + ':' + it.id) && reportKind(it) === 'nvme'">
-        <div class="table-wrap">
-          <table class="attrs">
-            <thead><tr><th class="g"></th><th>Field</th><th class="num">Value</th></tr></thead>
-            <tbody>
-              <template x-for="f in nvmeTable(it)" :key="f.name">
-                <tr :class="{ hit: f.mark }"><td class="g"><span class="mk" :class="f.mark" x-show="f.mark"></span></td><td x-text="f.name"></td><td class="num"><template x-if="!(it._src === 'replicas' && f.editable)"><span x-text="f.value"></span></template><template x-if="it._src === 'replicas' && f.editable"><input class="input raw-in" :value="f.value" inputmode="numeric" :aria-label="'Value of ' + f.name" @change="editRaw(it, 'nvme', f.name, $event.target.value)"></template></td></tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
-      </template>
-      <template x-if="isOpen('rep-report:' + it._src + ':' + it.id) && reportKind(it) === 'pool'">
-        <div class="table-wrap">
-          <table class="attrs">
-            <thead><tr><th class="g"></th><th>Pool or disk</th><th>State</th><th class="num">Read</th><th class="num">Write</th><th class="num">Cksum</th></tr></thead>
-            <tbody>
-              <tr><td class="g"></td><td x-text="it.pool.name"></td><td><input class="input state-in" :value="poolState(it)" aria-label="Pool state" @change="editPool(it, null, 'state', $event.target.value)"></td><td></td><td></td><td></td></tr>
-              <template x-for="d in poolDisks(it)" :key="d.name">
-                <tr :class="{ hit: d.bad }"><td class="g"><span class="mk crit" x-show="d.bad"></span></td><td x-text="d.name"></td><td><input class="input state-in" :value="d.state" :aria-label="'State of ' + d.name" @change="editPool(it, d.name, 'state', $event.target.value)"></td><td class="num"><input class="input raw-in" :value="d.read" inputmode="numeric" :aria-label="'Read errors of ' + d.name" @change="editPool(it, d.name, 'read', $event.target.value)"></td><td class="num"><input class="input raw-in" :value="d.write" inputmode="numeric" :aria-label="'Write errors of ' + d.name" @change="editPool(it, d.name, 'write', $event.target.value)"></td><td class="num"><input class="input raw-in" :value="d.cksum" inputmode="numeric" :aria-label="'Checksum errors of ' + d.name" @change="editPool(it, d.name, 'cksum', $event.target.value)"></td></tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
-      </template>
-    </details>
-    <template x-if="it._src === 'self'">
-      <div class="foot"><span x-text="'last read ' + ago(readAt(it))"></span><template x-if="canSave(it)"><span class="foot-act"><span class="act-note" x-show="ui.note['save:self:' + it.id]" x-text="ui.note['save:self:' + it.id]"></span><button class="btn btn-sm btn-quiet" type="button" :disabled="!!ui.busy['save:self:' + it.id]" @click="saveReplica('self', it, 'save:self:' + it.id)">Save as replica</button></span></template></div>
-    </template>
-    <template x-if="it._src === 'replicas'">
-      <div class="scen-bar">
-        <span class="label" x-show="scenOptions(it).length">Scenario</span>
-        <select class="select" aria-label="Scenario" x-show="scenOptions(it).length" @change="ui.scen[it.id] = $event.target.value">
-          <template x-if="!scenSel(it)"><option value="" selected disabled>Choose a scenario</option></template>
-          <template x-for="o in scenOptions(it)" :key="o.id"><option :value="o.id" x-text="o.label" :selected="o.id === scenSel(it)"></option></template>
-        </select>
-        <button class="btn btn-sm" type="button" x-show="scenOptions(it).length" :disabled="!!ui.busy['scen:' + it.id]" @click="applyScenario(it)">Apply</button>
-        <span class="spacer"></span>
-        <span class="when" x-text="'read ' + ago(readAt(it))"></span>
-        <button class="btn btn-sm btn-quiet" type="button" @click="download(it)">Download</button>
-        <button class="btn btn-sm btn-quiet" type="button" @click="removeReplica(it)">Remove</button>
-      </div>
-    </template>
-  </article>
-</template>
-
-<!-- A drive row in a host card, with its cause under it while closed. Needs h and it. -->
-<template id="tpl-host-row">
-  <div class="rw">
-    <details class="drive-row" :class="rowClass(it)" :open="isOpen(rowKey(h, it))" @toggle="setOpen(rowKey(h, it), $el.open)">
-      <summary><span class="m"><span class="mn" x-text="it.drive.model"></span><template x-if="rowGlyph(h, it).kind === 'blue'"><a class="exit" :href="rowGlyph(h, it).href" target="_top" aria-label="Open this drive in Home Assistant" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template></span><span class="s"><span x-text="it.drive.serial"></span><span class="xs"><i x-text="tempText(it)"></i><i x-show="writtenText(it)" x-text="writtenText(it)"></i></span></span><span class="t r" x-text="tempText(it)"></span><span class="w r" x-text="writtenText(it)"></span></summary>
-      <template x-if="isOpen(rowKey(h, it))">
-        <div class="drive-more">
-          <dl class="kv">
-            <template x-for="r in rows(it)" :key="r.key + r.name">
-              <div><dt :class="r.mark" x-text="r.name"></dt><dd><span x-text="r.value"></span><template x-if="r.expect && (r.mark === 'crit' || r.mark === 'warn')"><span class="exp" x-text="', ' + r.expect"></span></template><template x-if="r.note"><span class="note" x-text="r.note"></span></template></dd></div>
-            </template>
-            <template x-if="powerOn(it)"><div><dt>Power on</dt><dd x-text="powerOn(it)"></dd></div></template>
-            <div><dt>Data Read</dt><dd><template x-if="vol(it, 'read')"><span><span x-text="tb(vol(it, 'read').bytes)"></span><span class="note" x-text="volNote(vol(it, 'read'), false)"></span></span></template><template x-if="!vol(it, 'read')"><span class="muted">this drive does not report it</span></template></dd></div>
-          </dl>
-          <template x-if="canSave(it) && status(h) === 'ok'">
-            <div class="row-act"><span class="act-note" x-show="ui.note['save:' + rowKey(h, it)]" x-text="ui.note['save:' + rowKey(h, it)]"></span><button class="btn btn-sm btn-quiet" type="button" :disabled="!!ui.busy['save:' + rowKey(h, it)]" @click="saveReplica(h.id, it, 'save:' + rowKey(h, it))">Save as replica</button></div>
-          </template>
-        </div>
-      </template>
-    </details>
-    <template x-if="marked(it).length && !isOpen(rowKey(h, it))">
-      <div class="row-cause"><dl class="kv"><template x-for="r in marked(it)" :key="r.key"><div><dt :class="r.mark" x-text="r.name"></dt><dd><span x-text="r.value"></span><template x-if="r.expect"><span class="exp" x-text="', ' + r.expect"></span></template></dd></div></template></dl></div>
-    </template>
-  </div>
-</template>
-
-<!-- ═══ The page ═══ -->
 <main class="page">
   <header class="app-head">
     <div class="brand">
@@ -201,123 +33,229 @@
       <img class="wordmark" src="img/wordmark.png" alt="SMART Sniffer" width="252" height="27">
       <span class="page-name">Control Center</span>
     </div>
-    <div class="versions"><span x-show="info && info.app_version">app <b x-text="info && info.app_version"></b></span><span x-show="agentVersion">agent <b x-text="agentVersion"></b></span><span x-show="!agentVersion && agentDown">agent not answering</span></div>
+    <div class="head-side">
+      <div class="versions"><span x-show="info && info.app_version">app <b x-text="info && info.app_version"></b></span><span x-show="agentVersion">agent <b x-text="agentVersion"></b></span><span x-show="!agentVersion && agentDown">agent not answering</span></div>
+      <div class="head-tools">
+        <button class="btn btn-sm eye-btn" type="button" :aria-pressed="showHidden ? 'true' : 'false'" :disabled="!hiddenCount && !showHidden" :aria-label="showHidden ? 'Hidden cards shown, ' + hiddenCount : hiddenCount + ' hidden, press to see them'" title="Hidden cards" @click="toggleShowHidden()"><svg class="eye-g" aria-hidden="true" x-show="!showHidden"><use href="#eye-shut"/></svg><svg class="eye-g" aria-hidden="true" x-show="showHidden" style="display:none"><use href="#eye"/></svg><span x-text="hiddenCount">0</span></button>
+        <button class="btn btn-sm" type="button" @click="refresh()">Refresh</button>
+      </div>
+    </div>
   </header>
   <p class="app-tag">Drive health for this machine and your field agents, complete on its own; the SMART Sniffer integration adds entities, history, notifications and automations in Home Assistant.</p>
+  <p class="page-err" x-show="pageErr || hostsErr" x-text="pageErr || hostsErr" role="alert"></p>
+  <template x-if="selfEmpty">
+    <p class="empty-line">This machine's agent reports no readable drives. If the <a :href="appPage('logs')" target="_top">Mission Log</a> says DRIVE ACCESS BLOCKED, turn off Protection Mode on the <a :href="appPage('info')" target="_top">app's info page</a> and restart the app.</p>
+  </template>
 
-  <!-- ═══ Case file ═══ -->
-  <section class="sec" aria-labelledby="h-case">
-    <div class="sec-head"><h2 id="h-case">Case file</h2><span class="hatch"></span></div>
-    <p class="sec-sub">Every drive this app's own agent reports.</p>
-    <template x-if="agentDown">
-      <div class="grid-2">
-        <article class="card down">
-          <div class="case-top">
-            <div>
-              <div class="model">This app's agent is not answering</div>
-              <p class="down-msg">The app may still be starting. This page asks again every 8 seconds.
-                If it stays like this, read the <a :href="appPage('logs')" target="_top">Mission Log</a>.</p>
-              <div class="hd"><span class="hd-unk"><span class="mk unk"></span>Health not known</span></div>
-            </div>
-            <img class="lens off" src="img/casefile-lens-ink.png" alt="" width="132" height="132">
+  <!-- ═══ One grid: a card per drive, pool or filesystem, then + ═══ -->
+  <div class="grid" :class="{ dragging: !!drag }">
+    <template x-for="c in shownCards" :key="c.id">
+      <article class="card" :class="cardClass(c)" :data-card="c.id" :aria-label="pill(c) + ', ' + title(c)">
+        <div class="c-head">
+          <button class="grip" type="button" :aria-label="'Move ' + title(c) + '. Arrow keys move it one place.'" title="Drag to move" @pointerdown="gripDown($event, c)" @keydown="gripKey($event, c)" @contextmenu.prevent><svg aria-hidden="true"><use href="#grip"/></svg></button>
+          <h3 class="c-title" x-text="title(c)"></h3>
+          <div class="c-tags">
+            <span class="exit-slot">
+              <template x-if="glyph(c).kind === 'blue'"><a class="exit" :href="glyph(c).href" target="_top" aria-label="Open in Home Assistant" title="Open in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template>
+              <template x-if="glyph(c).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking(c) ? 'true' : 'false'" aria-label="Not in Home Assistant yet. Add it" title="Not in Home Assistant yet" @click="askAdd(c)"><svg aria-hidden="true"><use href="#exit"/></svg></button></template>
+            </span>
+            <span class="pill" x-text="pill(c)"></span>
           </div>
-          <dl class="kv">
-            <div><dt>Drives last seen</dt><dd x-text="lastSeenNames"></dd></div>
-            <div><dt>Agent address</dt><dd x-text="agentAddress"></dd></div>
-          </dl>
-          <div class="foot"><span x-text="selfLastAnswer ? 'last answer ' + ago(selfLastAnswer) : 'no answer yet'"></span><span x-text="countdown"></span></div>
-        </article>
-      </div>
-    </template>
-    <template x-if="!agentDown && selfLoaded && !selfItems.length">
-      <p class="empty-line">No drives readable. If the <a :href="appPage('logs')" target="_top">Mission Log</a> says DRIVE ACCESS BLOCKED, turn off Protection Mode on the <a :href="appPage('info')" target="_top">app's info page</a> and restart the app.</p>
-    </template>
-    <div class="grid-2" x-show="!agentDown && selfItems.length">
-      <template x-for="it in selfItems" :key="it.id" data-use="tpl-drive"></template>
-    </div>
-    <p class="rules-line" x-show="rulesLine" x-text="rulesLine"></p>
-  </section>
+        </div>
+        <template x-if="asking(c)">
+          <div class="ask" role="group" aria-label="Confirm"><span x-text="ui.confirm.text"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.confirm.busy" @click="confirmAdd()">Add</button><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Cancel</button></span><span class="ask-err" x-show="ui.confirm.err" x-text="ui.confirm.err"></span></div>
+        </template>
+        <div class="c-where"><template x-for="(w, i) in where(c)" :key="i"><span x-text="w"></span></template></div>
+        <template x-if="vitals(c).length">
+          <div class="c-vitals"><template x-for="(v, i) in vitals(c)" :key="i"><span x-text="v"></span></template></div>
+        </template>
 
-  <!-- ═══ Field agents ═══ -->
-  <section class="sec" aria-labelledby="h-field">
-    <div class="sec-head"><h2 id="h-field">Field agents</h2><span class="hatch"></span>
-      <div class="sec-tools">
-        <button class="btn btn-sm" type="button" x-show="hosts.length" @click="refresh()">Refresh</button>
-        <button class="btn btn-sm eye-btn" type="button" :aria-pressed="showHidden ? 'true' : 'false'" :disabled="!hiddenCount" :aria-label="showHidden ? 'Hidden cards shown, ' + hiddenCount : hiddenCount + ' hidden, press to see them'" title="Hidden cards" @click="toggleShowHidden()"><svg class="eye-g" aria-hidden="true" x-show="!showHidden"><use href="#eye-shut"/></svg><svg class="eye-g" aria-hidden="true" x-show="showHidden" style="display:none"><use href="#eye"/></svg><span x-text="hiddenCount">0</span></button>
-      </div>
-    </div>
-    <p class="sec-sub">Agents on your other machines. Nothing on the network is scanned until you ask.</p>
-    <p class="sec-err" x-show="hideErr || hostsErr" x-text="hideErr || hostsErr" role="alert"></p>
-    <div class="grid-2">
-      <template x-for="h in visibleHosts" :key="h.id">
-        <article class="card" :class="hostClass(h)">
-          <div class="host-head">
-            <img class="agent" src="img/field-agent.png" alt="" width="44">
-            <div>
-              <div class="host-name"><span x-text="hostName(h)"></span><template x-if="hostGlyph(h).kind === 'blue'"><a class="exit" :href="hostGlyph(h).href" target="_top" :aria-label="'Open ' + hostName(h) + ' in the SMART Sniffer integration'" title="Its device page in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template><template x-if="hostGlyph(h).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking('host:' + h.id) ? 'true' : 'false'" :aria-label="'Not in Home Assistant yet. Add ' + hostName(h)" title="Not in Home Assistant yet" @click="ask('host:' + h.id, h.id, hostAskText(h))"><svg aria-hidden="true"><use href="#exit"/></svg></button></template></div>
-              <div class="host-meta"><span class="addr"><span x-text="h.address + ':' + h.port"></span><template x-if="h.has_password && !pending(h)"><button class="lock-btn" type="button" aria-label="Password saved. Change it" title="Password saved. Click to change it" @click="ui.pwOpen[h.id] = !ui.pwOpen[h.id]; ui.pwState[h.id] = null"><svg class="lock" aria-hidden="true"><use href="#lock"/></svg></button></template></span><span x-show="osName(h)" x-text="osName(h)"></span><span x-show="agentVer(h)" x-text="'agent ' + agentVer(h)"></span></div>
-            </div>
-            <div class="host-side"><div class="hd" style="margin:0">
-              <template x-if="hostHeader(h) === 'attention'"><span class="hd-att">Attention</span></template>
-              <template x-if="hostHeader(h) === 'maybe'"><span class="hd-maybe">Maybe</span></template>
-              <template x-if="hostHeader(h) === 'ok'"><span class="hd-ok">Health OK</span></template>
-              <template x-if="hostHeader(h) === 'unknown'"><span class="hd-unk"><span class="mk unk"></span>Health not known</span></template>
-            </div></div>
-          </div>
-          <template x-if="asking('host:' + h.id)">
-            <div class="ha-ask" role="group" aria-label="Confirm"><span x-text="ui.confirm.text"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.confirm.busy" @click="confirmAdd()">Add</button><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Cancel</button></span><span class="ask-err" x-show="ui.confirm.err" x-text="ui.confirm.err"></span></div>
-          </template>
-          <template x-if="status(h) !== 'unreachable'">
-            <div class="host-stats">
-              <template x-if="hostDrives(h) !== null"><span><b x-text="hostDrives(h)"></b><span x-text="hostDrives(h) === 1 ? 'drive' : 'drives'"></span></span></template>
-              <template x-if="pending(h)"><span>drives show after the password</span></template>
-              <template x-if="status(h) === 'ok'"><span><b x-text="hostPools(h)"></b><span x-text="hostPools(h) === 1 ? 'pool' : 'pools'"></span></span></template>
-              <template x-if="status(h) === 'ok' && h.hidden && h.hidden_since"><span x-text="'hidden ' + ago(h.hidden_since)"></span></template>
-              <template x-if="status(h) === 'ok' && !h.hidden && uptime(h)"><span>up <b x-text="uptime(h).n"></b><span x-text="uptime(h).unit"></span></span></template>
-              <template x-if="status(h) === 'ok' && showCounts(h) && data(h).summary.attention"><span><b x-text="data(h).summary.attention"></b>Attention</span></template>
-              <template x-if="status(h) === 'ok' && showCounts(h) && data(h).summary.maybe"><span><b x-text="data(h).summary.maybe"></b>Maybe</span></template>
-            </div>
-          </template>
-          <template x-if="pending(h) && !pwRefused(h)"><p class="host-msg"><b>This agent wants a password.</b></p></template>
-          <template x-if="pwShown(h) && pwRefused(h)"><p class="host-msg"><b>That password was refused.</b> Check it and try again.</p></template>
-          <template x-if="pwShown(h) && pwMessage(h)"><p class="host-msg" x-text="pwMessage(h)"></p></template>
-          <template x-if="status(h) === 'unreachable'"><p class="host-msg">Not answering. <b x-text="data(h).last_answer ? 'Last seen ' + ago(data(h).last_answer) + '.' : 'Not seen yet.'"></b> <span x-show="(data(h).items || []).length">The rows are what it said then.</span></p></template>
-          <template x-if="pwShown(h)">
-            <div>
-              <div class="pass">
-                <input class="input" :class="{ bad: pwRefused(h) }" type="password" placeholder="password" aria-label="Agent password" autocomplete="off" x-model="ui.pw[h.id]" @keydown.enter="authenticate(h)">
-                <button class="btn btn-sm btn-primary" type="button" :disabled="!!ui.busy['pw:' + h.id]" @click="authenticate(h)">Authenticate</button>
-                <template x-if="!pending(h)"><button class="btn btn-sm btn-quiet" type="button" @click="ui.pwOpen[h.id] = false; ui.pwState[h.id] = null">Cancel</button></template>
+        <!-- Disk space: one bar per filesystem, up to three -->
+        <template x-if="spaces(c).length">
+          <div class="space">
+            <template x-for="f in spaceShown(c)" :key="f.id || f.mountpoint">
+              <div class="sp-row" :class="spaceStep(f)" :data-pct="pct(f)">
+                <span class="sp-mount" x-text="f.mountpoint" :title="f.mountpoint"></span>
+                <span class="sp-bar" role="img" :aria-label="f.mountpoint + ', ' + (f.status === 'unavailable' ? 'not mounted' : pct(f) + '% used')"><i :style="'width:' + spaceFill(f) + '%'"><b x-text="spaceInside(f)"></b></i></span>
+                <span class="sp-text" x-text="spaceText(f)"></span>
               </div>
-              <p class="pass-help">It is the <span class="mono">token:</span> line in the agent's config file on that machine.</p>
-            </div>
-          </template>
-          <template x-if="(status(h) === 'ok' || status(h) === 'unreachable') && sortedRows(h).length">
-            <div class="host-body">
-              <div class="drive-cols"><span></span><span x-text="hasPools(h) ? 'Drive or pool' : 'Drive'"></span><span>Serial</span><span class="r">Temp</span><span class="r">Written</span></div>
-              <template x-for="it in showRows(h)" :key="it.id">
-                <div class="rw">
-                  <template x-if="it.type === 'pool'" data-use="tpl-pool-row"></template>
-                  <template x-if="it.type === 'drive'" data-use="tpl-host-row"></template>
-                </div>
-              </template>
-              <template x-if="folded(h).length"><div class="more-rows"><button class="btn btn-sm" type="button" @click="ui.more[h.id] = true" x-text="'and ' + folded(h).length + ' more'"></button><span class="dim" x-text="foldText(h)"></span></div></template>
-            </div>
-          </template>
-          <div class="foot"><span x-text="hostFoot(h)"></span><template x-if="!h.hidden"><button class="eye" type="button" aria-label="Hide this card" title="Hide this card" @click="toggleHidden(h)"><svg aria-hidden="true"><use href="#eye"/></svg></button></template><template x-if="h.hidden"><button class="eye" type="button" aria-label="Hidden. Show this card again" title="Hidden, click to un-hide" @click="toggleHidden(h)"><svg aria-hidden="true"><use href="#eye-shut"/></svg></button></template></div>
-        </article>
-      </template>
+            </template>
+            <template x-if="spaceMore(c)"><div class="sp-more" x-text="'and ' + spaceMore(c) + ' more'"></div></template>
+          </div>
+        </template>
 
-      <!-- The + card: one for the page, always last. -->
-      <template x-if="!add.open">
-        <button class="card ghost" type="button" aria-expanded="false" aria-label="Add field agents and replicas" @click="openAdd()">
-          <span class="plus" aria-hidden="true">+</span>
-          <span class="ghost-sub">Field agents and replicas.</span>
-        </button>
-      </template>
-      <template x-if="add.open">
-        <div class="card ghost-open" role="region" aria-label="Add">
-          <div class="add-head"><button class="plus-close" type="button" aria-label="Close" title="Close" aria-expanded="true" @click="closeAdd()">+</button><h3>Add</h3></div>
+        <!-- Health, and the Details chevron in its colour -->
+        <template x-if="health(c)">
+          <div class="c-health">
+            <template x-if="health(c) === 'attention'"><span class="h-att">Attention</span></template>
+            <template x-if="health(c) === 'attention' && failed(c)"><span class="h-fail">Health <b>FAILED</b></span></template>
+            <template x-if="health(c) === 'maybe'"><span class="h-maybe">Maybe</span></template>
+            <template x-if="health(c) === 'ok'"><span class="h-ok">Health OK</span></template>
+            <template x-if="health(c) === 'unknown'"><span class="h-unk"><span class="ghost-dot" aria-hidden="true"></span>Health not known</span></template>
+            <template x-if="hasDetails(c)">
+              <button class="chev" :class="health(c)" type="button" :aria-expanded="isOpen(c) ? 'true' : 'false'" :aria-label="isOpen(c) ? 'Hide details' : 'Details'" title="Details" @click="toggleOpen(c)"><svg aria-hidden="true"><use href="#chevron"/></svg></button>
+            </template>
+          </div>
+        </template>
+        <template x-if="unsupportedNote(c) && !isOpen(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
+        <template x-if="c.kind === 'pool' && vanished(c.it)"><p class="c-note">Not served to Home Assistant, which reports this pool as missing.</p></template>
+
+        <!-- The problem window: every flagged row -->
+        <template x-if="!isOpen(c) && problems(c).length">
+          <div class="pw" :class="problemTone(c)">
+            <template x-for="p in problems(c)" :key="p.key">
+              <div class="pw-row" :class="p.mark"><span class="pw-label"><span x-text="p.label"></span><template x-if="p.expect"><small x-text="' (' + p.expect + ')'"></small></template></span><span class="pw-val" x-text="p.value"></span></div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Details, in place of the problem window -->
+        <template x-if="isOpen(c) && c.kind === 'drive'">
+          <div class="details">
+            <template x-if="unsupportedNote(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
+            <dl class="kv">
+              <template x-for="r in rows(c.it)" :key="r.key + r.name">
+                <div :class="r.mark"><dt x-text="r.name"></dt><dd><span class="v" x-text="r.value"></span><template x-if="r.expect && (r.mark === 'crit' || r.mark === 'warn')"><small x-text="' (' + r.expect + ')'"></small></template><template x-if="r.note"><small x-text="' ' + r.note"></small></template></dd></div>
+              </template>
+              <div><dt>Data Read</dt><dd><template x-if="vol(c.it, 'read')"><span><span class="v" x-text="tb(vol(c.it, 'read').bytes)"></span><small x-text="' ' + volNote(vol(c.it, 'read'))"></small></span></template><template x-if="!vol(c.it, 'read')"><small>this drive does not report it</small></template></dd></div>
+              <div><dt>Device Statistics</dt><dd><span class="v" x-text="devstatText(c.it)"></span></dd></div>
+            </dl>
+            <template x-if="spaces(c).length">
+              <div class="fs-list">
+                <template x-for="f in spaces(c)" :key="f.id || f.mountpoint">
+                  <div class="fs-line"><span><span class="mono" x-text="f.mountpoint"></span> <small x-text="f.fstype"></small></span><span class="fs-used" x-text="spaceUsed(f)"></span></div>
+                </template>
+              </div>
+            </template>
+            <template x-if="reportKind(c.it) === 'ata'">
+              <div>
+                <div class="table-wrap">
+                  <table class="attrs">
+                    <thead><tr><th class="num">ID</th><th>Name</th><th class="num">Value</th><th class="num">Worst</th><th class="num">Thresh</th><th class="num">Raw</th></tr></thead>
+                    <tbody>
+                      <template x-for="a in ataTable(c.it)" :key="a.id">
+                        <tr :class="a.mark"><td class="num" x-text="a.id"></td><td x-text="a.name"></td><td class="num" x-text="a.value"></td><td class="num" x-text="a.worst"></td><td class="num" x-text="a.thresh"></td><td class="num"><template x-if="c.src !== 'replicas'"><span x-text="a.raw"></span></template><template x-if="c.src === 'replicas'"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(c.it, 'ata', a.name, $event.target.value)"></template></td></tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+                <template x-if="devstatTable(c.it).length">
+                  <div class="table-wrap">
+                    <table class="attrs">
+                      <thead><tr><th class="num">Page</th><th>Device Statistics</th><th class="num">Value</th></tr></thead>
+                      <tbody>
+                        <template x-for="e in devstatTable(c.it)" :key="e.key">
+                          <tr :class="e.mark"><td class="num" x-text="e.page"></td><td x-text="e.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && e.editable)"><span x-text="e.value"></span></template><template x-if="c.src === 'replicas' && e.editable"><input class="input raw-in" :value="e.value" inputmode="numeric" :aria-label="'Value of ' + e.name" @change="editRaw(c.it, 'devstat', null, $event.target.value)"></template></td></tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="reportKind(c.it) === 'nvme'">
+              <div class="table-wrap">
+                <table class="attrs">
+                  <thead><tr><th>Field</th><th class="num">Value</th></tr></thead>
+                  <tbody>
+                    <template x-for="f in nvmeTable(c.it)" :key="f.name">
+                      <tr :class="f.mark"><td x-text="f.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && f.editable)"><span x-text="f.value"></span></template><template x-if="c.src === 'replicas' && f.editable"><input class="input raw-in" :value="f.value" inputmode="numeric" :aria-label="'Value of ' + f.name" @change="editRaw(c.it, 'nvme', f.name, $event.target.value)"></template></td></tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="isOpen(c) && c.kind === 'pool'">
+          <div class="details">
+            <template x-if="poolDisks(c.it).length">
+              <div class="table-wrap">
+                <table class="attrs" :aria-label="'Disks in pool ' + c.it.pool.name">
+                  <thead><tr><th>Disk</th><th>State</th><th class="num">Read</th><th class="num">Write</th><th class="num">Cksum</th></tr></thead>
+                  <tbody>
+                    <template x-for="d in poolDisks(c.it)" :key="d.name">
+                      <tr :class="d.bad ? 'crit' : ''"><td x-text="d.name"></td><td x-text="d.state"></td><td class="num" x-text="d.read"></td><td class="num" x-text="d.write"></td><td class="num" x-text="d.cksum"></td></tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+            <p class="c-note" x-show="poolFoot(c.it)" x-text="poolFoot(c.it)"></p>
+            <template x-if="spaces(c).length">
+              <div class="fs-list">
+                <template x-for="f in spaces(c)" :key="f.id || f.mountpoint">
+                  <div class="fs-line"><span><span class="mono" x-text="f.mountpoint"></span> <small x-text="f.fstype"></small></span><span class="fs-used" x-text="spaceUsed(f)"></span></div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- A field agent with nothing to show yet, and this app's agent down -->
+        <template x-if="c.kind === 'machine'">
+          <div class="m-body">
+            <template x-if="machineText(c)"><p class="m-msg" x-text="machineText(c)"></p></template>
+            <template x-if="pending(c.h)">
+              <div>
+                <p class="m-msg" x-show="!pwRefused(c.h)"><b>This agent wants a password.</b></p>
+                <p class="m-msg" x-show="pwRefused(c.h)"><b>That password was refused.</b> Check it and try again.</p>
+                <p class="m-msg" x-show="pwMessage(c.h)" x-text="pwMessage(c.h)"></p>
+                <div class="pass">
+                  <input class="input" :class="{ bad: pwRefused(c.h) }" type="password" placeholder="password" aria-label="Agent password" autocomplete="off" x-model="ui.pw[c.h.id]" @keydown.enter="authenticate(c.h)">
+                  <button class="btn btn-sm btn-primary" type="button" :disabled="!!ui.busy['pw:' + c.h.id]" @click="authenticate(c.h)">Authenticate</button>
+                </div>
+                <p class="pass-help">It is the <span class="mono">token:</span> line in the agent's config file on that machine.</p>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="c.kind === 'down'">
+          <div class="m-body">
+            <p class="m-msg">The app may still be starting. This page asks again every 8 seconds. If it stays like this, read the <a :href="appPage('logs')" target="_top">Mission Log</a>.</p>
+            <p class="m-msg dim" x-text="countdown"></p>
+          </div>
+        </template>
+
+        <!-- Replica presets: one per scenario, applied on click -->
+        <template x-if="c.src === 'replicas' && c.kind !== 'filesystem' && scenOptions(c.it).length">
+          <div class="presets" role="group" aria-label="Scenario">
+            <template x-for="o in scenOptions(c.it)" :key="o.id">
+              <button class="preset" type="button" :class="{ on: o.id === scenCurrent(c.it) }" :aria-pressed="o.id === scenCurrent(c.it) ? 'true' : 'false'" :disabled="!!ui.busy['scen:' + c.id]" @click="applyPreset(c, o)" x-text="presetName(o)"></button>
+            </template>
+          </div>
+        </template>
+
+        <div class="c-spacer"></div>
+        <template x-if="asked(c)">
+          <div class="ask remove" role="group" aria-label="Confirm removal"><span x-text="removeText(c)"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.ask.busy" @click="confirmRemove(c)">Remove</button><button class="btn btn-sm btn-quiet" type="button" @click="ui.ask = null">Cancel</button></span><span class="ask-err" x-show="ui.ask.err" x-text="ui.ask.err"></span></div>
+        </template>
+        <div class="c-foot">
+          <span class="seen" x-text="lastSeen(c)"></span>
+          <span class="act-note" x-show="ui.note['dl:' + c.id]" x-text="ui.note['dl:' + c.id]"></span>
+          <span class="icons">
+            <template x-if="canDownload(c)"><button class="icon" type="button" aria-label="Save as replica" title="Save as replica" @click="download(c)"><svg aria-hidden="true"><use href="#download"/></svg></button></template>
+            <template x-if="canHide(c) && !isHidden(c)"><button class="icon" type="button" aria-label="Hide this card" title="Hide this card" @click="setHidden(c, true)"><svg aria-hidden="true"><use href="#eye"/></svg></button></template>
+            <template x-if="canHide(c) && isHidden(c)"><button class="icon" type="button" aria-label="Hidden. Show this card again" title="Hidden, click to show it again" @click="setHidden(c, false)"><svg aria-hidden="true"><use href="#eye-shut"/></svg></button></template>
+            <template x-if="canRemove(c)"><button class="icon" type="button" :aria-expanded="asked(c) ? 'true' : 'false'" aria-label="Remove this card" title="Remove" @click="askRemove(c)"><svg aria-hidden="true"><use href="#trash"/></svg></button></template>
+          </span>
+        </div>
+      </article>
+    </template>
+
+    <!-- The + card: one for the page, always last, never dragged. -->
+    <template x-if="!add.open">
+      <button class="card ghost" type="button" aria-expanded="false" aria-label="Add field agents and replicas" @click="openAdd()">
+        <span class="plus" aria-hidden="true">+</span>
+        <span class="ghost-sub">Field agents and replicas</span>
+      </button>
+    </template>
+    <template x-if="add.open">
+      <div class="card ghost-open" role="region" aria-label="Add">
+        <div class="add-head"><button class="plus-close" type="button" aria-label="Close" title="Close" aria-expanded="true" @click="closeAdd()">+</button><h3>Add</h3></div>
+
+        <section class="area" aria-label="Network">
+          <h4>Network</h4>
           <div class="add-line">
             <span class="pair"><span class="lbl net">Network:</span><input class="input" x-model="add.block" @input="fieldsChanged()" @keydown.enter="scan()" aria-label="Network block" spellcheck="false" autocomplete="off"></span>
             <span class="pair"><span class="lbl">Port</span><input class="input port" x-model="add.port" @input="fieldsChanged()" @keydown.enter="scan()" aria-label="Port" inputmode="numeric" autocomplete="off"></span>
@@ -334,14 +272,17 @@
             <div class="pick" role="group" aria-label="Agents that answered">
               <div class="pick-head"><span></span><span>Host</span><span>Address</span><span>Agent</span><span>Drives</span><span></span></div>
               <template x-for="r in pickRows" :key="r.id">
-                <label class="pick-row" :class="{ on: !r.added && add.ticks[r.id], done: r.added }"><input class="tick" type="checkbox" :checked="!r.added && !!add.ticks[r.id]" :disabled="r.added" @change="add.ticks[r.id] = $event.target.checked"><span class="h" x-text="r.added ? r.hostname + ', already a field agent' : r.hostname"></span><span class="a" x-text="r.address + ':' + r.port"></span><span class="v" x-text="r.version ? 'agent ' + r.version : ''"></span><span class="d" x-text="driveCount(r.drives)"></span><span class="k"><template x-if="r.auth === 'password'"><svg class="lock" role="img" aria-label="wants a password"><use href="#lock"/></svg></template></span></label>
+                <label class="pick-row" :class="{ on: !r.added && add.ticks[r.id], done: r.added }"><input class="tick" type="checkbox" :checked="!r.added && !!add.ticks[r.id]" :disabled="r.added" @change="add.ticks[r.id] = $event.target.checked"><span class="h" x-text="r.added ? r.hostname + ', already added' : r.hostname"></span><span class="a" x-text="r.address + ':' + r.port"></span><span class="v" x-text="r.version ? 'agent ' + r.version : ''"></span><span class="d" x-text="driveCount(r.drives)"></span><span class="k"><template x-if="r.auth === 'password'"><svg class="lock" role="img" aria-label="wants a password"><use href="#lock"/></svg></template></span></label>
               </template>
             </div>
           </template>
           <template x-if="scanNone && !add.manualRows.length">
             <p class="scan-none">None answered on <span class="mono" x-text="add.scan.block"></span>, port <span class="mono" x-text="add.scan.port"></span>.</p>
           </template>
-          <div class="add-div">Add by hand</div>
+        </section>
+
+        <section class="area" aria-label="Add by hand">
+          <h4>Add by hand</h4>
           <div class="add-line">
             <span class="pair"><span class="lbl">Host or IP</span><input class="input host" placeholder="nas.lan or 10.0.20.14" aria-label="Host or IP" x-model="add.manualHost" @keydown.enter="check()" spellcheck="false" autocomplete="off"></span>
             <span class="pair"><span class="lbl">Port</span><input class="input port" x-model="add.manualPort" aria-label="Port" inputmode="numeric" autocomplete="off"></span>
@@ -350,38 +291,25 @@
           <template x-if="add.manualNone">
             <p class="scan-none">Nothing answered on <span class="mono" x-text="add.manualNone.host"></span>, port <span class="mono" x-text="add.manualNone.port"></span>.</p>
           </template>
-          <div class="add-div">Replicas</div>
-          <div class="replica-pick" role="group" aria-label="Replicas">
+          <p class="area-help" x-show="!add.manualNone">A machine found here joins the Network list, ticked.</p>
+        </section>
+
+        <section class="area" aria-label="Replicas">
+          <h4>Replicas</h4>
+          <div class="replica-pick" role="group" aria-label="Replica files">
             <template x-for="f in pickFiles" :key="f.id">
               <label :class="{ on: add.repTicks[f.id] }"><input class="tick" type="checkbox" :checked="!!add.repTicks[f.id]" @change="add.repTicks[f.id] = $event.target.checked"><span x-text="f.name"></span></label>
             </template>
             <div class="replica-up"><span x-text="folderOk ? 'Upload a replica' : 'Your replica folder is not available.'"></span><button class="btn btn-sm" type="button" :disabled="!folderOk || add.uploading" @click="$refs.upfile.click()">Choose file</button><span class="ext">.json</span><input type="file" accept=".json,application/json" hidden aria-label="Upload a replica" x-ref="upfile" @change="upload($event)"><span class="up-msg" x-show="add.upMsg" x-text="add.upMsg" role="alert"></span></div>
           </div>
-          <div class="add-foot"><template x-if="tickedLock"><span><svg class="lock" aria-hidden="true"><use href="#lock"/></svg> wants a password, asked for on its card after you add it</span></template><template x-if="add.err"><span class="add-err" role="alert" x-text="add.err"></span></template><button class="btn btn-primary" type="button" :disabled="!tickCount || add.busy" @click="addTicked()" x-text="tickCount ? 'Add ' + tickCount : 'Add'"></button></div>
-        </div>
-      </template>
-    </div>
-  </section>
+        </section>
 
-  <!-- ═══ Replicas ═══ -->
-  <section class="sec" aria-labelledby="h-rep">
-    <div class="sec-head"><h2 id="h-rep">Replicas</h2><span class="hatch"></span></div>
-    <p class="sec-sub">Fake drives for testing Home Assistant. Nothing here touches a real drive.</p>
-    <template x-if="replicasLoaded && !repItems.length">
-      <div class="replica-empty">
-        <img src="img/spy-head.png" alt="" width="120">
-        <p x-text="repFailed ? 'The replica agent is not answering. The Mission Log may say why.' : 'No replicas yet. Add one with +.'"></p>
+        <div class="add-foot"><template x-if="tickedLock"><span><svg class="lock" aria-hidden="true"><use href="#lock"/></svg> wants a password, asked for on its card after you add it</span></template><template x-if="add.err"><span class="add-err" role="alert" x-text="add.err"></span></template><button class="btn btn-primary" type="button" :disabled="!tickCount || add.busy" @click="addTicked()" x-text="tickCount ? 'Add ' + tickCount : 'Add'"></button></div>
       </div>
     </template>
-    <template x-if="repItems.length">
-      <div>
-        <div class="toolbar"><span class="replica-count" x-text="plural(repItems.length, 'replica', 'replicas')"></span></div>
-        <div class="grid-2">
-          <template x-for="it in repItems" :key="it.id" data-use="tpl-drive"></template>
-        </div>
-      </div>
-    </template>
-  </section>
+  </div>
+  <p class="rules-line" x-show="rulesLine" x-text="rulesLine"></p>
+  <div id="drag-layer" x-ignore aria-hidden="true"></div>
 
   <footer class="app-foot">
     <a :href="appPage('logs')" target="_top">Mission Log</a>
