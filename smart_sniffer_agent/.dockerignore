@@ -5,3 +5,5 @@ web/test_proxy.py
 .pytest_cache
 web/devserver.py
 web/test_page.py
+web/test_page_proxy.py
+web/conftest.py

@@ -81,17 +81,6 @@ def server():
     proc.wait(5)
 
 
-@pytest.fixture(scope="session")
-def browser():
-    with playwright_api.sync_playwright() as p:
-        kwargs = {}
-        if os.environ.get("PW_CHROMIUM"):
-            kwargs["executable_path"] = os.environ["PW_CHROMIUM"]
-        b = p.chromium.launch(**kwargs)
-        yield b
-        b.close()
-
-
 class Page:
     """A page on the dev harness with a log of every request it made."""
 
