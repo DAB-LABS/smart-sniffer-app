@@ -48,6 +48,7 @@ CORS. Python standard library only.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import importlib
 import ipaddress
@@ -1842,6 +1843,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     agent_port: int = 9099
     mock_port: int = 9100
+    static_dir: str = STATIC_DIR
     token: str = ""
     app_version: str | None = None
     agent_host: str = DEFAULT_AGENT_HOST
@@ -3023,27 +3025,32 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error(502, f"Proxy error: {type(e).__name__}")
 
     def _serve_static(self, path: str):
-        """Serve a static file from STATIC_DIR."""
-        # Default to index.html
+        """Serve a static file from static_dir.
+
+        The page names its scripts and stylesheet with a ?v= of their
+        content, so a browser fetches cc.js again the moment it changes and
+        never runs an old script against a new page. Those versioned URLs
+        may be cached for good; everything else is revalidated by ETag.
+        """
         if path == "/" or path == "":
             path = "/index.html"
 
         # Security: prevent directory traversal
+        root = os.path.realpath(self.static_dir)
         safe_path = os.path.normpath(path).lstrip("/")
-        file_path = os.path.join(STATIC_DIR, safe_path)
-
-        if not file_path.startswith(STATIC_DIR):
+        file_path = os.path.realpath(os.path.join(root, safe_path))
+        if file_path != root and not file_path.startswith(root + os.sep):
             self.send_error(403, "Forbidden")
             return
 
         if not os.path.isfile(file_path):
             # Fall back to index.html for SPA routing
-            file_path = os.path.join(STATIC_DIR, "index.html")
+            file_path = os.path.join(root, "index.html")
             if not os.path.isfile(file_path):
                 self.send_error(404, "Not Found")
                 return
+        is_page = os.path.basename(file_path) == "index.html"
 
-        # Determine content type
         content_type, _ = mimetypes.guess_type(file_path)
         if content_type is None:
             content_type = "application/octet-stream"
@@ -3051,20 +3058,46 @@ class ProxyHandler(BaseHTTPRequestHandler):
         try:
             with open(file_path, "rb") as f:
                 content = f.read()
-
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(content)))
-            # Cache static assets (except index.html)
-            if safe_path != "index.html":
-                self.send_header("Cache-Control", "public, max-age=86400")
-            else:
-                self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(content)
-
-        except IOError:
+        except OSError:
             self.send_error(500, "Internal Server Error")
+            return
+        if is_page:
+            content = _version_assets(content, root)
+
+        etag = '"' + hashlib.md5(content).hexdigest() + '"'
+        versioned = not is_page and "v=" in (urlparse(self.path).query or "")
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", _IMMUTABLE if versioned else "no-cache")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", _IMMUTABLE if versioned else "no-cache")
+        self.end_headers()
+        self.wfile.write(content)
+
+
+_IMMUTABLE = "public, max-age=31536000, immutable"
+_ASSET_REF = re.compile(rb'(\s(?:src|href)=")([A-Za-z0-9_.-]+\.(?:js|css))(")')
+
+
+def _version_assets(page: bytes, root: str) -> bytes:
+    """Give each local script and stylesheet the page names a ?v= of its
+    content, so a cached copy from an older build is never used."""
+    def stamp(match: re.Match[bytes]) -> bytes:
+        name = match.group(2).decode()
+        try:
+            with open(os.path.join(root, name), "rb") as f:
+                digest = hashlib.md5(f.read()).hexdigest()[:12]
+        except OSError:
+            return match.group(0)
+        return match.group(1) + match.group(2) + b"?v=" + digest.encode() + match.group(3)
+
+    return _ASSET_REF.sub(stamp, page)
 
 
 def main():
@@ -3086,12 +3119,15 @@ def main():
                         help="The agent's mDNS name, shown on the page (empty: none)")
     parser.add_argument("--ha-cache-seconds", type=float, default=HA_API_CACHE_SECONDS,
                         help="How long /ha/devices is cached")
+    parser.add_argument("--static-dir", type=str, default=STATIC_DIR,
+                        help="Where the page, its scripts and images are")
     parser.add_argument("--data-dir", type=str, default="/data",
                         help="Where fleet-cache.json is kept (empty: memory only)")
     args = parser.parse_args()
 
     ProxyHandler.agent_port = args.agent_port
     ProxyHandler.mock_port = args.mock_port
+    ProxyHandler.static_dir = args.static_dir
     ProxyHandler.token = args.token
     ProxyHandler.app_version = args.app_version
     ProxyHandler.agent_host = args.agent_host.strip() or DEFAULT_AGENT_HOST
