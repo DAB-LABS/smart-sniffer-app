@@ -2317,6 +2317,152 @@ def test_card_remove_placeholder_and_refusals(proxy, field):
     assert proxy.request("DELETE", "/cards/self")[0] == 404
 
 
+def _probe_added(proxy, field, address: str = "127.0.0.2") -> bool:
+    status, row = proxy.post("/fleet/probe", {"host": address, "port": field})
+    assert status == 200, row
+    return row["added"]
+
+
+@needs_rules
+def test_card_remove_counts_filesystem_cards(proxy, field, data_dir):
+    # A drive and a FILESYSTEM card: the drive going leaves the machine
+    # stored, as the filesystem is still on the page; hidden, it still counts.
+    key = f"127.0.0.2:{field}"
+    FIELD["127.0.0.2"].drives = [simple_drive("sda", "NUC-1")]
+    FIELD["127.0.0.2"].filesystems = [_fs("fs-l", "/data", "/dev/md0", "xfs")]
+    _store({"address": "127.0.0.2", "port": field})
+    STATE.options["hidden_cards"] = [f"{key}|fs:fs-l"]
+    _refresh_hosts(proxy)
+    _, read = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert [c["card_id"] for c in read["filesystem_cards"]] == [f"{key}|fs:fs-l"]
+    status, body = proxy.request("DELETE", f"/cards/{quote(f'{key}|NUC-1', safe='')}")
+    assert status == 200 and body == {"removed": f"{key}|NUC-1", "host_removed": False}
+    assert STATE.options["hosts"] == [{"address": "127.0.0.2", "port": field, "removed": ["NUC-1"]}]
+    _, read = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert read["items"] == [] and [c["card_id"] for c in read["filesystem_cards"]] == [f"{key}|fs:fs-l"]
+    _refresh_hosts(proxy)
+    assert _probe_added(proxy, field) is True
+    # The FILESYSTEM card was the last one: the machine goes, and a check
+    # finds it not added.
+    status, body = proxy.request("DELETE", f"/cards/{quote(f'{key}|fs:fs-l', safe='')}")
+    assert body == {"removed": f"{key}|fs:fs-l", "host_removed": True}
+    assert STATE.options["hosts"] == [] and STATE.options["hidden_cards"] == []
+    cache = json.loads((data_dir / "fleet-cache.json").read_text(encoding="utf-8"))
+    assert key not in cache["hosts"]
+    _refresh_hosts(proxy)
+    assert _probe_added(proxy, field) is False
+
+
+@needs_rules
+def test_card_remove_the_only_card(proxy, field):
+    key = f"127.0.0.2:{field}"
+    FIELD["127.0.0.2"].drives = [simple_drive("sda", "NUC-1")]
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    status, body = proxy.request("DELETE", f"/cards/{quote(f'{key}|NUC-1', safe='')}")
+    assert status == 200 and body == {"removed": f"{key}|NUC-1", "host_removed": True}
+    assert STATE.options["hosts"] == []
+    _refresh_hosts(proxy)
+    assert _probe_added(proxy, field) is False
+
+
+@needs_rules
+def test_card_remove_reads_again_when_the_last_read_lacks_the_card(proxy, field):
+    # The machine changed since its last read: the card is not in it, so the
+    # machine is read before its cards are counted.
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    FIELD["127.0.0.2"].drives = [simple_drive("sdc", "NUC-3")]
+    FIELD["127.0.0.2"].filesystems = [_fs("fs-l", "/data", "/dev/md0", "xfs")]
+    status, body = proxy.request("DELETE", f"/cards/{quote(f'{key}|NUC-3', safe='')}")
+    assert status == 200 and body["host_removed"] is False
+    assert STATE.options["hosts"] == [{"address": "127.0.0.2", "port": field, "removed": ["NUC-3"]}]
+    status, body = proxy.request("DELETE", f"/cards/{quote(f'{key}|fs:fs-l', safe='')}")
+    assert status == 200 and body["host_removed"] is True
+    assert STATE.options["hosts"] == []
+
+
+@needs_rules
+def test_scan_and_check_count_only_machines_with_cards(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field, "removed": ["NUC-1"]},
+           {"address": "127.0.0.3", "port": field, "password": FIELD_PASSWORD})
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    # One drive left: added, by hand and in a scan.
+    assert _probe_added(proxy, field) is True
+    status, started = proxy.post("/fleet/scan", {"block": "127.0.0.0/29", "port": field})
+    rows = {r["address"]: r for r in _wait_scan(proxy, started["scan_id"])["found"]}
+    assert rows["127.0.0.2"]["added"] is True and rows["127.0.0.3"]["added"] is True
+    # Every card removed: not added, so it can be ticked again.
+    STATE.options["hosts"][0]["removed"] = ["NUC-1", "NUC-2"]
+    _refresh_hosts(proxy)
+    assert _probe_added(proxy, field) is False
+    status, started = proxy.post("/fleet/scan", {"block": "127.0.0.0/29", "port": field})
+    rows = {r["address"]: r for r in _wait_scan(proxy, started["scan_id"])["found"]}
+    assert rows["127.0.0.2"]["added"] is False and rows["127.0.0.3"]["added"] is True
+    # A machine never read shows its own card: added.
+    assert _probe_added(proxy, field, "127.0.0.3") is True
+
+
+@needs_rules
+def test_adding_a_stored_machine_brings_its_cards_back(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field, "removed": ["NUC-1"]})
+    _refresh_hosts(proxy)
+    _, read = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert [i["id"] for i in read["items"]] == ["sdb"]
+    STATE.calls.clear()
+    status, body = proxy.post("/fleet/hosts", {"hosts": [{"address": "127.0.0.2", "port": field}]})
+    assert status == 201 and body["skipped"] == []
+    assert [h["id"] for h in body["added"]] == [key]
+    assert len(_option_writes()) == 1
+    assert STATE.options["hosts"] == [{"address": "127.0.0.2", "port": field}]
+    _, read = proxy.get(f"/fleet/hosts/{key}/drives")
+    assert [i["id"] for i in read["items"]] == ["sda", "sdb"]
+    # Stored with nothing removed: skipped as before, no write.
+    status, body = proxy.post("/fleet/hosts", {"hosts": [{"address": "127.0.0.2", "port": field}]})
+    assert body["added"] == [] and body["skipped"] == [
+        {"address": "127.0.0.2", "port": field, "reason": "already_added"}]
+    assert len(_option_writes()) == 1
+
+
+@needs_rules
+def test_a_machine_with_every_card_removed_is_dropped_on_read(proxy, field, data_dir):
+    # Left by an older version: stored, every card of its last read removed.
+    key = f"127.0.0.2:{field}"
+    FIELD["127.0.0.2"].drives = [simple_drive("sda", "NUC-1")]
+    FIELD["127.0.0.2"].filesystems = [_fs("fs-l", "/data", "/dev/md0", "xfs")]
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    _store({"address": "127.0.0.2", "port": field, "removed": ["NUC-1", "fs:fs-l"]},
+           {"address": "127.0.0.3", "port": field, "password": FIELD_PASSWORD})
+    STATE.options["card_order"] = [f"{key}|NUC-1", "self|SER-A", f"{key}|fs:fs-l"]
+    STATE.options["hidden_cards"] = [f"{key}|fs:fs-l"]
+    STATE.calls.clear()
+    hosts = _refresh_hosts(proxy)
+    assert [h["id"] for h in hosts] == [f"127.0.0.3:{field}"]
+    assert len(_option_writes()) == 1
+    assert STATE.options["hosts"] == [{"address": "127.0.0.3", "port": field,
+                                       "password": FIELD_PASSWORD}]
+    assert STATE.options["card_order"] == ["self|SER-A"] and STATE.options["hidden_cards"] == []
+    cache = json.loads((data_dir / "fleet-cache.json").read_text(encoding="utf-8"))
+    assert key not in cache["hosts"]
+    _refresh_hosts(proxy)
+    assert proxy.get("/cards")[0] == 200
+    assert len(_option_writes()) == 1  # once
+    assert _probe_added(proxy, field) is False
+    # One FILESYSTEM card not removed keeps it.
+    proxy.post("/fleet/hosts", {"hosts": [{"address": "127.0.0.2", "port": field}]})
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    STATE.options["hosts"][-1]["removed"] = ["NUC-1"]
+    assert key in [h["id"] for h in _refresh_hosts(proxy)]
+
+
 @needs_mock
 @needs_rules
 def test_card_replica_download_and_remove(proxy):

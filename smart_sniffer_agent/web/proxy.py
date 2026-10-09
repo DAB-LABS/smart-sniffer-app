@@ -1638,6 +1638,37 @@ def without_removed(response: dict[str, Any], removed: list[str]) -> dict[str, A
             "summary": summarize(items, response.get("status") == "ok")}
 
 
+def card_keys(host_key: str, response: Any) -> set[str]:
+    """The key of every card a read of a machine has: its drives, pools and
+    FILESYSTEM cards, removed with the trash or not. A read cached before
+    cards had ids gets them as the stale read would give them."""
+    if not isinstance(response, dict):
+        return set()
+    keys: set[str] = set()
+    for item in response.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        cid = item.get("card_id")
+        if not cid:
+            cid = card_id(host_key, f"pool:{(item.get('pool') or {}).get('name')}"
+                          if item.get("type") == "pool"
+                          else drive_card_key(item.get("drive") or {}, str(item.get("id"))))
+        keys.add(str(split_card_id(cid)[1]))
+    for card in response.get("filesystem_cards") or []:
+        if isinstance(card, dict) and card.get("card_id"):
+            keys.add(str(split_card_id(card["card_id"])[1]))
+    return keys
+
+
+def every_card_removed(host: dict[str, Any], response: Any) -> bool:
+    """True when the machine's last read had cards and every one of them is
+    removed with the trash, so the page shows nothing of it. Hidden cards
+    count as shown: hiding is for a while. A machine never read shows its
+    own card, so it is not one of these."""
+    keys = card_keys(host_id(host["address"], host["port"]), response)
+    return bool(keys) and keys <= set(host.get("removed") or [])
+
+
 # Options of older versions, removed at start when the Supervisor does not
 # report the schema to compare with.
 REMOVED_OPTIONS = ("mock_mode",)
@@ -1674,8 +1705,9 @@ class HostStore:
 
     MEMO_SECONDS = 5
 
-    def __init__(self, supervisor: Supervisor) -> None:
+    def __init__(self, supervisor: Supervisor, cache: FleetCache | None = None) -> None:
         self.sv = supervisor
+        self.cache = cache
         self.lock = threading.Lock()
         self.last_known: list[dict[str, Any]] | None = None
         self._memo_at = 0.0
@@ -1718,8 +1750,47 @@ class HostStore:
                 self._save({k: v for k, v in options.items() if k not in stale})
             return stale
 
+    def _response(self, host: dict[str, Any]) -> Any:
+        if self.cache is None:
+            return None
+        return self.cache.get(host_id(host["address"], host["port"])).get("response")
+
+    def shows_cards(self, host: dict[str, Any]) -> bool:
+        """False for a stored machine whose every card is removed."""
+        return not every_card_removed(host, self._response(host))
+
+    def _repair(self, options: dict[str, Any]) -> dict[str, Any]:
+        """Options read now, without the stored machines whose every card is
+        removed, such as one left behind when its last drive went while a
+        FILESYSTEM card was still counted. They go in one write, with their
+        card ids and their cache entries."""
+        hosts = _normalize_hosts(options.get("hosts"))
+        if all(self.shows_cards(h) for h in hosts):
+            return options
+        dropped: list[str] = []
+
+        def change(state: dict[str, Any]) -> dict[str, Any] | None:
+            dropped.clear()
+            dropped.extend(host_id(h["address"], h["port"]) for h in state["hosts"]
+                           if not self.shows_cards(h))
+            if not dropped:
+                return None
+            state["hosts"] = [h for h in state["hosts"]
+                              if host_id(h["address"], h["port"]) not in dropped]
+            for key in ("card_order", "hidden_cards"):
+                state[key] = [i for i in state[key] if split_card_id(i)[0] not in dropped]
+            return state
+
+        state = self.write_all(change)
+        for key in dropped:
+            if self.cache is not None:
+                self.cache.drop(key)
+            log(f"Field agent {key} dropped: every card of it was removed")
+        return {**options, "hosts": [_serialize_host(h) for h in state["hosts"]],
+                "card_order": state["card_order"], "hidden_cards": state["hidden_cards"]}
+
     def hosts(self) -> list[dict[str, Any]]:
-        hosts = _normalize_hosts(self._options().get("hosts"))
+        hosts = _normalize_hosts(self._repair(self._options()).get("hosts"))
         self.last_known = hosts
         self._memo_at = time.monotonic()
         return hosts
@@ -1748,7 +1819,7 @@ class HostStore:
 
     def cards(self) -> dict[str, Any]:
         """The stored hosts, card order and hidden cards, read now."""
-        options = self._options()
+        options = self._repair(self._options())
         hosts = _normalize_hosts(options.get("hosts"))
         self.last_known = hosts
         self._memo_at = time.monotonic()
@@ -2087,7 +2158,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         def skip(address: str) -> bool:
             return address in own or (hassio is not None and ipaddress.IPv4Address(address) in hassio)
 
-        scan = self.scans.start(block, port, skip, self.host_store.hosts_quick(), self._own_hosts())
+        scan = self.scans.start(block, port, skip, self._added_hosts(), self._own_hosts())
         log(f"Scan {scan.id}: {block} port {port}, {scan.total} addresses")
         self._send_json(202, {"scan_id": scan.id, "total": scan.total})
 
@@ -2119,11 +2190,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             raise ApiError(504, "not_answering", f"nothing answered on {address}, port {port}")
         if row is None:
             raise ApiError(404, "not_an_agent", f"{address}, port {port} is not a SMART Sniffer agent")
-        stored = self.host_store.hosts_quick()
+        stored = self._added_hosts()
         keys = {(h["address"], h["port"]) for h in stored}
         row["added"] = (address, port) in keys or (
             (connect_to, port) in stored_keys(stored))
         self._send_json(200, row)
+
+    def _added_hosts(self) -> list[dict[str, Any]]:
+        """The stored machines a scan or a check marks as added: those with a
+        card still on the page, hidden or not."""
+        return [h for h in self.host_store.hosts_quick() if self.host_store.shows_cards(h)]
 
     # ── /fleet/hosts ──
 
@@ -2161,16 +2237,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
         def change(hosts: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
             added.clear()
             skipped.clear()
-            known = {host_id(h["address"], h["port"]) for h in hosts}
+            known = {host_id(h["address"], h["port"]): h for h in hosts}
+            new: list[dict[str, Any]] = []
             for host in wanted:
                 key = host_id(host["address"], host["port"])
-                if key in known:
+                stored = known.get(key)
+                if stored is not None and stored["removed"]:
+                    # Added again: the cards removed with the trash come back.
+                    stored["removed"] = []
+                    added.append(stored)
+                    continue
+                if stored is not None:
                     skipped.append({"address": host["address"], "port": host["port"],
                                     "reason": "already_added"})
                     continue
-                known.add(key)
+                known[key] = host
+                new.append(host)
                 added.append(host)
-            return hosts + added if added else None  # nothing new: no write
+            return hosts + new if added else None  # nothing new: no write
 
         self.host_store.write(change)
         now = utc_now()
@@ -2681,8 +2765,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             gone = {cid}
         else:
             response = self.cache.get(host_key).get("response")
-            shown = {split_card_id(c["card_id"])[1] for c in card_list(response)} \
-                if isinstance(response, dict) else set()
+            if key is not None and key not in card_keys(host_key, response):
+                # The last read does not have this card (or there is none):
+                # read the machine, so every card it has is counted.
+                target, _host = self._target(host_key)
+                self._read_agent(host_key, *target)
+                response = self.cache.get(host_key).get("response")
             outcome: dict[str, Any] = {}
 
             def change_host(state: dict[str, Any]) -> dict[str, Any]:
@@ -2692,8 +2780,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     raise ApiError(404, "not_found", "no such field agent")
                 if key is not None and key not in host["removed"]:
                     host["removed"].append(key)
-                # The last card of a machine takes the machine with it.
-                outcome["host"] = key is None or not (shown - set(host["removed"]))
+                # The last card of a machine takes the machine with it:
+                # drives, pools and FILESYSTEM cards all count, hidden or
+                # not, and those removed before are gone.
+                outcome["host"] = key is None or every_card_removed(host, response)
                 if outcome["host"]:
                     state["hosts"] = [h for h in state["hosts"] if h is not host]
                 return state
@@ -3136,11 +3226,11 @@ def main():
     ProxyHandler.supervisor = Supervisor(
         args.supervisor_url, os.environ.get("SUPERVISOR_TOKEN", "")
     )
-    ProxyHandler.host_store = HostStore(ProxyHandler.supervisor)
     ProxyHandler.ha_cache_seconds = args.ha_cache_seconds
     ProxyHandler.cache = FleetCache(
         os.path.join(args.data_dir, "fleet-cache.json") if args.data_dir else None
     )
+    ProxyHandler.host_store = HostStore(ProxyHandler.supervisor, ProxyHandler.cache)
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), ProxyHandler)
     server.daemon_threads = True
