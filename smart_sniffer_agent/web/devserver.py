@@ -39,6 +39,7 @@ Referer.
                                               scenario (as the old Test Lab left it), and
                                               the Device Statistics replica; none
     REPLICA_FOLDER  ok | missing | read_only  upload and save enabled or not
+    MDNS            on | off                  the agent's mDNS name in /app/info, or none
     LATENCY         seconds                   added to every route (default 0.02)
     SLUG, HOSTNAME, HA_VERSION                the app's slug, its agent host name, Home
                                               Assistant's version (2025.x and earlier
@@ -53,9 +54,16 @@ starts that copy afresh, as the page checks do before each page they open.
 The board's field agents: nas-01 (six drives: one at Attention with five
 problem rows, one Maybe, one not judged; disk space at 82%, 91% and 97%; a
 raidz1 pool tank with three datasets; a filesystem on /dev/md1 that belongs
-to no drive; in Home Assistant except its two newest drives), studio-mac
-(not answering, last answer 3 h ago), backup-pi (wants a password, it is
+to no drive; in Home Assistant except its two newest drives, and two of
+those carry thresholds set there: sdc at Attention with 8 reallocated
+sectors over its 5, sdd with 2 accepted under its 4), studio-mac (not
+answering, last answer 3 h ago), backup-pi (wants a password, it is
 fieldpass).
+
+Thresholds: a drive in Home Assistant uses the integration's, any other the
+app's own; GET and PUT /cards/<id>/thresholds and POST .../accept and
+.../reset answer as the proxy does, and /ha/add moves the app's into Home
+Assistant.
 
 A scan of 10.0.10.0/24 on port 9099 finds office-nuc (10.0.10.61, open),
 backup-pi (10.0.10.52, 401) and proxmox-01 (10.0.10.21), at 0.8 s, 1.6 s
@@ -123,6 +131,7 @@ DEFAULTS = {
     "SLUG": "local_smart_sniffer_agent",
     "HOSTNAME": "",
     "HA_VERSION": "2026.10.1",
+    "MDNS": "on",
 }
 # The switches that shape the in-memory world; a change rebuilds it.
 WORLD_KEYS = ("HOSTS", "POOL", "REPLICAS", "HA", "HA_SELF", "DRIVES", "VDISK")
@@ -190,10 +199,16 @@ HAVE_POOL_VIEW = PROXY is not None and callable(getattr(PROXY, "pool_view", None
 print(f"[dev] drive_view from {'proxy.py' if HAVE_DRIVE_VIEW else 'the stand-in'}")
 
 
-def evaluate(drive: dict) -> dict:
+def evaluate(drive: dict, overrides: dict | None = None) -> dict:
     if RULES is not None:
-        return RULES.evaluate(copy.deepcopy(drive))
+        return RULES.evaluate(copy.deepcopy(drive), overrides or None)
     return stand_in_evaluate(drive)
+
+
+def threshold_answer(card_id: str, source: str, drive: dict, overrides: dict) -> dict:
+    """GET /cards/<id>/thresholds, as the proxy answers it."""
+    verdict = RULES.evaluate(copy.deepcopy(drive), overrides)
+    return {"card_id": card_id, "source": source, "labels": verdict["limits"]}
 
 
 def _attrs(drive: dict) -> dict:
@@ -703,9 +718,9 @@ def field_catalog(flags) -> dict:
             ata_drive("sdb", "WDC WD80EFZZ 8TB", "VK0FGHIJ", "/dev/sdb", temp=41, poh=41230, cycles=88,
                       counters={5: 0, 197: 0, 198: 0, 196: 1}, written_tb=95.12, filler=8),
             ata_drive("sdc", "Seagate IronWolf 8TB", "ZA1B2C3D", "/dev/sdc", temp=38, poh=22140, cycles=41,
-                      counters={5: 0, 197: 0, 198: 0, 187: 0}, written_tb=48.70),
+                      counters={5: 8, 197: 0, 198: 0, 187: 0}, written_tb=48.70),
             ata_drive("sdd", "Seagate IronWolf 8TB", "ZA1B2C3E", "/dev/sdd", temp=37, poh=22140, cycles=41,
-                      counters={5: 0, 197: 0, 198: 0, 187: 0}, written_tb=47.95),
+                      counters={5: 2, 197: 0, 198: 0, 187: 0}, written_tb=47.95),
             unsupported_drive("sde", "JMicron USB to SATA bridge", "DD56419883961", "/dev/sde"),
             nvme_drive("nvme0", "Samsung SSD 990 EVO 1TB", "S7M3NS0X402118P", "/dev/nvme0n1", temp=45,
                        poh=3100, cycles=70, written_tb=14.62, read_tb=20.4),
@@ -952,6 +967,10 @@ class World:
             if flags["REPLICAS"] == "carried":
                 self.replicas[1]["scenario"] = None
                 self.add_replica("shipped.sata-hdd-devstat-uncorrectables")
+        # Thresholds by card id: the integration's (for cards in Home
+        # Assistant) and the app's own (for the rest).
+        self.int_thresholds: dict[str, dict] = {}
+        self.app_thresholds: dict[str, dict] = {}
         # Home Assistant: target -> {"entry_id", "devices": {serial or pool:<name>: device id}}
         self.ha: dict[str, dict] = {}
         if flags["HA"] == "installed":
@@ -965,6 +984,10 @@ class World:
                 c = self.catalog["10.0.10.20"]
                 self.ha["10.0.10.20:9099"] = self._entry("01J9ZK4T6QH2W8XG5N3B7RVD0C", c["drives"][:4],
                                                          c["pools"] or [])
+                # Two of them carry thresholds set in Home Assistant: sdc at 8
+                # reallocated sectors over its 5, sdd at 2 within its 4.
+                self.int_thresholds["10.0.10.20:9099|ZA1B2C3D"] = {"Reallocated Sector Count": 5}
+                self.int_thresholds["10.0.10.20:9099|ZA1B2C3E"] = {"Reallocated Sector Count": 4}
 
     @staticmethod
     def _entry(entry_id, drives, pools):
@@ -1052,6 +1075,30 @@ class World:
     def host(self, host_id: str) -> dict | None:
         return next((h for h in self.hosts if h["id"] == host_id), None)
 
+    def in_ha(self, flags, card_id: str) -> bool:
+        if flags["HA"] != "installed":
+            return False
+        host_id, _, key = card_id.partition("|")
+        entry = self.ha.get(host_id)
+        return bool(entry) and (key in entry["devices"] or flags["HA_LOOKUP"] == "entries_only")
+
+    def thresholds(self, flags, card_id: str) -> tuple[str, dict]:
+        """(source, overrides) in force for a drive card."""
+        if self.in_ha(flags, card_id):
+            return "integration", dict(self.int_thresholds.get(card_id) or {})
+        return "app", dict(self.app_thresholds.get(card_id) or {})
+
+    def set_thresholds(self, flags, card_id: str, overrides: dict) -> str:
+        source = "integration" if self.in_ha(flags, card_id) else "app"
+        store = self.int_thresholds if source == "integration" else self.app_thresholds
+        if overrides:
+            store[card_id] = dict(overrides)
+        else:
+            store.pop(card_id, None)
+        if source == "app":
+            self.options_writes += 1
+        return source
+
 
 # One world per set of shaping switches, so two pages open on different
 # switches (as the page checks do) do not rebuild each other's world.
@@ -1067,10 +1114,14 @@ def world_for(flags, fresh: bool = False) -> World:
 
 # ── Responses ────────────────────────────────────────────────────────────────
 
-def drive_item(drive: dict, flags, lab=None, stale=False) -> dict:
-    verdict = None if flags["RULES"] == "missing" else evaluate(drive)
+def drive_item(drive: dict, flags, lab=None, stale=False, world=None, host_id=None) -> dict:
+    source, overrides = "app", {}
+    if world is not None and host_id:
+        key = str(drive.get("serial") or "").strip() or f"id:{drive['id']}"
+        source, overrides = world.thresholds(flags, f"{host_id}|{key}")
+    verdict = None if flags["RULES"] == "missing" else evaluate(drive, overrides)
     item = {"type": "drive", "id": drive["id"], "drive": drive, "verdict": verdict,
-            "view": drive_view(drive, verdict), "lab": lab}
+            "view": drive_view(drive, verdict), "lab": lab, "thresholds_source": source}
     if stale:
         item["stale"] = True
     return item
@@ -1177,13 +1228,14 @@ def self_response(flags, world: World) -> dict:
     agent = {"hostname": agent_host(flags), "version": AGENT_VERSION, "os": "linux", "os_name": None,
              "uptime_seconds": int(time.time() - world.started) + 3600, "drives": len(drives), "pools": 0}
     if flags["AGENT"] == "down":
-        cached = world.self_cache if world.self_cache is not None else [drive_item(d, flags) for d in drives]
+        cached = world.self_cache if world.self_cache is not None else [
+            drive_item(d, flags, world=world, host_id="self") for d in drives]
         for i in cached:
             i["stale"] = True
         last = datetime.fromtimestamp(world.self_last_answer, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return drives_response("self", "self", "unreachable", None, cached, None, last, flags,
                                self_filesystems(flags))
-    items = [drive_item(d, flags) for d in drives]
+    items = [drive_item(d, flags, world=world, host_id="self") for d in drives]
     world.self_cache = copy.deepcopy(items)
     world.self_last_answer = time.time()
     return drives_response("self", "self", "ok", agent, items, iso(0), iso(0), flags, self_filesystems(flags))
@@ -1196,7 +1248,8 @@ def field_response(flags, world: World, host: dict) -> dict:
     agent = {"hostname": c["hostname"], "version": c["version"], "os": "linux", "os_name": c["os_name"],
              "uptime_seconds": c["uptime"], "drives": len(c["drives"]),
              "pools": len(c["pools"] or [])}
-    items = [drive_item(d, flags) for d in c["drives"]] + [pool_item(p, flags) for p in c["pools"] or []]
+    items = [drive_item(d, flags, world=world, host_id=host["id"]) for d in c["drives"]] + [
+        pool_item(p, flags) for p in c["pools"] or []]
     found = c.get("filesystems") or []
     removed = host.get("removed") or []
     if c.get("down"):
@@ -1229,7 +1282,7 @@ def replicas_response(flags, world: World) -> dict:
             body = copy.deepcopy(rec["body"])
             # The replica agent stamps every read, as the mock does.
             body["last_updated"] = iso(2)
-            items.append(drive_item(body, flags, lab))
+            items.append(drive_item(body, flags, lab, world=world, host_id="replicas"))
     agent = {"hostname": agent_host(flags), "version": AGENT_VERSION + "-mock", "os": "linux",
              "os_name": None, "uptime_seconds": int(time.time() - world.started), "drives": 0, "pools": 0}
     return drives_response("replicas", "replicas", "ok", agent, items, iso(0), iso(0), flags)
@@ -1271,6 +1324,10 @@ def scan_state(world: World, scan: dict) -> dict:
 
 
 # ── Handler ──────────────────────────────────────────────────────────────────
+
+def sep_ok(card_id: str) -> bool:
+    return "|" in card_id and bool(card_id.partition("|")[2])
+
 
 def flags_for(handler) -> dict[str, str]:
     flags = {k: os.environ.get(k, v) for k, v in DEFAULTS.items()}
@@ -1415,7 +1472,7 @@ class Handler(BaseHTTPRequestHandler):
             "agent_port": AGENT_PORT, "mock_port": MOCK_PORT,
             "hostname": agent_host(flags),
             "slug": None if slug.lower() in ("", "none", "null") else slug,
-            "mdns_name": "smartha-homeassistant",
+            "mdns_name": "smartha-homeassistant" if flags["MDNS"] != "off" else None,
             "ha_version": None if flags["HA"] == "unreachable" or version.lower() in ("", "none") else version,
             "ha_api": flags["HA"] != "unreachable", "supervisor": True,
             "integration_installed": installed,
@@ -1600,7 +1657,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"result": "reloaded", "entry_id": world.ha[target]["entry_id"]})
             entry_id = "01J9" + "%022X" % random.randrange(16 ** 22)
             world.ha[target] = World._entry(entry_id, drives, pools)
-            return self._send(200, {"result": "created", "entry_id": entry_id})
+            copied = [cid for cid in list(world.app_thresholds) if cid.partition("|")[0] == target
+                      and world.in_ha(flags, cid)]
+            for cid in copied:
+                world.int_thresholds[cid] = world.app_thresholds.pop(cid)
+            body = {"result": "created", "entry_id": entry_id}
+            if copied:
+                body["thresholds_copied"] = copied
+            return self._send(200, body)
         return self._err(404, "not_found")
 
     def _replicas(self, method, parts, flags, world):
@@ -1724,6 +1788,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"id": cid, "hidden": hidden, "hidden_cards": world.hidden_cards})
         response = self._responses(flags, world).get(host_key) or {}
         item = next((c for c in self._card_list(response) if c["card_id"] == cid), None)
+        if len(parts) >= 2 and parts[1] == "thresholds":
+            return self._thresholds(method, parts[2:], flags, world, cid, item)
         if len(parts) == 1 and method == "DELETE":
             if host_key == "self":
                 return self._err(409, "cannot_remove", "A drive of this machine can be hidden, not removed.")
@@ -1767,6 +1833,43 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, body=json.dumps(doc, indent=2).encode(), headers={
                 "Content-Disposition": f'attachment; filename="{name}.json"'})
         return self._err(404, "not_found")
+
+    def _thresholds(self, method, rest, flags, world, cid, item):
+        """A drive's thresholds: read, set, accept the flagged readings, reset."""
+        body = self._body() if method != "GET" else None  # read it whatever the answer: keep-alive
+        if item is None or item.get("type") != "drive" or not sep_ok(cid):
+            return self._err(404, "not_found", "no such drive")
+        if RULES is None or flags["RULES"] == "missing":
+            return self._err(503, "rules_unavailable")
+        drive = item["drive"]
+        source, overrides = world.thresholds(flags, cid)
+        limits = threshold_answer(cid, source, drive, overrides)["labels"]
+        by_label = {lim["label"]: lim for lim in limits}
+        if not rest and method == "GET":
+            return self._send(200, threshold_answer(cid, source, drive, overrides))
+        if not rest and method == "PUT":
+            values = (body or {}).get("values")
+            if not isinstance(values, dict):
+                return self._err(400, "bad_request")
+            for label, value in values.items():
+                if label not in by_label or isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    return self._err(400, "bad_request", f"{label}: a whole number from 0 up")
+            wanted = {**overrides, **values}
+        elif rest == ["accept"] and method == "POST":
+            flagged = [lim for lim in limits if lim["flagged"]]
+            if not flagged:
+                return self._err(409, "nothing_flagged")
+            wanted = dict(overrides)
+            for lim in flagged:
+                wanted[lim["label"]] = PROXY.accept_value(lim["reading"], lim["compare"])
+        elif rest == ["reset"] and method == "POST":
+            wanted = {}
+        else:
+            return self._err(404, "not_found")
+        wanted = {k: int(v) for k, v in wanted.items() if k in by_label and int(v) != by_label[k]["default"]}
+        source = world.set_thresholds(flags, cid, wanted)
+        world.self_cache = None
+        return self._send(200, threshold_answer(cid, source, drive, wanted))
 
     def _mock(self, method, parts, flags, world):
         """The replica agent's own routes the page uses: scenarios and edits."""

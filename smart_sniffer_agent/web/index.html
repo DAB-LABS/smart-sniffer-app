@@ -23,6 +23,8 @@
   <symbol id="grip" viewBox="0 0 10 16"><circle cx="3" cy="3" r="1.2"/><circle cx="7" cy="3" r="1.2"/><circle cx="3" cy="8" r="1.2"/><circle cx="7" cy="8" r="1.2"/><circle cx="3" cy="13" r="1.2"/><circle cx="7" cy="13" r="1.2"/></symbol>
   <symbol id="chevron" viewBox="0 0 20 12"><path d="M2 2l8 8 8-8"/></symbol>
   <symbol id="glass" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4.5 4.5"/></symbol>
+  <symbol id="tune" viewBox="0 0 16 16"><path d="M2 4h6.5M12.5 4H14M2 8h1.5M7.5 8H14M2 12h7.5M13.5 12h.5"/><circle cx="10.5" cy="4" r="1.7"/><circle cx="5.5" cy="8" r="1.7"/><circle cx="11.5" cy="12" r="1.7"/></symbol>
+  <symbol id="copy" viewBox="0 0 16 16"><rect x="5.2" y="5.2" width="8.3" height="8.3" rx="1"/><path d="M10.8 5.2V3.5a1 1 0 0 0-1-1H3.5a1 1 0 0 0-1 1v6.3a1 1 0 0 0 1 1h1.7"/></symbol>
 </svg>
 
 <main class="page">
@@ -95,6 +97,9 @@
               <template x-if="health(c) === 'maybe'"><span class="h-maybe">Maybe</span></template>
               <template x-if="health(c) === 'ok'"><span class="h-ok">Health OK</span></template>
               <template x-if="health(c) === 'unknown'"><span class="h-unk"><span class="ghost-dot" aria-hidden="true"></span>Health not known</span></template>
+              <template x-if="isOpen(c) && canTune(c)">
+                <button class="tune" type="button" :aria-pressed="thrEditing(c) ? 'true' : 'false'" :aria-label="thrEditing(c) ? 'Stop editing thresholds' : 'Edit thresholds'" title="Thresholds" @mousedown.prevent="$el.blur()" @click="toggleThr(c)"><svg aria-hidden="true"><use href="#tune"/></svg></button>
+              </template>
               <template x-if="hasDetails(c)">
                 <button class="chev" :class="health(c)" type="button" :aria-expanded="isOpen(c) ? 'true' : 'false'" :aria-label="isOpen(c) ? 'Hide details' : 'Details'" title="Details" @mousedown.prevent="$el.blur()" @click="toggleOpen(c)"><svg aria-hidden="true"><use href="#chevron"/></svg></button>
               </template>
@@ -116,6 +121,15 @@
                   <div><dt><span class="lb">Data Read</span><template x-if="vol(c.it, 'read')"><small x-text="' (' + volNote(vol(c.it, 'read')) + ')'"></small></template></dt><dd><span class="v" :class="{ na: !vol(c.it, 'read') }" x-text="vol(c.it, 'read') ? tb(vol(c.it, 'read').bytes) : 'not reported'"></span></dd></div>
                   <div><dt><span class="lb">Device Statistics</span><template x-if="devstat(c.it).note"><small x-text="' (' + devstat(c.it).note + ')'"></small></template></dt><dd><span class="v" x-text="devstat(c.it).value"></span></dd></div>
                 </dl>
+                <template x-if="connect(c)">
+                  <div class="conn" role="group" aria-label="Connect by hand">
+                    <span class="conn-h">Connect by hand</span>
+                    <template x-for="f in connect(c).fields" :key="f.k">
+                      <span class="cp"><span class="cp-k" x-text="f.k"></span><span class="cp-v mono" x-text="f.v"></span><button class="copy" type="button" :aria-label="'Copy ' + f.k" title="Copy" @click="copy($event, f.v, c.id + ':' + f.k)"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === c.id + ':' + f.k" x-text="ui.copiedText"></small></span>
+                    </template>
+                    <template x-if="connect(c).password"><p class="conn-note">This agent wants its password (the token: line in its config)</p></template>
+                  </div>
+                </template>
                 <template x-if="spaces(c).length">
                   <div class="fs-list">
                     <template x-for="f in spaces(c)" :key="f.id || f.mountpoint">
@@ -126,7 +140,43 @@
                 <!-- One table: the attributes (or the NVMe health log, or the
                      watched rows), flagged rows in the state colour, notes muted
                      after the name. -->
-                <template x-if="detailTable(c.it).rows.length">
+                <template x-if="thrEditing(c)">
+                  <div class="thr" role="group" aria-label="Thresholds">
+                    <template x-if="thrS.loading"><p class="c-note">Reading the thresholds.</p></template>
+                    <template x-if="thrRows(c).length">
+                      <div class="table-wrap">
+                        <table class="attrs thr-t">
+                          <thead><tr><th class="nm">Watched</th><th class="num">Now</th><th class="num">Alert above</th><th class="num">Default</th></tr></thead>
+                          <tbody>
+                            <template x-for="l in thrRows(c)" :key="l.label">
+                              <tr :class="thrMark(c, l)">
+                                <td class="nm"><span class="lb" x-text="l.name"></span><template x-if="l.compare !== 'gt'"><small x-text="' (' + thrWord(l) + ')'"></small></template></td>
+                                <td class="num" x-text="thrReading(l)"></td>
+                                <td class="num"><input class="input thr-in" inputmode="numeric" autocomplete="off" :value="thrS.values[l.label]" :aria-label="'Threshold of ' + l.name + ', ' + thrWord(l)" @input="thrSet(l.label, $event.target.value)" @keydown.enter="thrSave(c)"></td>
+                                <td class="num def" x-text="l.default + (l.unit || '')"></td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+                    </template>
+                    <template x-if="thrS.data"><p class="thr-where" x-text="thrWhere()"></p></template>
+                    <template x-if="thrS.ask === 'accept'">
+                      <div class="ask" role="group" aria-label="Confirm accept"><span x-text="thrAcceptText(c)"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="thrS.busy" @click="thrAccept(c)">Accept</button><button class="btn btn-sm btn-quiet" type="button" @click="thrAsk(null)">Cancel</button></span></div>
+                    </template>
+                    <template x-if="thrS.ask === 'reset'">
+                      <div class="ask" role="group" aria-label="Confirm reset"><span>Put every threshold of this drive back to its default?</span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="thrS.busy" @click="thrReset(c)">Reset</button><button class="btn btn-sm btn-quiet" type="button" @click="thrAsk(null)">Cancel</button></span></div>
+                    </template>
+                    <p class="thr-err" role="alert" x-show="thrS.err" x-text="thrS.err"></p>
+                    <div class="thr-btns">
+                      <button class="btn btn-sm btn-primary" type="button" :disabled="!thrS.data || thrS.busy" @click="thrSave(c)">Save</button>
+                      <button class="btn btn-sm" type="button" :aria-expanded="thrS.ask === 'accept' ? 'true' : 'false'" :disabled="!thrS.data || thrS.busy || !thrFlagged(c).length" @click="thrAsk('accept')">Accept current readings</button>
+                      <button class="btn btn-sm" type="button" :aria-expanded="thrS.ask === 'reset' ? 'true' : 'false'" :disabled="!thrS.data || thrS.busy" @click="thrAsk('reset')">Reset to defaults</button>
+                      <button class="btn btn-sm btn-quiet" type="button" @click="ui.thr = null">Cancel</button>
+                    </div>
+                  </div>
+                </template>
+                <template x-if="!thrEditing(c) && detailTable(c.it).rows.length">
                   <div class="table-wrap">
                     <table class="attrs" :class="detailTable(c.it).kind">
                       <thead>
@@ -152,6 +202,15 @@
             </template>
             <template x-if="isOpen(c) && c.kind === 'pool'">
               <div class="details">
+                <template x-if="connect(c)">
+                  <div class="conn" role="group" aria-label="Connect by hand">
+                    <span class="conn-h">Connect by hand</span>
+                    <template x-for="f in connect(c).fields" :key="f.k">
+                      <span class="cp"><span class="cp-k" x-text="f.k"></span><span class="cp-v mono" x-text="f.v"></span><button class="copy" type="button" :aria-label="'Copy ' + f.k" title="Copy" @click="copy($event, f.v, c.id + ':' + f.k)"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === c.id + ':' + f.k" x-text="ui.copiedText"></small></span>
+                    </template>
+                    <template x-if="connect(c).password"><p class="conn-note">This agent wants its password (the token: line in its config)</p></template>
+                  </div>
+                </template>
                 <template x-if="poolDisks(c.it).length">
                   <div class="table-wrap">
                     <table class="attrs" :aria-label="'Disks in pool ' + c.it.pool.name">
@@ -298,6 +357,9 @@
     <a href="https://github.com/DAB-LABS/smart-sniffer-app" target="_blank" rel="noopener">GitHub</a>
     <span class="spacer"></span>
     <span class="mono" style="font-size:0.72rem">DAB-LABS</span>
+    <template x-if="footAgent">
+      <p class="foot-agent">This app's agent: <span class="cp"><span class="cp-v mono" x-text="footAgent.addr"></span><button class="copy" type="button" aria-label="Copy the agent address" title="Copy" @click="copy($event, footAgent.addr, 'foot:addr')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'foot:addr'" x-text="ui.copiedText"></small></span><template x-if="footAgent.mdns"><span class="cp"><span class="cp-k">mDNS</span><span class="cp-v mono" x-text="footAgent.mdns"></span><button class="copy" type="button" aria-label="Copy the mDNS name" title="Copy" @click="copy($event, footAgent.mdns, 'foot:mdns')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'foot:mdns'" x-text="ui.copiedText"></small></span></template></p>
+    </template>
   </footer>
 </main>
 </body>

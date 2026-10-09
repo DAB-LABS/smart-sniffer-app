@@ -24,6 +24,15 @@ const WEAR_NAMES = ['Wear_Leveling_Count', 'Media_Wearout_Indicator', 'SSD_Life_
 const NVME_FIELDS = { critical_warning: 'critical_warning', media_errors: 'media_errors',
   available_spare: 'available_spare', wear: 'percentage_used' };
 const NONE = { kind: 'none', href: null };
+// How the accept question names each reading: [one, many] for a count, or
+// the words before a percentage for a gauge.
+const ACCEPT_WORDS = { reallocated: ['reallocated sector', 'reallocated sectors'], pending: ['pending sector', 'pending sectors'],
+  offline_unc: ['offline uncorrectable sector', 'offline uncorrectable sectors'],
+  reported_unc: ['reported uncorrectable error', 'reported uncorrectable errors'],
+  cmd_timeout: ['command timeout', 'command timeouts'], realloc_events: ['reallocation event', 'reallocation events'],
+  spin_retries: ['spin retry', 'spin retries'], media_errors: ['media error', 'media errors'],
+  wear: 'wear used at', available_spare: 'available spare at' };
+const COMPARE_WORDS = { gt: 'alert above', ge: 'alert at', lt: 'alert below' };
 const LONG_PRESS_MS = 450;
 const enc = encodeURIComponent;
 
@@ -74,7 +83,7 @@ function cc() {
     hostsErr: '',
     drag: null,
     dragOrder: null,
-    ui: { open: {}, cols: 1, confirm: null, ask: null, pw: {}, pwState: {}, busy: {}, note: {} },
+    ui: { open: {}, cols: 1, confirm: null, ask: null, pw: {}, pwState: {}, busy: {}, note: {}, thr: null, copied: '', copiedText: '' },
     add: {
       open: false, block: '', port: '9099', scan: null, scanId: null, last: null, wide: null, error: '',
       ticks: {}, manualHost: '', manualPort: '9099', manualRows: [], manualNone: null, checking: false,
@@ -100,6 +109,7 @@ function cc() {
         if (e.key !== 'Escape') return;
         if (this.ui.confirm) this.closeConfirm();
         if (this.ui.ask) this.ui.ask = null;
+        if (this.ui.thr && this.ui.thr.ask) this.ui.thr.ask = null;
       });
     },
 
@@ -496,6 +506,7 @@ function cc() {
     },
     toggleOpen(c) {
       this.ui.open[c.id] = !this.ui.open[c.id];
+      if (!this.ui.open[c.id] && this.thrEditing(c)) this.ui.thr = null;
     },
 
     // The problem window: every flagged row, no paging.
@@ -528,11 +539,14 @@ function cc() {
     rows(it) {
       return (it.view && it.view.rows) || [];
     },
-    // What sits in brackets after a row's label: the expectation when the
-    // row is flagged, then where the reading came from. Never by the value.
+    // What sits in brackets after a row's label: "accepted" for a reading
+    // a threshold keeps from being flagged; the threshold when it is not the
+    // default, else the expectation when the row is flagged; then where the
+    // reading came from. Never by the value.
     rowNote(r) {
       const flagged = r.mark === 'crit' || r.mark === 'warn';
-      return [flagged ? r.expect : null, r.note].filter(Boolean).join(', ');
+      const limit = r.limit ? r.limit.text : (flagged ? r.expect : null);
+      return [r.accepted ? 'accepted' : null, limit, r.note].filter(Boolean).join(', ');
     },
     vol(it, which) {
       const v = it.view && it.view.volumes && it.view.volumes[which];
@@ -637,6 +651,168 @@ function cc() {
       const page = (((it.drive && it.drive.device_statistics) || {}).pages || []).find((p) => p.number === at[0]);
       const e = page && (page.table || []).find((x) => x.offset === at[1]);
       return e ? e.value : String(r.value).replace(/,/g, '');
+    },
+
+    // ── Thresholds ──────────────────────────────────────────────────
+    // A drive's thresholds, edited in its open Details. The proxy keeps
+    // them where they live: in Home Assistant for a drive in it, else in
+    // the app's options.
+    canTune(c) {
+      return c.kind === 'drive' && !!(c.it.verdict && (c.it.verdict.limits || []).length) && !c.it.stale;
+    },
+    // The edit state, never null, for the template's bindings.
+    get thrS() {
+      return this.ui.thr || { values: {}, data: null, ask: null, busy: false, err: '', loading: false };
+    },
+    thrSet(label, value) {
+      if (this.ui.thr) this.ui.thr.values[label] = value;
+    },
+    thrEditing(c) {
+      return !!(this.ui.thr && this.ui.thr.id === c.id);
+    },
+    async toggleThr(c) {
+      if (this.thrEditing(c)) { this.ui.thr = null; return; }
+      this.ui.thr = { id: c.id, loading: true, data: null, values: {}, ask: null, busy: false, err: '' };
+      const t = this.ui.thr;  // the reactive copy, so the page follows its changes
+      const r = await this.request(`cards/${enc(c.id)}/thresholds`);
+      if (this.ui.thr !== t) return;
+      t.loading = false;
+      if (!r.ok || !r.data) { t.err = 'The thresholds could not be read. Try again.'; return; }
+      this.thrLoad(t, r.data);
+    },
+    thrLoad(t, data) {
+      t.data = data;
+      t.values = {};
+      (data.labels || []).forEach((l) => { t.values[l.label] = String(l.value); });
+    },
+    // The rows edit mode shows: the labels the drive reports (and any with
+    // an override), in the order of the drive's watched rows.
+    thrRows(c) {
+      const t = this.ui.thr;
+      if (!t || !t.data) return [];
+      const keys = this.rows(c.it).map((r) => r.key);
+      const at = (l) => { const i = keys.indexOf(l.row); return i < 0 ? 1000 : i; };
+      return (t.data.labels || []).filter((l) => l.reading !== null && l.reading !== undefined || l.overridden)
+        .map((l, i) => ({ l, i })).sort((a, b) => (at(a.l) - at(b.l)) || (a.i - b.i)).map((x) => x.l);
+    },
+    thrMark(c, l) {
+      if (!l.flagged) return '';
+      const row = this.rows(c.it).find((r) => r.key === l.row);
+      return row && row.mark === 'warn' ? 'warn' : (row && row.mark === 'crit' ? 'crit' : 'warn');
+    },
+    thrReading(l) {
+      if (l.reading === null || l.reading === undefined) return 'not reported';
+      return `${this.num(l.reading)}${l.unit || ''}`;
+    },
+    thrWord(l) {
+      return COMPARE_WORDS[l.compare] || 'alert above';
+    },
+    thrWhere() {
+      const t = this.ui.thr;
+      if (!t || !t.data) return '';
+      return t.data.source === 'integration' ? 'Saved in Home Assistant' : 'Saved in this app';
+    },
+    thrFlagged(c) {
+      return this.thrRows(c).filter((l) => l.flagged);
+    },
+    // "Accept 24 reallocated sectors and 3 pending sectors as normal for this drive?"
+    thrAcceptText(c) {
+      const parts = this.thrFlagged(c).map((l) => {
+        const w = ACCEPT_WORDS[l.row];
+        if (typeof w === 'string') return `${w} ${l.reading}${l.unit || ''}`;
+        if (Array.isArray(w)) return `${this.num(l.reading)} ${l.reading === 1 ? w[0] : w[1]}`;
+        return `${l.name} at ${this.num(l.reading)}${l.unit || ''}`;
+      });
+      const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0] || '';
+      return `Accept ${list} as normal for this drive?`;
+    },
+    thrAsk(kind) {
+      if (!this.ui.thr) return;
+      this.ui.thr.ask = kind && this.ui.thr.ask !== kind ? kind : null;
+      this.ui.thr.err = '';
+    },
+    async thrSend(c, method, path, body) {
+      const t = this.ui.thr;
+      if (!t || t.busy) return;
+      t.busy = true;
+      t.err = '';
+      const r = await this.request(`cards/${enc(c.id)}/thresholds${path}`, body === undefined ? { method } : { method, body });
+      t.busy = false;
+      if (!r.ok || !r.data) {
+        const msg = r.data && r.data.message;
+        t.err = r.status === 502 ? `Home Assistant did not save them${msg ? `: ${msg}` : ''}.`
+          : r.status === 400 && msg ? `Not saved: ${msg}.` : 'They were not saved. Try again.';
+        return;
+      }
+      this.ui.thr = null;
+      if (c.src === 'self') await this.loadSelf();
+      else if (c.src === 'replicas') await this.loadReplicas();
+      else await this.loadHost(c.h.id);
+    },
+    thrSave(c) {
+      const t = this.ui.thr;
+      if (!t || !t.data) return;
+      const values = {};
+      for (const l of this.thrRows(c)) {
+        const text = String(t.values[l.label] ?? '').trim();
+        if (!/^\d+$/.test(text)) { t.err = `${l.name}: a whole number from 0 up.`; return; }
+        values[l.label] = Number(text);
+      }
+      this.thrSend(c, 'PUT', '', { values });
+    },
+    thrAccept(c) {
+      this.thrSend(c, 'POST', '/accept', {});
+    },
+    thrReset(c) {
+      this.thrSend(c, 'POST', '/reset', {});
+    },
+
+    // ── Connect by hand ─────────────────────────────────────────────
+    // What to type into the integration to add a machine by hand: this
+    // app's agent as Home Assistant reaches it, or a field agent's address.
+    connect(c) {
+      if (!['drive', 'pool'].includes(c.kind) || c.src === 'replicas') return null;
+      const i = this.info || {};
+      if (c.src === 'self') {
+        const fields = [{ k: 'Host', v: i.hostname || '' }, { k: 'Port', v: String(i.agent_port || 9099) }];
+        if (i.mdns_name) fields.push({ k: 'mDNS', v: i.mdns_name });
+        return { fields: fields.filter((f) => f.v), password: false };
+      }
+      if (!c.h) return null;
+      return { fields: [{ k: 'Host', v: c.h.address }, { k: 'Port', v: String(c.h.port) }], password: !!c.h.has_password };
+    },
+    get footAgent() {
+      const i = this.info;
+      if (!i || !i.hostname) return null;
+      return { addr: `${i.hostname}:${i.agent_port || 9099}`, mdns: i.mdns_name || '' };
+    },
+    // Copy to the clipboard; where the browser refuses (an insecure page, a
+    // frame without the permission) select the text so it can be copied by
+    // hand.
+    async copy(ev, text, key) {
+      const btn = ev.currentTarget;
+      let ok = false;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          ok = true;
+        }
+      } catch (e) { ok = false; }
+      if (!ok) {
+        const el = btn && btn.parentElement && btn.parentElement.querySelector('.cp-v');
+        if (el) {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        }
+      }
+      this.ui.copied = key;
+      this.ui.copiedText = ok ? 'copied' : 'selected';
+      clearTimeout(this.copyTimer);
+      this.copyTimer = setTimeout(() => { if (this.ui.copied === key) this.ui.copied = ''; }, 1600);
     },
 
     // Pools

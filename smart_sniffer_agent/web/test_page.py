@@ -65,7 +65,7 @@ def server():
         port = s.getsockname()[1]
     env = dict(os.environ, QUIET="1", LATENCY="0.01")
     for key in ("AGENT", "DRIVES", "VDISK", "RULES", "HA", "HA_LOOKUP", "HA_SELF", "ADD", "NETWORK", "SCAN",
-                "HOSTS", "POOL", "REPLICAS", "REPLICA_FOLDER", "HOSTNAME", "SLUG", "HA_VERSION"):
+                "HOSTS", "POOL", "REPLICAS", "REPLICA_FOLDER", "HOSTNAME", "SLUG", "HA_VERSION", "MDNS"):
         env.pop(key, None)
     proc = subprocess.Popen([sys.executable, str(WEB_DIR / "devserver.py"), "--port", str(port)], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -146,6 +146,9 @@ BACKUP_PI = "10.0.10.52:9099"
 REP_FAILED = "replicas|MOCK-SATA-0001"
 REP_NVME = "replicas|MOCK-NVME-0001"
 REP_POOL = "replicas|pool:tank"
+NAS_OVER = f"{NAS}|ZA1B2C3D"  # in Home Assistant, 8 reallocated over its threshold of 5
+NAS_ACCEPTED = f"{NAS}|ZA1B2C3E"  # in Home Assistant, 2 reallocated within its threshold of 4
+DIM = "rgb(143, 143, 143)"
 
 
 def last_is_plus(p: Page) -> bool:
@@ -1192,6 +1195,185 @@ def test_page_polls_only_its_own_reads(open_page):
 
 # ── Screenshots, named by state ──────────────────────────────────────────────
 
+# ── Thresholds ───────────────────────────────────────────────────────────────
+
+def _edit(p: Page, cid: str):
+    c = by_id(p, cid)
+    if c.locator(".tune").count() == 0:
+        c.locator(".chev").click()
+    c.get_by_role("button", name="Edit thresholds").click()
+    p.page.wait_for_selector(f'[data-card="{cid}"] table.thr-t')
+    return c
+
+
+def _edit_rows(c) -> list:
+    return c.locator("table.thr-t tbody tr").evaluate_all("""rows => rows.map((r) => [
+        r.querySelector('.lb').textContent, r.cells[1].textContent, r.querySelector('input').value,
+        r.cells[3].textContent, r.className])""")
+
+
+def test_threshold_notes_at_rest(open_page):
+    p = open_page()
+    over = by_id(p, NAS_OVER)
+    # Closed: the flagged row's note names the threshold in force.
+    row = over.locator(".pw-row").first
+    assert row.locator(".pw-label").inner_text() == "Reallocated sectors (alert above 5, default 0)"
+    assert row.locator(".pw-val").inner_text() == "8"
+    assert "crit" in row.get_attribute("class")
+    # Within its threshold: Health OK, the row marked accepted, not flagged.
+    ok = by_id(p, NAS_ACCEPTED)
+    assert ok.locator(".h-ok").count() == 1 and ok.locator(".pw-row").count() == 0
+    ok.locator(".chev").click()
+    attr = ok.locator("table.attrs tr", has_text="Reallocated_Sector_Ct")
+    assert attr.locator("small").inner_text().strip() == "(accepted, alert above 4, default 0)"
+    assert attr.get_attribute("class") in ("", None)
+    # The tune button shows only with Details open, by the chevron.
+    assert by_id(p, NVME).locator(".tune").count() == 0
+    tune = ok.locator(".tune").bounding_box()
+    chev = ok.locator(".chev").bounding_box()
+    assert 0 < chev["x"] - (tune["x"] + tune["width"]) < 16 and abs(tune["y"] + tune["height"] / 2 - chev["y"] - chev["height"] / 2) < 3
+    assert_colours(p)
+
+
+def test_threshold_edit_mode(open_page):
+    p = open_page()
+    c = _edit(p, BARRACUDA)
+    assert c.locator(".tune").get_attribute("aria-pressed") == "true"
+    rows = _edit_rows(c)
+    # The watched rows the drive reports, in the table's order, flagged ones marked.
+    assert [r[0] for r in rows[:2]] == ["Reallocated sectors", "Pending sectors"]
+    assert rows[0][1:] == ["24", "0", "0", "crit"] and rows[1][1:] == ["3", "0", "0", "crit"]
+    assert ["Command timeout", "0", "100", "100", ""] in rows
+    assert c.locator("table.thr-t td.def").first.evaluate("e => getComputedStyle(e).color") == DIM
+    assert c.locator(".thr-where").inner_text() == "Saved in Home Assistant"
+    assert c.locator("table.attrs:not(.thr-t)").count() == 0  # the edit table takes the table's place
+    assert [b.inner_text() for b in c.locator(".thr-btns button").all()] == [
+        "Save", "Accept current readings", "Reset to defaults", "Cancel"]
+    assert_colours(p)
+    assert_no_dashes(p)
+    # A value that is not a whole number is refused on the page.
+    c.get_by_label("Threshold of Reallocated sectors, alert above").fill("x")
+    c.get_by_role("button", name="Save", exact=True).click()
+    assert "whole number" in c.locator(".thr-err").inner_text()
+    assert not p.api("PUT", r"/thresholds$")
+    c.get_by_label("Threshold of Reallocated sectors, alert above").fill("30")
+    c.get_by_role("button", name="Save", exact=True).click()
+    p.page.wait_for_selector(f'[data-card="{BARRACUDA}"] table.thr-t', state="detached")
+    sent = json.loads(p.api("PUT", r"/thresholds$")[0][2])["values"]
+    assert sent["Reallocated Sector Count"] == 30 and sent["Current Pending Sector Count"] == 0
+    # Saved: the card is judged again; 24 is within 30, the pending sectors still flag.
+    p.page.wait_for_function(f"""() => [...document.querySelectorAll('[data-card="{BARRACUDA}"] table.attrs tr')]
+        .some((r) => r.textContent.includes('accepted, alert above 30, default 0'))""")
+    c = _edit(p, BARRACUDA)
+    assert _edit_rows(c)[0][2] == "30"
+    # Cancel leaves without saving; the tune button again too.
+    c.get_by_label("Threshold of Reallocated sectors, alert above").fill("99")
+    c.get_by_role("button", name="Cancel").click()
+    assert c.locator("table.thr-t").count() == 0 and len(p.api("PUT", r"/thresholds$")) == 1
+    # Not in Home Assistant: the numbers live in the app.
+    p = open_page("HA_SELF=0")
+    c = _edit(p, BARRACUDA)
+    assert c.locator(".thr-where").inner_text() == "Saved in this app"
+
+
+def test_threshold_accept_confirm(open_page):
+    p = open_page()
+    c = _edit(p, BARRACUDA)
+    c.get_by_role("button", name="Accept current readings").click()
+    ask = c.get_by_role("group", name="Confirm accept")
+    assert ask.inner_text().startswith(
+        "Accept 24 reallocated sectors and 3 pending sectors as normal for this drive?")
+    ask.get_by_role("button", name="Cancel").click()
+    assert c.get_by_role("group", name="Confirm accept").count() == 0
+    assert not p.api("POST", r"/thresholds/accept$")
+    c.get_by_role("button", name="Accept current readings").click()
+    c.get_by_role("group", name="Confirm accept").get_by_role("button", name="Accept").click()
+    p.page.wait_for_selector(f'[data-card="{BARRACUDA}"] .h-ok')
+    assert len(p.api("POST", r"/thresholds/accept$")) == 1
+    # Nothing flagged now: nothing to accept.
+    c = _edit(p, BARRACUDA)
+    assert c.get_by_role("button", name="Accept current readings").is_disabled()
+    c = _edit(p, NVME)
+    assert c.get_by_role("button", name="Accept current readings").is_disabled()
+
+
+def test_threshold_reset_confirm(open_page):
+    p = open_page()
+    c = _edit(p, NAS_ACCEPTED)
+    assert ["Reallocated sectors", "2", "4", "0", ""] == _edit_rows(c)[0]
+    c.get_by_role("button", name="Reset to defaults").click()
+    ask = c.get_by_role("group", name="Confirm reset")
+    assert ask.inner_text().startswith("Put every threshold of this drive back to its default?")
+    p.page.keyboard.press("Escape")
+    assert c.get_by_role("group", name="Confirm reset").count() == 0
+    c.get_by_role("button", name="Reset to defaults").click()
+    c.get_by_role("group", name="Confirm reset").get_by_role("button", name="Reset").click()
+    p.page.wait_for_selector(f'[data-card="{NAS_ACCEPTED}"] .h-att')
+    assert len(p.api("POST", r"/thresholds/reset$")) == 1
+
+
+def _conn(c) -> list:
+    return c.locator(".conn .cp").evaluate_all(
+        "els => els.map((e) => [e.querySelector('.cp-k').textContent, e.querySelector('.cp-v').textContent])")
+
+
+def test_connect_by_hand(open_page):
+    p = open_page()
+    c = by_id(p, BARRACUDA)
+    assert c.locator(".conn").count() == 0  # only with Details open
+    c.locator(".chev").click()
+    assert c.locator(".conn-h").inner_text() == "Connect by hand"
+    assert _conn(c) == [["Host", "local-smart-sniffer-agent"], ["Port", "9099"], ["mDNS", "smartha-homeassistant"]]
+    # It sits in the summary area, above the table.
+    assert c.locator(".conn").bounding_box()["y"] < c.locator("table.attrs").bounding_box()["y"]
+    assert c.locator(".conn button.copy").count() == 3
+    nas = by_id(p, NAS_ATT)
+    nas.locator(".chev").click()
+    assert _conn(nas) == [["Host", "10.0.10.20"], ["Port", "9099"]]
+    assert nas.locator(".conn-note").count() == 0
+    pool = by_id(p, NAS_POOL)
+    pool.locator(".chev").click()
+    assert _conn(pool) == [["Host", "10.0.10.20"], ["Port", "9099"]]
+    rep = by_id(p, REP_FAILED)
+    rep.locator(".chev").click()
+    assert rep.locator(".conn").count() == 0  # a replica is not added by hand
+    assert_colours(p)
+    # A machine with a password says so.
+    p = open_page("HOSTS=one")
+    c = p.page.locator("article.card", has_text="proxmox-01").first
+    c = by_id(p, c.get_attribute("data-card"))
+    c.locator(".chev").click()
+    assert c.locator(".conn-note").inner_text() == "This agent wants its password (the token: line in its config)"
+
+
+def test_footer_agent_line(open_page):
+    p = open_page()
+    line = p.page.locator(".foot-agent")
+    assert line.inner_text().replace("\n", " ").split() == [
+        "This", "app's", "agent:", "local-smart-sniffer-agent:9099", "mDNS", "smartha-homeassistant"]
+    assert line.locator("button.copy").count() == 2
+    p = open_page("MDNS=off")
+    line = p.page.locator(".foot-agent")
+    assert "mDNS" not in line.inner_text() and line.locator("button.copy").count() == 1
+
+
+def test_copy_buttons(open_page):
+    p = open_page()
+    p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    p.page.locator(".foot-agent button.copy").first.click()
+    assert p.page.evaluate("navigator.clipboard.readText()") == "local-smart-sniffer-agent:9099"
+    assert p.page.locator(".foot-agent .copied:visible").inner_text() == "copied"
+    c = by_id(p, NAS_ATT)
+    c.locator(".chev").click()
+    c.get_by_role("button", name="Copy Host").click()
+    assert p.page.evaluate("navigator.clipboard.readText()") == "10.0.10.20"
+    # No Clipboard API (a frame without the permission): the text is selected.
+    p.page.evaluate("Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })")
+    c.get_by_role("button", name="Copy Port").click()
+    assert p.page.evaluate("window.getSelection().toString()") == "9099"
+    assert c.locator(".copied:visible").inner_text() in ("copied", "selected")
+
+
 def _shot(p: Page, name: str, target=None):
     SHOTS.mkdir(parents=True, exist_ok=True)
     width = p.page.viewport_size["width"]
@@ -1252,6 +1434,16 @@ def test_screenshots(open_page):
         _shot(p, "drag", None)
         p.page.mouse.up()
 
+        p = open_page("", width)
+        _shot(p, "threshold-override-closed", by_id(p, NAS_OVER))
+        c = by_id(p, BARRACUDA)
+        c.locator(".chev").click()
+        _shot(p, "connect-by-hand", c.locator(".conn"))
+        c = _edit(p, BARRACUDA)
+        _shot(p, "threshold-edit", c)
+        c.get_by_role("button", name="Accept current readings").click()
+        _shot(p, "threshold-accept-confirm", c)
+        _shot(p, "footer-agent", p.page.locator("footer.app-foot"))
         p = open_page("POOL=degraded", width)
         _shot(p, "pool-degraded", by_id(p, NAS_POOL))
         p = open_page("HA=not_installed", width)

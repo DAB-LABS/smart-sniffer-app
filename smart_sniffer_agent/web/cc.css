@@ -377,3 +377,41 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
   .scen { border-color: var(--rule); }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Thresholds, edited in an open Details box. The tune button sits by the
+   chevron; the edit table takes the attribute table's place, its inputs
+   in the threshold column and the default muted. No colours of its own. */
+.tune { margin-left: auto; background: none; border: 0; padding: 4px 3px; cursor: pointer; line-height: 0; color: var(--dim); border-radius: 3px; }
+.tune:hover, .tune[aria-pressed="true"] { color: var(--paper); }
+.tune:focus:not(:focus-visible) { outline: none; }
+.tune svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
+.tune ~ .chev { margin-left: -6px; }  /* 8 px from the tune button, not the line's 14 */
+.thr { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+table.attrs.thr-t td { vertical-align: middle; }
+table.attrs .thr-in { width: 72px; max-width: 72px; text-align: right; }
+table.attrs tr td.def { color: var(--dim); font-weight: 400; }
+.thr-where { margin: 0; font-size: 0.72rem; color: var(--dim); }
+.thr-err { margin: 0; font-size: 0.78rem; color: var(--paper); }
+.thr-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.thr-btns .btn-quiet { margin-left: auto; }
+.thr .ask { margin: 0; }
+
+/* Connect by hand: what to type into the integration, each value with a
+   small copy button; quiet, in the summary area above the table. */
+.conn { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; font-size: 0.74rem; color: var(--dim);
+        padding: 4px 0 5px; border-bottom: 1px solid #141414; min-width: 0; }
+.conn-h { color: var(--dim); flex-basis: 100%; }
+.cp { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.cp-k { color: var(--dim); }
+.cp-v { color: var(--grey); font-size: 0.72rem; overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
+.copy { background: none; border: 0; padding: 2px; margin: -2px 0; cursor: pointer; line-height: 0; color: var(--dim); border-radius: 3px; flex: none; }
+.copy:hover { color: var(--paper); }
+.copy:focus:not(:focus-visible) { outline: none; }
+.copy svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linejoin: round; }
+.copied { font-size: 0.66rem; color: var(--dim); }
+.conn-note { margin: 0; flex-basis: 100%; font-size: 0.72rem; color: var(--dim); }
+.foot-agent { flex-basis: 100%; margin: 4px 0 0; font-size: 0.74rem; color: var(--dim); display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; }
+@media (pointer: coarse) {
+  .tune { padding: 8px 6px; margin-top: -6px; margin-bottom: -6px; }
+  .copy { padding: 7px; margin: -7px -3px; }
+}
