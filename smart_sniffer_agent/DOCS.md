@@ -49,6 +49,8 @@ Each card's health line carries one of four words:
 
 Under the word, a box lists every row that caused it, with what was expected and the value, red for Attention and gold for Maybe. In Details, a row the drive does not report reads "not known".
 
+**Thresholds.** Each drive has its own alert thresholds, the same ones the integration offers under **Configure → Alert thresholds**: per counter, the reading it accepts before it alerts. With Details open, the sliders icon beside the chevron edits them: each watched counter shows its reading, the threshold and the default. **Save** keeps what you typed (typing the default clears an override), **Accept current readings** makes every flagged reading the new normal for that drive after asking, and **Reset to defaults** puts them all back. A line under the table says where the numbers live. For a drive in Home Assistant (blue exit icon) they live in the integration, written through its own options flow, so the card and Home Assistant always judge the drive the same way; for any other drive they live in the app's options. When you add a drive to Home Assistant from its card, its thresholds move into the integration. A row with a threshold of its own says so after its name, for example *Reallocated sectors (alert above 5, default 0)*, and a reading the threshold accepts is marked *accepted* instead of being flagged.
+
 The page reads this machine's drives and the replicas every 8 seconds while it is open, and your field agents when it opens, when you press **Refresh**, and every 15 minutes while it stays visible.
 
 ## Field Agents
@@ -102,6 +104,8 @@ With the integration installed, an exit icon sits just left of each drive and po
 
 Adding from the page needs the app's Home Assistant API access, which it has by default.
 
+**Adding by hand.** To add a machine in the integration yourself (**Settings → Devices & Services → Add Integration → SMART Sniffer**), open a card's Details: **Connect by hand** gives the host and port to type, each with a copy button. For this machine's own drives the host is the name Home Assistant reaches the app's agent by, and the app's mDNS name is shown too. A field agent that wants a password needs the `token:` line from its config as the token. The page's footer carries the same line for this app's agent.
+
 ## Configuration
 
 | Option | Default | Description |
@@ -113,6 +117,7 @@ Adding from the page needs the app's Home Assistant API access, which it has by 
 | Field Agents | _(empty)_ | Other machines running the SMART Sniffer agent. Added from the Control Center. |
 | Card Order | _(empty)_ | The order of the cards. Set by dragging them in the Control Center. |
 | Hidden Cards | _(empty)_ | Cards hidden with the eye in the Control Center. |
+| Thresholds | _(empty)_ | Alert thresholds of drives that are not in Home Assistant, one line per card and counter. Set from a drive's Details. |
 
 Changing the Agent Port, Bearer Token or Scan Interval needs an app restart, as before. The Control Center reads the Field Agents list each time it loads it, so changes to that list need no restart.
 

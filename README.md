@@ -84,6 +84,9 @@ One grid of cards, one per drive and per ZFS pool, from this machine (`HAOS`), y
 - **Field agents**: your other machines running the agent. The **+** card scans your network for them when you open it, and only then; you can also add one by hand. Agents with a token ask for it on their card. They are stored in the app's options.
 - **Replicas**: fake drives and pools for testing Home Assistant, switched between scenarios with one click. Six ship with the app; you can upload your own, drop files into `/share/smart-sniffer/replicas`, or save any card as a file, a real drive's with its serial number and WWN replaced.
 
+- **Thresholds**: each drive's alert thresholds, edited in its Details. A drive in Home Assistant keeps them in the integration, so the card and Home Assistant agree; any other drive keeps them in the app's options. Accept current readings makes what is flagged the drive's new normal.
+- **Connect by hand**: Details on a drive or pool card gives the host and port (and this app's mDNS name) to type into the integration, with copy buttons; the footer has the same for this app's agent.
+
 See [DOCS.md](smart_sniffer_agent/DOCS.md) for the details, including how to put the page in the sidebar or on a dashboard.
 
 ## Configuration
@@ -97,6 +100,7 @@ See [DOCS.md](smart_sniffer_agent/DOCS.md) for the details, including how to put
 | Field Agents | _(empty)_ | Other machines running the SMART Sniffer agent. Added from the Control Center. |
 | Card Order | _(empty)_ | The order of the cards. Set by dragging them in the Control Center. |
 | Hidden Cards | _(empty)_ | Cards hidden with the eye in the Control Center. |
+| Thresholds | _(empty)_ | Alert thresholds of drives that are not in Home Assistant. Set from a drive's Details. |
 
 ## Security & Permissions
 
