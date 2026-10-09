@@ -27,6 +27,10 @@ It also answers the Control Center's own routes:
   PATCH /cards/<id>              hide or show one card
   DELETE /cards/<id>             remove one card (not a drive of this machine)
   GET  /cards/<id>/file          one card as a JSON file
+  GET, PUT /cards/<id>/thresholds  a drive's thresholds, from Home Assistant
+                                 when the drive is in it, else the app's own;
+  POST /cards/<id>/thresholds/accept  the flagged readings made normal;
+  POST /cards/<id>/thresholds/reset   every override cleared
 
 The verdict comes from the integration's own rule modules (attention.py,
 devstat.py, extract.py, pool_health.py), which the Dockerfile takes from the
@@ -91,6 +95,7 @@ INTEGRATION_DOMAIN = "smart_sniffer"
 SUPERVISOR_TIMEOUT = 5  # seconds, every Supervisor and Core call
 MAX_BODY = 4 * 1024 * 1024  # largest JSON request body the app routes accept
 HA_API_CACHE_SECONDS = 30
+THRESHOLD_MIN_SECONDS = 5  # the least time Home Assistant's thresholds are kept
 REFRESH_MINUTES = 15  # how often the page re-reads stored field agents
 REPLICA_AGENT_TIMEOUT = 1.0  # seconds, /app/info's check of the replica agent
 MAX_REPLICA_BYTES = 1_048_576  # a replica file, as the replica agent limits it
@@ -244,16 +249,20 @@ class Rules:
             log(f"Integration rules loaded ({self.version or 'unknown version'})")
             return True
 
-    def evaluate(self, drive: dict[str, Any]) -> dict[str, Any]:
-        """The verdict the integration would give this drive, at default
-        thresholds and with no held Device Statistics readings. Puts the
-        merged Device Statistics readings on the drive as _devstat, as the
-        integration's coordinator does."""
+    def evaluate(self, drive: dict[str, Any],
+                 thresholds: dict[str, int] | None = None) -> dict[str, Any]:
+        """The verdict the integration would give this drive, with these
+        threshold overrides ({label: int}, none for the defaults) and no held
+        Device Statistics readings. Puts the merged Device Statistics
+        readings on the drive as _devstat, as the integration's coordinator
+        does. "limits" is every threshold label of the drive as
+        threshold_limits() gives it."""
         attention = self.attention
         assert attention is not None
         if self.devstat is not None:
             drive[self.devstat.DEVSTAT_KEY], _ = self.devstat.merge_devstat(drive, None)
-        state, severity, reasons, accepted = attention.evaluate_attention(drive)
+        overrides = dict(thresholds or {})
+        state, severity, reasons, accepted = attention.evaluate_attention(drive, overrides or None)
         readings = attention.current_readings(drive)
         reasons_text = attention.compose_reasons_text(state, reasons, accepted)
         return {
@@ -264,6 +273,7 @@ class Rules:
             "readings": readings,
             "reasons_text": reasons_text,
             "rules_version": self.version,
+            "limits": threshold_limits(attention, drive, overrides),
         }
 
 
@@ -277,6 +287,113 @@ def pool_verdict(pool: dict[str, Any], rules: Rules | None = None) -> dict[str, 
         raise RuntimeError("pool rules are not loaded")
     problems = list(pool_health.pool_problems(pool))
     return {"state": "YES" if problems else "NO", "problems": problems}
+
+
+# ── Thresholds ──────────────────────────────────────────────────────────────
+#
+# The integration's per-drive thresholds: per label, "accept up to N" (for the
+# NVMe spare, "accept down to N"). Only values that differ from the default
+# are stored. threshold_limits() lists a drive's labels with the reading, the
+# default, the value in force and what it means for the card.
+
+# Label -> the drive view row it belongs to, for the labels no reason table
+# names (the rest come from _REASON_LABELS).
+_LABEL_ROWS = {
+    "SSD Wear Percent Used": "wear",
+    "NVMe Media Errors": "media_errors",
+    "NVMe Spare Warn Below": "available_spare",
+}
+_COMPARE_WORDS = {"gt": "alert above", "ge": "alert at", "lt": "alert below"}
+
+
+def label_row_key(label: str) -> str | None:
+    """The drive view row key a threshold label sits on."""
+    if label in _LABEL_ROWS:
+        return _LABEL_ROWS[label]
+    found = _REASON_LABELS.get(label)
+    return found[0] if found else None
+
+
+def _row_name(key: str | None, label: str) -> str:
+    for row_key, name, *_rest in _ATA_ROWS:
+        if row_key == key:
+            return name
+    for row_key, name in _NVME_ROWS + _SCSI_ROWS:
+        if row_key == key:
+            return name
+    return label
+
+
+def _trips(value: int, limit: int, compare: str) -> bool:
+    if compare == "ge":
+        return value >= limit
+    if compare == "lt":
+        return value < limit
+    return value > limit
+
+
+def threshold_text(limit: int, default: int, compare: str, unit: str) -> str:
+    """ "alert above 5, default 0", the note of a row with an override."""
+    return f"{_COMPARE_WORDS.get(compare, 'alert above')} {limit}{unit}, default {default}{unit}"
+
+
+def accept_value(reading: int, compare: str) -> int:
+    """The threshold that accepts this reading as normal."""
+    return reading + 1 if compare == "ge" else reading
+
+
+def clean_overrides(raw: Any) -> dict[str, int]:
+    """{label: int} from stored data; anything else is dropped."""
+    out: dict[str, int] = {}
+    if isinstance(raw, dict):
+        for label, value in raw.items():
+            if isinstance(label, str) and label and not isinstance(value, bool):
+                try:
+                    out[label] = int(value)
+                except (TypeError, ValueError):
+                    continue
+    return out
+
+
+def threshold_limits(attention: ModuleType, drive: dict[str, Any],
+                     overrides: dict[str, int]) -> list[dict[str, Any]]:
+    """Every threshold label the drive's protocol has, in the integration's
+    form order: {label, slug, reading, default, value, overridden, flagged,
+    accepted, compare, unit, row, name}. reading is None for a label the
+    drive does not report. flagged: the reading trips the value in force.
+    accepted: an override keeps a reading that the default would flag from
+    being flagged. The drive must carry its _devstat (Rules.evaluate)."""
+    labels = list(attention.labels_for_drive(drive))
+    readings = attention.current_readings(drive)
+    order = getattr(attention, "form_order", None)
+    if callable(order):
+        labels = list(order(labels, readings))
+    values = attention.prefill_thresholds(drive, overrides)
+    compares = getattr(attention, "_THRESHOLD_COMPARE", {})
+    gauges = getattr(attention, "GAUGE_LABELS", frozenset())
+    nvme = _smart_data(drive).get("nvme_smart_health_information_log") or {}
+    out: list[dict[str, Any]] = []
+    for label in labels:
+        default = int(attention.default_threshold(label))
+        value = int(values.get(label, default))
+        compare = compares.get(label, "gt")
+        reading = readings.get(label)
+        flagged = reading is not None and _trips(reading, value, compare)
+        if (flagged and label == "NVMe Spare Warn Below"
+                and _int(nvme.get("available_spare_threshold")) is not None
+                and reading <= _int(nvme.get("available_spare_threshold"))):
+            flagged = False  # the drive's own limit: critical, never a threshold
+        overridden = label in overrides and value != default
+        accepted = (overridden and reading is not None and not flagged
+                    and _trips(reading, default, compare))
+        key = label_row_key(label)
+        out.append({
+            "label": label, "slug": attention.threshold_slug(label), "reading": reading,
+            "default": default, "value": value, "overridden": overridden,
+            "flagged": flagged, "accepted": accepted, "compare": compare,
+            "unit": "%" if label in gauges else "", "row": key, "name": _row_name(key, label),
+        })
+    return out
 
 
 # ── The drive view ──────────────────────────────────────────────────────────
@@ -754,6 +871,22 @@ def drive_view(drive: dict[str, Any], verdict: dict[str, Any] | None) -> dict[st
         if row["mark"] != "crit":  # a critical mark is never weakened
             row["mark"] = found["mark"]
         row["expect"] = found["expect"]
+
+    # Thresholds: a row with an override says it in its note, and a reading
+    # the override keeps from being flagged is marked accepted.
+    for limit in (verdict or {}).get("limits") or []:
+        if not (limit.get("overridden") or limit.get("accepted")) or not limit.get("row"):
+            continue
+        for key in (limit["row"], limit["row"] + "_devstat"):
+            row = by_key.get(key)
+            if row is None or row["mark"] == "unk":
+                continue
+            if limit.get("overridden"):
+                row["limit"] = {"value": limit["value"], "default": limit["default"],
+                                "text": threshold_text(limit["value"], limit["default"],
+                                                       limit["compare"], limit["unit"])}
+            if limit.get("accepted") and row["mark"] not in ("crit", "warn"):
+                row["accepted"] = True
 
     block = drive.get("device_statistics")
     devstat = block.get("status") if isinstance(block, dict) else None
@@ -1519,6 +1652,28 @@ def _str_list(raw: Any) -> list[str]:
     return out
 
 
+def _normalize_thresholds(raw: Any) -> dict[str, dict[str, int]]:
+    """The app's own thresholds from the options: a list of {card, label,
+    value} (the Supervisor's schema has no free-form maps) as
+    {card id: {label: int}}. Anything malformed is dropped."""
+    out: dict[str, dict[str, int]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        card, label, value = item.get("card"), item.get("label"), item.get("value")
+        if not (isinstance(card, str) and card and isinstance(label, str) and label):
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            continue
+        out.setdefault(card, {})[label] = int(value)
+    return out
+
+
+def _serialize_thresholds(thresholds: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
+    return [{"card": card, "label": label, "value": int(value)}
+            for card in sorted(thresholds) for label, value in sorted(thresholds[card].items())]
+
+
 def _serialize_host(host: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {"address": host["address"], "port": host["port"]}
     if host.get("password"):
@@ -1599,12 +1754,14 @@ def attach_filesystems(host_key: str, items: list[dict[str, Any]],
 
 
 def _drop_ids(state: dict[str, Any], gone: set[str]) -> dict[str, Any] | None:
-    """The state without these card ids in the order and the hidden list;
-    None (nothing to write) when neither has them."""
-    if not any(i in gone for i in state["card_order"] + state["hidden_cards"]):
+    """The state without these card ids in the order, the hidden list and
+    the app's thresholds; None (nothing to write) when none has them."""
+    thresholds = state.get("thresholds") or {}
+    if not any(i in gone for i in state["card_order"] + state["hidden_cards"] + list(thresholds)):
         return None
     state["card_order"] = [i for i in state["card_order"] if i not in gone]
     state["hidden_cards"] = [i for i in state["hidden_cards"] if i not in gone]
+    state["thresholds"] = {k: v for k, v in thresholds.items() if k not in gone}
     return state
 
 
@@ -1617,6 +1774,7 @@ def _drop_cards(state: dict[str, Any], host_key: str, cid: str,
 
     state["card_order"] = [i for i in state["card_order"] if not gone(i)]
     state["hidden_cards"] = [i for i in state["hidden_cards"] if not gone(i)]
+    state["thresholds"] = {k: v for k, v in (state.get("thresholds") or {}).items() if not gone(k)}
     return state
 
 
@@ -1710,6 +1868,7 @@ class HostStore:
         self.cache = cache
         self.lock = threading.Lock()
         self.last_known: list[dict[str, Any]] | None = None
+        self.last_thresholds: dict[str, dict[str, int]] | None = None
         self._memo_at = 0.0
 
     def _info(self) -> dict[str, Any]:
@@ -1779,6 +1938,8 @@ class HostStore:
                               if host_id(h["address"], h["port"]) not in dropped]
             for key in ("card_order", "hidden_cards"):
                 state[key] = [i for i in state[key] if split_card_id(i)[0] not in dropped]
+            state["thresholds"] = {k: v for k, v in state["thresholds"].items()
+                                   if split_card_id(k)[0] not in dropped}
             return state
 
         state = self.write_all(change)
@@ -1787,13 +1948,28 @@ class HostStore:
                 self.cache.drop(key)
             log(f"Field agent {key} dropped: every card of it was removed")
         return {**options, "hosts": [_serialize_host(h) for h in state["hosts"]],
-                "card_order": state["card_order"], "hidden_cards": state["hidden_cards"]}
+                "card_order": state["card_order"], "hidden_cards": state["hidden_cards"],
+                "thresholds": _serialize_thresholds(state["thresholds"])}
 
     def hosts(self) -> list[dict[str, Any]]:
-        hosts = _normalize_hosts(self._repair(self._options()).get("hosts"))
+        options = self._repair(self._options())
+        hosts = _normalize_hosts(options.get("hosts"))
         self.last_known = hosts
+        self.last_thresholds = _normalize_thresholds(options.get("thresholds"))
         self._memo_at = time.monotonic()
         return hosts
+
+    def thresholds_quick(self) -> dict[str, dict[str, int]]:
+        """The app's own thresholds by card id, read again at most every
+        MEMO_SECONDS; the last known (or none) when the Supervisor cannot be
+        read."""
+        if self.last_thresholds is not None and time.monotonic() - self._memo_at < self.MEMO_SECONDS:
+            return self.last_thresholds
+        try:
+            self.hosts()
+        except ApiError:
+            pass
+        return self.last_thresholds or {}
 
     def hosts_quick(self) -> list[dict[str, Any]]:
         """The stored hosts, read again at most every MEMO_SECONDS; the last
@@ -1822,34 +1998,45 @@ class HostStore:
         options = self._repair(self._options())
         hosts = _normalize_hosts(options.get("hosts"))
         self.last_known = hosts
+        self.last_thresholds = _normalize_thresholds(options.get("thresholds"))
         self._memo_at = time.monotonic()
         return {"hosts": hosts, "card_order": _str_list(options.get("card_order")),
                 "hidden_cards": _str_list(options.get("hidden_cards"))}
 
     def write_all(self, change) -> dict[str, Any]:
-        """One options write for hosts, card_order and hidden_cards together.
+        """One options write for hosts, card_order, hidden_cards and the
+        app's thresholds together.
 
-        change() gets {"hosts", "card_order", "hidden_cards"} (copies) and
-        returns the new state, or None for nothing to save. Every other
-        option is written back as it was read."""
+        change() gets {"hosts", "card_order", "hidden_cards", "thresholds"}
+        (copies; thresholds as {card id: {label: int}}) and returns the new
+        state, or None for nothing to save. Every other option is written
+        back as it was read."""
         with self.lock:
             options = self._options()
             current = {"hosts": _normalize_hosts(options.get("hosts")),
                        "card_order": _str_list(options.get("card_order")),
-                       "hidden_cards": _str_list(options.get("hidden_cards"))}
+                       "hidden_cards": _str_list(options.get("hidden_cards")),
+                       "thresholds": _normalize_thresholds(options.get("thresholds"))}
             state = change({"hosts": [dict(h) for h in current["hosts"]],
                             "card_order": list(current["card_order"]),
-                            "hidden_cards": list(current["hidden_cards"])})
+                            "hidden_cards": list(current["hidden_cards"]),
+                            "thresholds": {k: dict(v) for k, v in current["thresholds"].items()}})
             if state is None:
                 state = current
             else:
+                state.setdefault("thresholds", current["thresholds"])
                 saved = {**options, "hosts": [_serialize_host(h) for h in state["hosts"]]}
                 for key in ("card_order", "hidden_cards"):
                     if state[key] or key in options:
                         saved[key] = _str_list(state[key])
+                thresholds = {k: v for k, v in state["thresholds"].items() if v}
+                state["thresholds"] = thresholds
+                if thresholds or "thresholds" in options:
+                    saved["thresholds"] = _serialize_thresholds(thresholds)
                 self._save(saved)
                 log(f"Field agents and cards saved ({len(state['hosts'])} agents stored)")
             self.last_known = state["hosts"]
+            self.last_thresholds = state["thresholds"]
             self._memo_at = time.monotonic()
             return state
 
@@ -1886,11 +2073,12 @@ def summarize(items: list[dict[str, Any]], ok: bool) -> dict[str, Any]:
             "unsupported": unsupported, "drives": len(drives), "pools": len(pools)}
 
 
-def judge_drive(rules: Rules, drive: dict[str, Any], rules_ok: bool) -> tuple[Any, Any]:
+def judge_drive(rules: Rules, drive: dict[str, Any], rules_ok: bool,
+                thresholds: dict[str, int] | None = None) -> tuple[Any, Any]:
     if not rules_ok:
         return None, drive_view(drive, None)
     work = dict(drive)
-    verdict = rules.evaluate(work)
+    verdict = rules.evaluate(work, thresholds)
     return verdict, drive_view(work, verdict)
 
 
@@ -1900,6 +2088,23 @@ def judge_pool(rules: Rules, pool: dict[str, Any], lab: dict[str, Any] | None,
     if rules_ok and rules.pool_health is not None:
         verdict = pool_verdict(pool, rules)
     return verdict, pool_view(pool, verdict, lab)
+
+
+def _flow_message(step: Any, status: int | None) -> str:
+    """What a Home Assistant flow step says went wrong."""
+    if status is None:
+        return "Home Assistant is not answering"
+    if isinstance(step, dict):
+        if step.get("type") == "abort":
+            return str(step.get("reason") or "aborted")
+        errors = step.get("errors")
+        if isinstance(errors, dict) and errors:
+            return str(errors.get("base") or next(iter(errors.values())))
+        if step.get("message"):
+            return str(step["message"])
+        if step.get("type") in ("form", "menu"):
+            return f"unexpected step {step.get('step_id')}"
+    return f"HTTP {status}"
 
 
 # ── Request handler ─────────────────────────────────────────────────────────
@@ -1928,6 +2133,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
     _ha_cache: tuple[float, dict[str, Any]] | None = None
     # Entry ids whose diagnostics failed; kept for the process life.
     _diagnostics_failed: set[str] = set()
+    # The integration's thresholds read: entry id -> (time, {drive id:
+    # {label: int}} or None when its diagnostics have none), and (entry id,
+    # drive id) -> (time, {label: int}) read through the options flow.
+    _thr_cache: dict[str, tuple[float, dict[str, dict[str, int]] | None]] = {}
+    _thr_flow_cache: dict[tuple[str, str], tuple[float, dict[str, int]]] = {}
 
     # The routes answered by the proxy itself: (method, path pattern, handler
     # name). Path parameters are named groups, percent-decoded before use.
@@ -1954,6 +2164,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ("GET", r"/cards", "_route_cards"),
         ("PUT", r"/cards/order", "_route_cards_order"),
         ("GET", r"/cards/(?P<cid>[^/]+)/file", "_route_card_file"),
+        ("GET", r"/cards/(?P<cid>[^/]+)/thresholds", "_route_thresholds_get"),
+        ("PUT", r"/cards/(?P<cid>[^/]+)/thresholds", "_route_thresholds_put"),
+        ("POST", r"/cards/(?P<cid>[^/]+)/thresholds/accept", "_route_thresholds_accept"),
+        ("POST", r"/cards/(?P<cid>[^/]+)/thresholds/reset", "_route_thresholds_reset"),
         ("PATCH", r"/cards/(?P<cid>[^/]+)", "_route_card_patch"),
         ("DELETE", r"/cards/(?P<cid>[^/]+)", "_route_card_delete"),
     ]
@@ -2417,15 +2631,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
             failed_ids = {str(d.get("id")) for d, _ in payloads if "smart_data" not in d}
 
         items: list[dict[str, Any]] = []
+        resolve = self._threshold_resolver(key)
         for drive, lab in payloads:
             drive_id = str(drive.get("id"))
             if kind != "replicas" and drive_id in failed_ids:
                 items.append({"type": "drive", "id": drive_id, "drive": drive, "verdict": None,
                               "view": None, "lab": None, "error": "not_answering"})
                 continue
-            verdict, view = judge_drive(self.rules, drive, rules_ok)
+            source, overrides = "app", {}
+            if rules_ok:
+                source, overrides, _entry = resolve(card_id(key, drive_card_key(drive, drive_id)),
+                                                    drive_id)
+            verdict, view = judge_drive(self.rules, drive, rules_ok, overrides)
             items.append({"type": "drive", "id": drive_id, "drive": drive, "verdict": verdict,
-                          "view": view, "lab": lab if kind == "replicas" else None})
+                          "view": view, "lab": lab if kind == "replicas" else None,
+                          "thresholds_source": source})
 
         endpoints = info.get("endpoints") or []
         pools_status = "none"
@@ -2829,6 +3049,300 @@ class ProxyHandler(BaseHTTPRequestHandler):
             raise ApiError(502, "replica_agent_failed", "the saved file could not be read back")
         self._send_file(reply, str(entry.get("id")))
 
+    # ── /cards/<id>/thresholds ──
+    #
+    # One source of truth per drive: when the drive is in Home Assistant
+    # (the integration has its device: the blue exit icon) the integration's
+    # stored thresholds, read from the entry's diagnostics, and written
+    # through its options flow; otherwise the app's own, in the app options.
+
+    def _threshold_resolver(self, host_key: str) -> Callable[[str, str], tuple[str, dict[str, int], str | None]]:
+        """For one read of a machine: (card id, drive id) -> (source,
+        overrides, entry id). Home Assistant is looked up once, on the first
+        drive that needs it; each entry's thresholds are read once."""
+        memo: dict[str, Any] = {}
+
+        def resolve(cid: str, drive_id: str) -> tuple[str, dict[str, int], str | None]:
+            if "lookup" not in memo:
+                memo["lookup"] = self._ha_lookup() if self.supervisor.available else None
+            entry_id = self._entry_for_card(memo["lookup"], host_key, cid)
+            if entry_id is not None:
+                return "integration", self._integration_thresholds(entry_id, drive_id), entry_id
+            return "app", dict(self.host_store.thresholds_quick().get(cid) or {}), None
+
+        return resolve
+
+    @staticmethod
+    def _entry_for_card(lookup: dict[str, Any] | None, host_key: str, cid: str) -> str | None:
+        """The integration entry that has this card's device, or None when
+        the card is not in Home Assistant."""
+        if not lookup or not lookup.get("reachable") or lookup.get("installed") is False:
+            return None
+        target = (lookup.get("targets") or {}).get(host_key)
+        if not target:
+            return None
+        key = split_card_id(cid)[1]
+        if key and (key in (target.get("devices") or {}) or lookup.get("lookup") == "entries_only"):
+            return target.get("entry_id")
+        return None
+
+    def _thr_fresh(self, at: float) -> bool:
+        """Home Assistant's thresholds are kept as long as its devices are,
+        and at least a few seconds, so one request reads them once."""
+        return time.monotonic() - at < max(type(self).ha_cache_seconds, THRESHOLD_MIN_SECONDS)
+
+    def _integration_thresholds(self, entry_id: str, drive_id: str) -> dict[str, int]:
+        """The overrides the integration stores for this drive: from the
+        entry's diagnostics, which carry them per drive; when they do not,
+        from its options flow's threshold form, left without saving."""
+        cls = type(self)
+        cached = cls._thr_cache.get(entry_id)
+        if cached is None or not self._thr_fresh(cached[0]):
+            cached = (time.monotonic(), self._diagnostics_thresholds(entry_id))
+            cls._thr_cache[entry_id] = cached
+        drives = cached[1]
+        if drives is not None and drive_id in drives:
+            return dict(drives[drive_id])
+        flow = cls._thr_flow_cache.get((entry_id, drive_id))
+        if flow is None or not self._thr_fresh(flow[0]):
+            try:
+                values = self._flow_read_thresholds(entry_id, drive_id)
+            except ApiError as err:
+                log(f"Could not read the thresholds of {drive_id} from Home Assistant: {err.message}")
+                return {}
+            flow = (time.monotonic(), values)
+            cls._thr_flow_cache[(entry_id, drive_id)] = flow
+        return dict(flow[1])
+
+    def _diagnostics_thresholds(self, entry_id: str) -> dict[str, dict[str, int]] | None:
+        """{drive id: overrides} from the entry's diagnostics, for the drives
+        whose attention block names its thresholds (integration 0.7 and
+        later); None when the diagnostics cannot be read."""
+        if entry_id in self._diagnostics_failed:
+            return None
+        status, diag = self.supervisor.core(
+            "GET", f"/diagnostics/config_entry/{quote(entry_id, safe='')}")
+        if status != 200 or not isinstance(diag, dict):
+            self._diagnostics_failed.add(entry_id)
+            log(f"No diagnostics for entry {entry_id}; not asked again")
+            return None
+        data = diag.get("data") if isinstance(diag.get("data"), dict) else diag
+        out: dict[str, dict[str, int]] = {}
+        drives = data.get("drives") if isinstance(data, dict) else None
+        for drive_id, block in (drives.items() if isinstance(drives, dict) else []):
+            attention = block.get("attention") if isinstance(block, dict) else None
+            if isinstance(attention, dict) and "thresholds" in attention:
+                out[str(drive_id)] = clean_overrides(attention.get("thresholds"))
+        return out
+
+    def _defaults(self) -> Callable[[str], int | None]:
+        attention = self.rules.attention if self.rules.load() else None
+        if attention is None:
+            return lambda _label: None
+        return lambda label: int(attention.default_threshold(label))
+
+    def _options_flow(self, entry_id: str, drive_id: str) -> tuple[str, dict[str, Any]]:
+        """Start the integration's options flow for this entry and walk it
+        to the threshold form of this drive: (flow path, the form step).
+        ApiError 502 with the flow's own words when it goes elsewhere; the
+        flow is then aborted."""
+        sv = self.supervisor
+        status, step = sv.core("POST", "/config/config_entries/options/flow",
+                               {"handler": entry_id, "show_advanced_options": False})
+        if status != 200 or not isinstance(step, dict) or not step.get("flow_id"):
+            raise ApiError(502, "integration_failed", _flow_message(step, status))
+        path = f"/config/config_entries/options/flow/{quote(str(step['flow_id']), safe='')}"
+        try:
+            if step.get("type") == "menu":
+                status, step = sv.core("POST", path, {"next_step_id": "thresholds"})
+            if (status == 200 and isinstance(step, dict) and step.get("type") == "form"
+                    and step.get("step_id") == "thresholds"):
+                status, step = sv.core("POST", path, {"drive_id": drive_id})
+            if not (status == 200 and isinstance(step, dict) and step.get("type") == "form"
+                    and step.get("step_id") == "threshold_form"):
+                raise ApiError(502, "integration_failed", _flow_message(step, status))
+        except ApiError:
+            if isinstance(step, dict) and step.get("type") in ("form", "menu"):
+                sv.core("DELETE", path)
+            raise
+        return path, step
+
+    def _flow_read_thresholds(self, entry_id: str, drive_id: str) -> dict[str, int]:
+        """The overrides as the threshold form prefills them (the value in
+        force per label), the flow aborted without saving."""
+        path, step = self._options_flow(entry_id, drive_id)
+        self.supervisor.core("DELETE", path)
+        default = self._defaults()
+        out: dict[str, int] = {}
+        for field in step.get("data_schema") or []:
+            if not isinstance(field, dict) or not isinstance(field.get("name"), str):
+                continue
+            label, value = field["name"], field.get("default")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            base = default(label)
+            if base is not None and int(value) != base:
+                out[label] = int(value)
+        return out
+
+    def _flow_write_thresholds(self, entry_id: str, drive_id: str,
+                               overrides: dict[str, int]) -> None:
+        """Save these overrides for the drive through the integration's
+        options flow: every label of its threshold form, the default where
+        there is no override, so an override not wanted any more clears."""
+        path, step = self._options_flow(entry_id, drive_id)
+        default = self._defaults()
+        values: dict[str, int] = {}
+        for field in step.get("data_schema") or []:
+            if not isinstance(field, dict) or not isinstance(field.get("name"), str):
+                continue
+            label = field["name"]
+            base = default(label)
+            if base is None:
+                base = field.get("default") if isinstance(field.get("default"), (int, float)) else 0
+            values[label] = int(overrides.get(label, base))
+        status, result = self.supervisor.core("POST", path, values)
+        if status != 200 or not isinstance(result, dict) or result.get("type") != "create_entry":
+            if isinstance(result, dict) and result.get("type") in ("form", "menu"):
+                self.supervisor.core("DELETE", path)
+            raise ApiError(502, "integration_failed", _flow_message(result, status))
+        self._forget_thresholds(entry_id)
+        log(f"Thresholds of {drive_id} saved in Home Assistant ({len(overrides)} changed from the default)")
+
+    def _forget_thresholds(self, entry_id: str | None = None) -> None:
+        cls = type(self)
+        if entry_id is None:
+            cls._thr_cache = {}
+            cls._thr_flow_cache = {}
+            return
+        cls._thr_cache.pop(entry_id, None)
+        cls._thr_flow_cache = {k: v for k, v in cls._thr_flow_cache.items() if k[0] != entry_id}
+
+    def _threshold_card(self, cid: str) -> tuple[str, dict[str, Any]]:
+        """(host id, item) for a real or replica drive card; 404 for a pool,
+        a FILESYSTEM card, a machine's own card or an unknown one. The
+        stored options and Home Assistant's thresholds are read now."""
+        self._forget_thresholds()
+        try:
+            hosts = self.host_store.hosts()
+        except ApiError:
+            hosts = self.host_store.hosts_quick()
+        host_key, key = self._check_card_host(cid, hosts)
+        if key is None:
+            raise ApiError(404, "not_found", "no such drive")
+        item = self._find_card(host_key, cid)
+        if item is None or item.get("type") != "drive" or not isinstance(item.get("drive"), dict):
+            raise ApiError(404, "not_found", "no such drive")
+        if not self.rules.load():
+            raise ApiError(503, "rules_unavailable", "the integration rules are not loaded")
+        return host_key, item
+
+    def _threshold_answer(self, cid: str, source: str, item: dict[str, Any],
+                          overrides: dict[str, int]) -> dict[str, Any]:
+        work = dict(item["drive"])
+        verdict = self.rules.evaluate(work, overrides)
+        return {"card_id": cid, "source": source, "labels": verdict["limits"]}
+
+    def _route_thresholds_get(self, _parsed, cid: str) -> None:
+        host_key, item = self._threshold_card(cid)
+        source, overrides, _entry = self._threshold_resolver(host_key)(cid, str(item["id"]))
+        self._send_json(200, self._threshold_answer(cid, source, item, overrides))
+
+    def _save_thresholds(self, cid: str, change: Callable[[list[dict[str, Any]], dict[str, int]], dict[str, int]]) -> None:
+        """Read the thresholds in force, apply change(limits, overrides) ->
+        new overrides, store them where they live, and answer the result."""
+        host_key, item = self._threshold_card(cid)
+        drive_id = str(item["id"])
+        source, overrides, entry_id = self._threshold_resolver(host_key)(cid, drive_id)
+        limits = self._threshold_answer(cid, source, item, overrides)["labels"]
+        wanted = change(limits, dict(overrides))
+        by_label = {lim["label"]: lim for lim in limits}
+        # Only genuine overrides are stored: a value equal to the default
+        # clears its label, as typing the default does in Home Assistant.
+        wanted = {label: int(value) for label, value in wanted.items()
+                  if label in by_label and int(value) != by_label[label]["default"]}
+        if source == "integration" and entry_id is not None:
+            self._flow_write_thresholds(entry_id, drive_id, wanted)
+        else:
+            def write(state: dict[str, Any]) -> dict[str, Any] | None:
+                if (state["thresholds"].get(cid) or {}) == wanted:
+                    return None
+                if wanted:
+                    state["thresholds"][cid] = wanted
+                else:
+                    state["thresholds"].pop(cid, None)
+                return state
+
+            self.host_store.write_all(write)
+        self._send_json(200, self._threshold_answer(cid, source, item, wanted))
+
+    def _route_thresholds_put(self, _parsed, cid: str) -> None:
+        body = self._read_json()
+        values = body.get("values") if isinstance(body, dict) else None
+        if not isinstance(values, dict):
+            raise ApiError(400, "bad_request", 'give {"values": {"<label>": <number>, ...}}')
+        for label, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 \
+                    or int(value) != value:
+                raise ApiError(400, "bad_request", f"{label}: a whole number from 0 up")
+
+        def change(limits: list[dict[str, Any]], overrides: dict[str, int]) -> dict[str, int]:
+            known = {lim["label"] for lim in limits}
+            unknown = [label for label in values if label not in known]
+            if unknown:
+                raise ApiError(400, "bad_request", f"this drive has no threshold {unknown[0]}")
+            return {**overrides, **{label: int(v) for label, v in values.items()}}
+
+        self._save_thresholds(cid, change)
+
+    def _route_thresholds_accept(self, _parsed, cid: str) -> None:
+        def change(limits: list[dict[str, Any]], overrides: dict[str, int]) -> dict[str, int]:
+            flagged = [lim for lim in limits if lim["flagged"]]
+            if not flagged:
+                raise ApiError(409, "nothing_flagged", "no reading of this drive is flagged")
+            for lim in flagged:
+                overrides[lim["label"]] = accept_value(int(lim["reading"]), lim["compare"])
+            return overrides
+
+        self._save_thresholds(cid, change)
+
+    def _route_thresholds_reset(self, _parsed, cid: str) -> None:
+        self._save_thresholds(cid, lambda _limits, _overrides: {})
+
+    def _copy_thresholds(self, target: str) -> list[str]:
+        """After a machine is added to Home Assistant: each card of it whose
+        device is now there takes its app thresholds into the integration,
+        and they leave the app options. Returns the card ids copied."""
+        app = {cid: v for cid, v in self.host_store.thresholds_quick().items()
+               if split_card_id(cid)[0] == target and v}
+        if not app:
+            return []
+        self._forget_thresholds()
+        lookup = self._ha_lookup(fresh=True)
+        response = self.cache.get(target).get("response")
+        cards = {c["card_id"]: c for c in card_list(response)} if isinstance(response, dict) else {}
+        copied: list[str] = []
+        for cid, overrides in app.items():
+            item = cards.get(cid)
+            entry_id = self._entry_for_card(lookup, target, cid)
+            if item is None or entry_id is None:
+                continue
+            try:
+                self._flow_write_thresholds(entry_id, str(item.get("id")), overrides)
+            except ApiError as err:
+                log(f"Thresholds of {cid} stay in the app: {err.message}")
+                continue
+            copied.append(cid)
+        if copied:
+            def drop(state: dict[str, Any]) -> dict[str, Any]:
+                for cid in copied:
+                    state["thresholds"].pop(cid, None)
+                return state
+
+            self.host_store.write_all(drop)
+            log(f"Thresholds of {len(copied)} card{'s' if len(copied) > 1 else ''} moved to Home Assistant")
+        return copied
+
     # ── /ha/devices ──
 
     def _own_hosts(self) -> set[str]:
@@ -2992,6 +3506,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         finally:
             type(self)._ha_cache = None
             self.supervisor.forget_installed()
+        if outcome.get("result") in ("created", "reloaded", "already_added"):
+            copied = self._copy_thresholds(target)
+            if copied:
+                outcome["thresholds_copied"] = copied
         self._send_json(code, outcome)
 
     def _ha_add(self, target: str, host: str, port: int, token: str) -> tuple[dict[str, Any], int]:

@@ -20,5 +20,8 @@ configuration:
   hidden_cards:
     name: Hidden Cards
     description: Cards hidden with the eye in the Control Center. Shown again from there.
+  thresholds:
+    name: Thresholds
+    description: Alert thresholds of drives that are not in Home Assistant, one line per card and label. Set from a drive's Details in the Control Center; a drive in Home Assistant keeps its thresholds in the integration.
 network:
   9099/tcp: SMART Sniffer Agent API

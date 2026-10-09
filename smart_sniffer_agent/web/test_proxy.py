@@ -136,6 +136,16 @@ class FakeState:
         self.devices: list[dict[str, Any]] | None = []  # None: the template call fails
         self.calls: list[tuple[str, str, Any]] = []
         self.restarted = threading.Event()
+        # The integration's thresholds behind its options flow and its
+        # diagnostics: entry id -> drive id -> the labels of the threshold
+        # form, and entry id -> drive id -> the stored overrides.
+        self.int_labels: dict[str, dict[str, list[str]]] = {}
+        self.int_thresholds: dict[str, dict[str, dict[str, int]]] = {}
+        self.diag_thresholds = True  # False: diagnostics without them (older integration)
+        self.options_flow_abort: str | None = None  # the options flow aborts with this reason
+        self.options_flow: dict[str, Any] = {}
+        # Added to entries and devices when the config flow creates an entry.
+        self.on_create: tuple[dict[str, Any], list[dict[str, Any]]] | None = None
 
 
 STATE = FakeState()
@@ -221,7 +231,28 @@ class FakeSupervisor(BaseHTTPRequestHandler):
                 "step_id": "user", "errors": {}, "data_schema": [],
             })
         elif core == "/config/config_entries/flow/flow123" and method == "POST":
+            if STATE.flow_step.get("type") == "create_entry" and STATE.on_create:
+                entry, devices = STATE.on_create
+                STATE.entries.append(entry)
+                STATE.devices = (STATE.devices or []) + devices
             _json_reply(self, 200, {"flow_id": "flow123", **STATE.flow_step})
+        elif core == "/config/config_entries/options/flow" and method == "POST":
+            entry_id = body.get("handler")
+            if entry_id not in STATE.int_labels:
+                _json_reply(self, 404, {"message": "Invalid handler specified"})
+                return
+            STATE.options_flow = {"entry": entry_id, "drive": None}
+            if STATE.options_flow_abort:
+                _json_reply(self, 200, {"type": "abort", "flow_id": "opt1",
+                                        "reason": STATE.options_flow_abort})
+                return
+            _json_reply(self, 200, {"type": "menu", "flow_id": "opt1", "step_id": "init",
+                                    "menu_options": ["settings", "thresholds"]})
+        elif core == "/config/config_entries/options/flow/opt1" and method == "POST":
+            _json_reply(self, 200, _options_step(body))
+        elif core == "/config/config_entries/options/flow/opt1" and method == "DELETE":
+            STATE.options_flow = {}
+            _json_reply(self, 200, {"message": "Flow aborted"})
         elif core == "/config/config_entries/flow/flow123" and method == "DELETE":
             _json_reply(self, 200, {"message": "Flow aborted"})
         elif core.startswith("/diagnostics/config_entry/") and method == "GET":
@@ -229,13 +260,20 @@ class FakeSupervisor(BaseHTTPRequestHandler):
             if entry_id in STATE.diagnostics_broken:
                 _json_reply(self, 500, {"message": "500 Internal Server Error"})
                 return
-            if entry_id not in STATE.diagnostics:
+            if entry_id not in STATE.diagnostics and entry_id not in STATE.int_labels:
                 _json_reply(self, 404, {"message": "not found"})
                 return
-            config = STATE.diagnostics[entry_id]
+            config = STATE.diagnostics.get(entry_id, {"host": "172.30.33.5", "port": 9099})
             if not isinstance(config, dict):
                 config = {"host": "172.30.33.5", "port": config}
-            _json_reply(self, 200, {"data": {"config_entry": config}})
+            drives = {}
+            for drive_id in STATE.int_labels.get(entry_id, {}):
+                attention: dict[str, Any] = {"state": "NO", "severity": "none", "reasons": []}
+                if STATE.diag_thresholds:
+                    attention["thresholds"] = dict(
+                        STATE.int_thresholds.get(entry_id, {}).get(drive_id) or {})
+                drives[drive_id] = {"summary": {"model": "x"}, "attention": attention}
+            _json_reply(self, 200, {"data": {"config_entry": config, "drives": drives}})
         elif core == "/template" and method == "POST":
             if STATE.devices is None:
                 _json_reply(self, 400, {"message": "Error rendering template"})
@@ -261,6 +299,56 @@ class FakeSupervisor(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self._dispatch("DELETE")
+
+
+# The integration's threshold form as Home Assistant serves it: one number
+# field per label, prefilled with the value in force; a value equal to the
+# default clears the override.
+INT_DEFAULTS = {"Command Timeout": 100, "SSD Wear Percent Used": 90, "NVMe Spare Warn Below": 20}
+ATA_LABELS = ["Reallocated Sector Count", "Current Pending Sector Count", "Command Timeout",
+              "Offline Uncorrectable Errors", "Reallocated Event Count",
+              "Reported Uncorrectable Errors", "Spin Retry Count", "Total Offline Uncorrectable",
+              "Uncorrectable Error Count", "SSD Wear Percent Used"]
+
+
+def _threshold_form(entry_id: str, drive_id: str) -> dict[str, Any]:
+    stored = STATE.int_thresholds.get(entry_id, {}).get(drive_id) or {}
+    return {"type": "form", "flow_id": "opt1", "handler": entry_id, "step_id": "threshold_form",
+            "errors": None, "description_placeholders": {"drive": drive_id},
+            "data_schema": [{"name": label, "optional": True,
+                             "default": stored.get(label, INT_DEFAULTS.get(label, 0)),
+                             "selector": {"number": {"min": 0, "step": 1, "mode": "box"}}}
+                            for label in STATE.int_labels[entry_id][drive_id]]}
+
+
+def _options_step(body: dict[str, Any]) -> dict[str, Any]:
+    flow = STATE.options_flow
+    entry_id = flow.get("entry")
+    if entry_id is None:
+        return {"type": "abort", "reason": "unknown_flow"}
+    drives = STATE.int_labels[entry_id]
+    if body.get("next_step_id") == "thresholds":
+        if len(drives) == 1:
+            flow["drive"] = next(iter(drives))
+            return _threshold_form(entry_id, flow["drive"])
+        return {"type": "form", "flow_id": "opt1", "step_id": "thresholds", "errors": None,
+                "data_schema": [{"name": "drive_id", "required": True,
+                                 "selector": {"select": {"options": [
+                                     {"value": d, "label": d} for d in drives]}}}]}
+    if "drive_id" in body:
+        if body["drive_id"] not in drives:
+            return {"type": "form", "flow_id": "opt1", "step_id": "thresholds",
+                    "errors": {"drive_id": "invalid_drive"}, "data_schema": []}
+        flow["drive"] = body["drive_id"]
+        return _threshold_form(entry_id, flow["drive"])
+    drive_id = flow.get("drive")
+    labels = drives[drive_id]
+    chosen = {label: int(body[label]) for label in labels
+              if label in body and int(body[label]) != INT_DEFAULTS.get(label, 0)}
+    STATE.int_thresholds.setdefault(entry_id, {})[drive_id] = chosen
+    STATE.options_flow = {}
+    return {"type": "create_entry", "flow_id": "opt1", "handler": entry_id, "title": "",
+            "result": True}
 
 
 APP_TOKEN = "app-token-123"  # this app's agent token (the token option)
@@ -2520,3 +2608,313 @@ def test_replica_filesystems_from_the_mock(proxy):
     assert read["filesystem_cards"] == []
     for card in added["cards"]:
         proxy.request("DELETE", f"/replicas/{quote(card['card_id'], safe='')}")
+
+
+# ── Thresholds ──────────────────────────────────────────────────────────────
+
+def _thr_drive(serial: str, **attrs: int) -> dict[str, Any]:
+    names = {"realloc": "Reallocated_Sector_Ct", "pending": "Current_Pending_Sector",
+             "timeout": "Command_Timeout"}
+    return simple_drive("sda", serial, {names[k]: v for k, v in attrs.items()})
+
+
+def _in_ha(proxy, entry_id: str, serial: str, overrides: dict[str, int] | None = None) -> str:
+    """This app's agent in Home Assistant as entry_id, the drive's device
+    in it, the integration storing these overrides. Returns the card id."""
+    STATE.entries = [_entry(entry_id, f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})")]
+    STATE.devices = [_device(f"dev-{serial}", entry_id, serial=serial)]
+    STATE.int_labels = {entry_id: {"sda": list(ATA_LABELS)}}
+    STATE.int_thresholds = {entry_id: {"sda": dict(overrides or {})}}
+    return f"self|{serial}"
+
+
+def _options_flow_calls() -> list[tuple[str, str, Any]]:
+    return [c for c in STATE.calls if c[1].startswith("/core/api/config/config_entries/options/flow")]
+
+
+def _labels(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {lim["label"]: lim for lim in body["labels"]}
+
+
+def _app_thresholds() -> list[dict[str, Any]]:
+    return STATE.options.get("thresholds") or []
+
+
+@needs_rules
+def test_thresholds_app_source_put_and_clear(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-APP", realloc=3)]
+    cid = "self|THR-APP"
+    status, body = proxy.get(f"/cards/{quote(cid, safe='')}/thresholds")
+    assert status == 200 and body["source"] == "app"
+    labels = _labels(body)
+    # Only the labels the drive's protocol has: the ATA ones, no NVMe spare.
+    assert "NVMe Spare Warn Below" not in labels and "Reallocated Sector Count" in labels
+    realloc = labels["Reallocated Sector Count"]
+    assert {k: realloc[k] for k in ("slug", "reading", "default", "value", "overridden")} == {
+        "slug": "reallocated_sector_count", "reading": 3, "default": 0, "value": 0,
+        "overridden": False}
+    assert realloc["flagged"] is True and labels["Command Timeout"]["default"] == 100
+    assert _options_flow_calls() == []  # not in Home Assistant: nothing asked there
+
+    status, body = proxy.request("PUT", f"/cards/{quote(cid, safe='')}/thresholds",
+                                 {"values": {"Reallocated Sector Count": 5, "Command Timeout": 100}})
+    assert status == 200 and body["source"] == "app"
+    assert _labels(body)["Reallocated Sector Count"]["value"] == 5
+    assert _labels(body)["Reallocated Sector Count"]["accepted"] is True
+    # The default for Command Timeout is not stored.
+    assert _app_thresholds() == [{"card": cid, "label": "Reallocated Sector Count", "value": 5}]
+    assert STATE.options["hosts"] == []  # every other option as it was
+
+    # The card is judged with the override: accepted, not flagged.
+    _, drives = proxy.get("/fleet/hosts/self/drives")
+    item = drives["items"][0]
+    assert item["thresholds_source"] == "app" and item["verdict"]["state"] == "NO"
+    row = {r["key"]: r for r in item["view"]["rows"]}["reallocated"]
+    assert row["mark"] is None and row["accepted"] is True
+    assert row["limit"]["text"] == "alert above 5, default 0"
+
+    # A value equal to the default clears the override, and the option empties.
+    status, body = proxy.request("PUT", f"/cards/{quote(cid, safe='')}/thresholds",
+                                 {"values": {"Reallocated Sector Count": 0}})
+    assert status == 200 and _labels(body)["Reallocated Sector Count"]["overridden"] is False
+    assert _app_thresholds() == []
+    _, drives = proxy.get("/fleet/hosts/self/drives")
+    assert drives["items"][0]["verdict"]["state"] == "YES"
+
+
+@needs_rules
+def test_thresholds_put_refusals(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-BAD")]
+    path = f"/cards/{quote('self|THR-BAD', safe='')}/thresholds"
+    for body in ({}, {"values": {"Reallocated Sector Count": -1}},
+                 {"values": {"Reallocated Sector Count": 1.5}},
+                 {"values": {"Reallocated Sector Count": True}},
+                 {"values": {"NVMe Spare Warn Below": 10}}):
+        status, answer = proxy.request("PUT", path, body)
+        assert status == 400 and answer["error"] == "bad_request", body
+    assert _option_writes() == []
+
+
+@needs_rules
+def test_thresholds_integration_source_from_diagnostics(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-HA", realloc=24)]
+    cid = _in_ha(proxy, "e-thr-diag", "THR-HA", {"Reallocated Sector Count": 30})
+    # The app has an override of its own for the card: Home Assistant wins.
+    STATE.options["thresholds"] = [{"card": cid, "label": "Reallocated Sector Count", "value": 2}]
+    status, body = proxy.get(f"/cards/{quote(cid, safe='')}/thresholds")
+    assert status == 200 and body["source"] == "integration"
+    realloc = _labels(body)["Reallocated Sector Count"]
+    assert realloc["value"] == 30 and realloc["overridden"] and realloc["accepted"]
+    # Read from the diagnostics; no options flow was started.
+    assert ("GET", "/core/api/diagnostics/config_entry/e-thr-diag", None) in STATE.calls
+    assert _options_flow_calls() == []
+    # The card's verdict uses the integration's 30: the same as Home Assistant.
+    _, drives = proxy.get("/fleet/hosts/self/drives")
+    item = drives["items"][0]
+    assert item["thresholds_source"] == "integration"
+    assert item["verdict"]["state"] == "NO"
+    assert item["verdict"]["accepted"] == ["Reallocated Sector Count: 24 (accepted 30)"]
+
+
+@needs_rules
+def test_thresholds_integration_read_through_the_flow(proxy):
+    """Diagnostics without thresholds: the form's prefill, the flow aborted."""
+    SELF_AGENT.drives = [_thr_drive("THR-FLOW", realloc=24)]
+    cid = _in_ha(proxy, "e-thr-flow", "THR-FLOW", {"Reallocated Sector Count": 30})
+    STATE.diag_thresholds = False
+    status, body = proxy.get(f"/cards/{quote(cid, safe='')}/thresholds")
+    assert status == 200 and body["source"] == "integration"
+    assert _labels(body)["Reallocated Sector Count"]["value"] == 30
+    calls = [(m, p.rsplit("/", 1)[-1], b) for m, p, b in _options_flow_calls()]
+    assert calls == [
+        ("POST", "flow", {"handler": "e-thr-flow", "show_advanced_options": False}),
+        ("POST", "opt1", {"next_step_id": "thresholds"}),
+        ("DELETE", "opt1", None),
+    ]
+    assert STATE.int_thresholds["e-thr-flow"]["sda"] == {"Reallocated Sector Count": 30}
+
+
+@needs_rules
+def test_thresholds_integration_write_through_the_flow(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-W", realloc=24, timeout=150)]
+    cid = _in_ha(proxy, "e-thr-write", "THR-W", {"Command Timeout": 200})
+    # Two drives in the entry: the flow asks which one.
+    STATE.int_labels["e-thr-write"]["sdb"] = list(ATA_LABELS)
+    status, body = proxy.request("PUT", f"/cards/{quote(cid, safe='')}/thresholds",
+                                 {"values": {"Reallocated Sector Count": 30}})
+    assert status == 200 and body["source"] == "integration"
+    posts = [(p.rsplit("/", 1)[-1], b) for m, p, b in _options_flow_calls() if m == "POST"]
+    assert posts[:3] == [
+        ("flow", {"handler": "e-thr-write", "show_advanced_options": False}),
+        ("opt1", {"next_step_id": "thresholds"}),
+        ("opt1", {"drive_id": "sda"}),
+    ]
+    # Every label of the form: the overrides, and the default for the rest.
+    submitted = posts[3][1]
+    assert set(submitted) == set(ATA_LABELS)
+    assert submitted["Reallocated Sector Count"] == 30 and submitted["Command Timeout"] == 200
+    assert submitted["Current Pending Sector Count"] == 0 and submitted["SSD Wear Percent Used"] == 90
+    assert STATE.int_thresholds["e-thr-write"]["sda"] == {
+        "Reallocated Sector Count": 30, "Command Timeout": 200}
+    assert _app_thresholds() == []  # nothing in the app options
+    labels = _labels(body)
+    assert labels["Reallocated Sector Count"]["value"] == 30 and labels["Command Timeout"]["value"] == 200
+
+
+@needs_rules
+def test_thresholds_integration_errors_are_502(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-ERR", realloc=2)]
+    cid = _in_ha(proxy, "e-thr-err", "THR-ERR")
+    STATE.options_flow_abort = "no_drives"
+    status, body = proxy.request("PUT", f"/cards/{quote(cid, safe='')}/thresholds",
+                                 {"values": {"Reallocated Sector Count": 3}})
+    assert status == 502 and body == {"error": "integration_failed", "message": "no_drives"}
+    assert STATE.int_thresholds["e-thr-err"]["sda"] == {}
+    assert _app_thresholds() == []
+
+
+@needs_rules
+def test_thresholds_accept_and_reset(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-ACC", realloc=24, pending=3, timeout=150)]
+    cid = "self|THR-ACC"
+    path = f"/cards/{quote(cid, safe='')}/thresholds"
+    status, body = proxy.post(path + "/accept")
+    assert status == 200 and body["source"] == "app"
+    labels = _labels(body)
+    # Each flagged label takes its current reading.
+    assert labels["Reallocated Sector Count"]["value"] == 24
+    assert labels["Current Pending Sector Count"]["value"] == 3
+    assert labels["Command Timeout"]["value"] == 150
+    assert not any(lim["flagged"] for lim in body["labels"])
+    assert {(t["label"], t["value"]) for t in _app_thresholds()} == {
+        ("Reallocated Sector Count", 24), ("Current Pending Sector Count", 3), ("Command Timeout", 150)}
+    _, drives = proxy.get("/fleet/hosts/self/drives")
+    assert drives["items"][0]["verdict"]["state"] == "NO"
+    # Nothing flagged: nothing to accept.
+    status, body = proxy.post(path + "/accept")
+    assert status == 409 and body["error"] == "nothing_flagged"
+    status, body = proxy.post(path + "/reset")
+    assert status == 200 and not any(lim["overridden"] for lim in body["labels"])
+    assert _app_thresholds() == []
+    _, drives = proxy.get("/fleet/hosts/self/drives")
+    assert drives["items"][0]["verdict"]["state"] == "YES"
+
+
+@needs_rules
+def test_thresholds_accept_and_reset_in_home_assistant(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-ACC-HA", realloc=24, pending=3)]
+    cid = _in_ha(proxy, "e-thr-acc", "THR-ACC-HA", {"Spin Retry Count": 4})
+    path = f"/cards/{quote(cid, safe='')}/thresholds"
+    status, body = proxy.post(path + "/accept")
+    assert status == 200 and body["source"] == "integration"
+    assert STATE.int_thresholds["e-thr-acc"]["sda"] == {
+        "Reallocated Sector Count": 24, "Current Pending Sector Count": 3, "Spin Retry Count": 4}
+    status, body = proxy.post(path + "/reset")
+    assert status == 200
+    assert STATE.int_thresholds["e-thr-acc"]["sda"] == {}
+    assert _app_thresholds() == []
+
+
+@needs_rules
+def test_thresholds_only_for_drive_cards(proxy, field):
+    key = f"127.0.0.2:{field}"
+    pools = json.loads((FIXTURES / "pools" / "degraded-faulted.json").read_text(encoding="utf-8"))
+    FIELD["127.0.0.2"].pools = pools[:1]
+    FIELD["127.0.0.2"].filesystems = [_fs("fs-x", "/srv", "/dev/zz9", "ext4")]
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    _, body = proxy.get(f"/fleet/hosts/{key}/drives")
+    pool_id = next(i["card_id"] for i in body["items"] if i["type"] == "pool")
+    fs_id = body["filesystem_cards"][0]["card_id"]
+    for cid in (pool_id, fs_id, key, "self|NOPE", "10.9.9.9:9099|X", "self"):
+        status, answer = proxy.get(f"/cards/{quote(cid, safe='')}/thresholds")
+        assert status == 404, cid
+    # A field drive has them, kept in the app.
+    status, answer = proxy.get(f"/cards/{quote(key + '|NUC-1', safe='')}/thresholds")
+    assert status == 200 and answer["source"] == "app"
+
+
+@needs_rules
+def test_thresholds_copied_to_home_assistant_on_add(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-COPY", realloc=24)]
+    cid = "self|THR-COPY"
+    STATE.options["thresholds"] = [
+        {"card": cid, "label": "Reallocated Sector Count", "value": 30},
+        {"card": "replicas|OTHER", "label": "Spin Retry Count", "value": 2},
+    ]
+    _refresh_hosts(proxy)
+    proxy.get("/fleet/hosts/self/drives")  # the card as the page has it
+    STATE.flow_step = {"type": "create_entry", "result": {"entry_id": "e-thr-new"}}
+    STATE.int_labels = {"e-thr-new": {"sda": list(ATA_LABELS)}}
+    STATE.on_create = (_entry("e-thr-new", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})"),
+                       [_device("dev-copy", "e-thr-new", serial="THR-COPY")])
+    status, body = proxy.post("/ha/add", {"target": "self"})
+    assert status == 200 and body == {"result": "created", "entry_id": "e-thr-new",
+                                      "thresholds_copied": [cid]}
+    assert STATE.int_thresholds["e-thr-new"]["sda"] == {"Reallocated Sector Count": 30}
+    # Gone from the app; another machine's stay.
+    assert _app_thresholds() == [{"card": "replicas|OTHER", "label": "Spin Retry Count", "value": 2}]
+    status, body = proxy.get(f"/cards/{quote(cid, safe='')}/thresholds")
+    assert body["source"] == "integration"
+    assert _labels(body)["Reallocated Sector Count"]["value"] == 30
+
+
+@needs_rules
+def test_thresholds_stay_in_the_app_when_the_copy_fails(proxy):
+    SELF_AGENT.drives = [_thr_drive("THR-KEEP", realloc=24)]
+    cid = "self|THR-KEEP"
+    STATE.options["thresholds"] = [{"card": cid, "label": "Reallocated Sector Count", "value": 30}]
+    _refresh_hosts(proxy)
+    proxy.get("/fleet/hosts/self/drives")
+    STATE.flow_step = {"type": "create_entry", "result": {"entry_id": "e-thr-keep"}}
+    STATE.int_labels = {"e-thr-keep": {"sda": list(ATA_LABELS)}}
+    STATE.options_flow_abort = "no_drives"
+    STATE.on_create = (_entry("e-thr-keep", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})"),
+                       [_device("dev-keep", "e-thr-keep", serial="THR-KEEP")])
+    status, body = proxy.post("/ha/add", {"target": "self"})
+    assert status == 200 and body == {"result": "created", "entry_id": "e-thr-keep"}
+    assert _app_thresholds() == [{"card": cid, "label": "Reallocated Sector Count", "value": 30}]
+
+
+@needs_rules
+def test_thresholds_leave_with_a_removed_card(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    STATE.options["thresholds"] = [
+        {"card": f"{key}|NUC-1", "label": "Reallocated Sector Count", "value": 3},
+        {"card": "self|SER-A", "label": "Spin Retry Count", "value": 2},
+    ]
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    status, _ = proxy.request("DELETE", f"/cards/{quote(key + '|NUC-1', safe='')}")
+    assert status == 200
+    assert _app_thresholds() == [{"card": "self|SER-A", "label": "Spin Retry Count", "value": 2}]
+
+
+def test_thresholds_options_shape(mod):
+    raw = [{"card": "self|A", "label": "Spin Retry Count", "value": 2},
+           {"card": "self|A", "label": "Command Timeout", "value": 150},
+           {"card": "", "label": "x", "value": 1}, {"card": "self|B", "label": "y", "value": -1},
+           {"card": "self|B", "label": "z", "value": True}, "junk"]
+    parsed = mod._normalize_thresholds(raw)
+    assert parsed == {"self|A": {"Spin Retry Count": 2, "Command Timeout": 150}}
+    assert mod._serialize_thresholds(parsed) == [
+        {"card": "self|A", "label": "Command Timeout", "value": 150},
+        {"card": "self|A", "label": "Spin Retry Count", "value": 2}]
+
+
+@needs_rules
+def test_view_override_notes(mod):
+    drive = _ata_drive({"Reallocated_Sector_Ct": 24, "Current_Pending_Sector": 3})
+    work = copy.deepcopy(drive)
+    verdict = mod.loaded_rules.evaluate(work, {"Reallocated Sector Count": 5, "Current Pending Sector Count": 3})
+    rows = _rows(mod.drive_view(work, verdict))
+    # Over its override: flagged, and the note names the override.
+    assert rows["reallocated"]["mark"] == "crit"
+    assert rows["reallocated"]["limit"]["text"] == "alert above 5, default 0"
+    # Within its override: accepted, not flagged.
+    assert rows["pending"]["mark"] is None and rows["pending"]["accepted"] is True
+    limits = {lim["label"]: lim for lim in verdict["limits"]}
+    assert limits["Reallocated Sector Count"]["flagged"] and not limits["Current Pending Sector Count"]["flagged"]
+    assert mod.accept_value(91, "ge") == 92 and mod.accept_value(15, "lt") == 15
+    assert mod.threshold_text(15, 20, "lt", "%") == "alert below 15%, default 20%"

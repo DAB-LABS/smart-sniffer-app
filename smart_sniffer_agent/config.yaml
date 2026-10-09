@@ -67,6 +67,7 @@ options:
   hosts: []
   card_order: []
   hidden_cards: []
+  thresholds: []
 schema:
   port: port
   token: "str?"
@@ -83,6 +84,10 @@ schema:
     - "str?"
   hidden_cards:
     - "str?"
+  thresholds:
+    - card: str
+      label: str
+      value: "int(0,)"
 
 # Container image (uncomment for published releases, must be removed for local builds)
 # image: "ghcr.io/dab-labs/{arch}-smart-sniffer-agent"
