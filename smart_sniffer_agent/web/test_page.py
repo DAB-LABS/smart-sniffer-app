@@ -516,13 +516,16 @@ def test_notes_follow_labels(open_page):
     assert stats.locator("dd").inner_text() == "not applicable"
 
 
-def test_chevron_is_80_percent(open_page):
+def test_chevron_size_and_stroke(open_page):
     p = open_page()
     box = p.page.locator(".chev svg").first.bounding_box()
-    assert abs(box["width"] - 22 * 0.8) < 0.05 and abs(box["height"] - 13 * 0.8) < 0.05, box
-    # The drawn line is as heavy as before: 2.2 user units at 22 px over 20 units.
+    # 80% of the 17.6 by 10.4 it was.
+    assert abs(box["width"] - 17.6 * 0.8) < 0.05 and abs(box["height"] - 10.4 * 0.8) < 0.05, box
+    # The 20 by 12 viewBox scales by the smaller factor; the drawn line is one
+    # pixel heavier than the 2.75 units at 10.4 / 12 it was.
     sw = p.page.locator(".chev svg").first.evaluate("e => parseFloat(getComputedStyle(e).strokeWidth)")
-    assert abs(sw * box["width"] / 20 - 2.2 * 22 / 20) < 0.01, sw
+    scale = min(box["width"] / 20, box["height"] / 12)
+    assert abs(sw * scale - (2.75 * 10.4 / 12 + 1)) < 0.01, (sw, scale)
 
 
 # ── The grid ─────────────────────────────────────────────────────────────────

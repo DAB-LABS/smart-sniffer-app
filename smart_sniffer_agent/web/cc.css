@@ -187,9 +187,10 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .chev { margin-left: auto; background: none; border: 0; padding: 4px 2px; cursor: pointer; line-height: 0; color: var(--grey); }
 /* The outline for keyboard focus only, never after a click */
 .chev:focus:not(:focus-visible) { outline: none; }
-/* 80% of its first size (22 by 13); the stroke is raised by the same
-   factor so the drawn line stays as heavy as before (2.42 px). */
-.chev svg { width: 17.6px; height: 10.4px; fill: none; stroke: currentColor; stroke-width: 2.75; stroke-linecap: round; stroke-linejoin: round;
+/* 64% of its first size (22 by 13): 80% of the 17.6 by 10.4 before. The
+   20 by 12 viewBox scales by the height, 8.32 / 12, so 4.88 units draw a
+   3.38 px line, one pixel heavier than the 2.38 px before. */
+.chev svg { width: 14.08px; height: 8.32px; fill: none; stroke: currentColor; stroke-width: 4.88; stroke-linecap: round; stroke-linejoin: round;
             transition: transform 0.18s ease; }
 .chev[aria-expanded="true"] svg { transform: rotate(180deg); }
 .chev.attention { color: var(--att); }
