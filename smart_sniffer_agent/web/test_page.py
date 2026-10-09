@@ -316,22 +316,19 @@ def test_colours(open_page):
     assert colours == {".h-ok": OK, ".h-att": ATT, ".h-maybe": MAYBE, ".h-fail b": ATT,
                        ".chev.attention": ATT, ".chev.maybe": MAYBE, ".chev.ok": OK, "a.exit": BLUE}
     assert p.page.evaluate("getComputedStyle(document.querySelector('button.exit.add')).color") != BLUE
-    # The health box: a 1 px frame in the full state colour, all the way
-    # round; Health not known is grey and dashed. Each box is filled with
-    # its own frame colour at 20%.
-    for cid, rgb, style, fill in ((NAS_ATT, ATT, "solid", "rgba(204, 107, 99, 0.2)"),
-                                  (NAS_MAYBE, MAYBE, "solid", "rgba(204, 159, 82, 0.2)"),
-                                  (NVME, OK, "solid", "rgba(93, 163, 114, 0.2)"),
-                                  (NAS_USB, None, "dashed", "rgba(143, 143, 143, 0.2)")):
-        assert by_id(p, cid).locator(".hbox").evaluate("e => getComputedStyle(e).backgroundColor") == fill, cid
+    # The health box: a 1 px frame in the state colour at 25%, all the way
+    # round, and no fill; Health not known is grey (#8f8f8f) at 25%, dashed.
+    for cid, style, frame in ((NAS_ATT, "solid", "rgba(204, 107, 99, 0.25)"),
+                              (NAS_MAYBE, "solid", "rgba(204, 159, 82, 0.25)"),
+                              (NVME, "solid", "rgba(93, 163, 114, 0.25)"),
+                              (NAS_USB, "dashed", "rgba(143, 143, 143, 0.25)")):
+        assert by_id(p, cid).locator(".hbox").evaluate("e => getComputedStyle(e).backgroundColor") == "rgba(0, 0, 0, 0)", cid
         box = by_id(p, cid).locator(".hbox").evaluate(BOX_STROKE)
-        assert len({tuple(side) for side in box}) == 1, (cid, box)
-        colour, width, kind = box[0]
-        assert width == "1px" and kind == style, (cid, box)
-        if rgb:
-            assert colour == rgb, (cid, box)
-        else:
-            assert colour not in (ATT, MAYBE, OK), (cid, box)
+        assert box == [[frame, "1px", style]] * 4, (cid, box)
+    # The words in the box keep their full colour.
+    assert by_id(p, NAS_ATT).locator(".hbox .h-att").evaluate("e => getComputedStyle(e).color") == ATT
+    assert by_id(p, NAS_MAYBE).locator(".hbox .h-maybe").evaluate("e => getComputedStyle(e).color") == MAYBE
+    assert by_id(p, NVME).locator(".hbox .h-ok").evaluate("e => getComputedStyle(e).color") == OK
     # A flagged row's label and value are in its state colour; its note is not.
     for mark, rgb, cid in (("crit", ATT, NAS_ATT), ("warn", MAYBE, NAS_MAYBE)):
         row = by_id(p, cid).locator(f".pw-row.{mark}").first
@@ -401,9 +398,9 @@ def test_health_box(open_page):
             r = el.bounding_box()
             assert r["x"] >= b["x"] and r["x"] + r["width"] <= b["x"] + b["width"] + 0.5, (r, b)
             assert r["y"] >= b["y"] and r["y"] + r["height"] <= b["y"] + b["height"] + 0.5, (r, b)
-        assert att.locator(".hbox").evaluate(BOX_STROKE)[0][0] == ATT
-        # Open, the fill is the same 20% tint behind all of Details.
-        assert att.locator(".hbox").evaluate("e => getComputedStyle(e).backgroundColor") == "rgba(204, 107, 99, 0.2)"
+        assert att.locator(".hbox").evaluate(BOX_STROKE)[0][0] == "rgba(204, 107, 99, 0.25)"
+        # Open, there is still no fill.
+        assert att.locator(".hbox").evaluate("e => getComputedStyle(e).backgroundColor") == "rgba(0, 0, 0, 0)"
         # Open every box: still nothing scrolls.
         closed = p.page.locator(".chev[aria-expanded=false]")
         while closed.count():
