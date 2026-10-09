@@ -768,6 +768,26 @@ def test_scenario_picker_on_touch(browser, server):
         ctx.close()
 
 
+def test_replica_with_no_scenario(open_page):
+    """A replica carried over from the old Test Lab has no current scenario: the picker says so."""
+    p = open_page("REPLICAS=carried")
+    rep = by_id(p, REP_NVME)
+    pick, current, options = _scenario(rep)
+    assert current == "Choose scenario"
+    assert options[0] == "Choose scenario" and options[1:] == ["Healthy NVMe", "NVMe wear", "Media errors",
+                                                                  "Critical warning"]
+    assert rep.locator(".scen-size").text_content() == "Choose scenario"
+    assert pick.evaluate("e => e.getBoundingClientRect().width") > 80
+    colour = pick.evaluate("e => getComputedStyle(e).color")
+    assert colour != by_id(p, REP_FAILED).locator("select.scen").evaluate("e => getComputedStyle(e).color")
+    pick.select_option("media_errors")
+    p.page.wait_for_function(f"() => document.querySelector('[data-card=\"{REP_NVME}\"] .h-att')")
+    posts = p.api("POST", r"/mock/drives/[^/]+/scenario$")
+    assert len(posts) == 1 and json.loads(posts[0][2]) == {"id": "media_errors"}
+    pick, current, options = _scenario(rep)
+    assert current == "Media errors" and "Choose scenario" not in options
+
+
 def test_download(open_page, tmp_path):
     p = open_page()
     rep = by_id(p, REP_FAILED)

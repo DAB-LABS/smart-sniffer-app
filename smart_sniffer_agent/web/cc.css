@@ -134,6 +134,7 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
         min-width: 0; cursor: pointer; text-overflow: ellipsis;
         background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5'%3E%3Cpath d='M.8.8 4 4 7.2.8' fill='none' stroke='%238f8f8f' stroke-width='1.3'/%3E%3C/svg%3E");
         background-repeat: no-repeat; background-position: right 5px center; background-size: 8px 5px; }
+.scen.empty { color: var(--dim); }
 .scen:hover { border-color: var(--rule-2); color: var(--paper); }
 .scen:focus { outline: none; border-color: var(--paper); color: var(--paper); }
 .scen:disabled { cursor: progress; color: var(--dim); }

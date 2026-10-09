@@ -966,6 +966,11 @@ function cc() {
       const o = ((it.lab && it.lab.scenario && it.lab.scenario.options) || []).find((x) => x.id === cur);
       return o ? o.label : '';
     },
+    // What the picker shows: the scenario's name, or "Choose scenario" for a
+    // replica that has none yet (one carried over from the old Test Lab).
+    scenLabel(it) {
+      return this.scenarioName(it) || 'Choose scenario';
+    },
     // The picker on a replica's where line, in place of the scenario's name.
     scenOn(c) {
       return c.src === 'replicas' && c.kind !== 'filesystem' && !!c.it && this.scenOptions(c.it).length > 0;
