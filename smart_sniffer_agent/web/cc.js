@@ -74,7 +74,7 @@ function cc() {
     hostsErr: '',
     drag: null,
     dragOrder: null,
-    ui: { open: {}, confirm: null, ask: null, pw: {}, pwState: {}, busy: {}, note: {} },
+    ui: { open: {}, cols: 1, confirm: null, ask: null, pw: {}, pwState: {}, busy: {}, note: {} },
     add: {
       open: false, block: '', port: '9099', scan: null, scanId: null, last: null, wide: null, error: '',
       ticks: {}, manualHost: '', manualPort: '9099', manualRows: [], manualNone: null, checking: false,
@@ -90,6 +90,7 @@ function cc() {
       this.loadHosts();
       this.loadHa();
       setInterval(() => this.tick(), 1000);
+      this.watchCols();
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) return;
         this.tick();
@@ -380,7 +381,31 @@ function cc() {
         'is-hidden': this.isHidden(c),
         'drop-gap': !!(this.drag && this.drag.id === c.id),
         open: this.isOpen(c),
+        'row-open': this.rowOpen(this.shownCards.findIndex((x) => x.id === c.id)),
       };
+    },
+    // The grid's column count, kept up to date, so a card can tell which
+    // cards share its grid row.
+    watchCols() {
+      const grid = document.querySelector('.grid');
+      if (!grid) return;
+      const read = () => {
+        const n = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length || 1;
+        if (n !== this.ui.cols) this.ui.cols = n;
+      };
+      read();
+      if (window.ResizeObserver) new ResizeObserver(read).observe(grid);
+    },
+    // True for the card at this place in the grid when a card in its grid
+    // row has Details open: that row keeps each card's own height, so an
+    // open card grows down without stretching the cards beside it. Every
+    // card spans one column and there is no dense packing, so the row is
+    // the place divided by the column count.
+    rowOpen(i) {
+      if (i < 0) return false;
+      const cols = this.ui.cols || 1;
+      const row = Math.floor(i / cols);
+      return this.shownCards.slice(row * cols, row * cols + cols).some((x) => this.isOpen(x));
     },
 
     // Where a card comes from.

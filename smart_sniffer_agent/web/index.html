@@ -225,7 +225,7 @@
 
     <!-- The + card: one for the page, always last, never dragged. -->
     <template x-if="!add.open">
-      <button class="card ghost" type="button" aria-expanded="false" aria-label="Add field agents and replicas" @click="openAdd()">
+      <button class="card ghost" :class="{ 'row-open': rowOpen(shownCards.length) }" type="button" aria-expanded="false" aria-label="Add field agents and replicas" @click="openAdd()">
         <span class="plus" aria-hidden="true">+</span>
         <span class="ghost-sub">Field agents and replicas</span>
       </button>

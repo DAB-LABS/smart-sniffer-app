@@ -82,12 +82,11 @@ img { display: block; }
    The grid. Rows stretch to their tallest card, so cards side by side
    line up and every problem row shows; at phone width one column.
    ------------------------------------------------------------------ */
-.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); container-type: inline-size; }
-/* A card with Details open takes two columns, so the raw table fits; with
-   two columns that is the whole row. Only when the grid has room for two
-   (2 x 340 + 14 px), or the grid would grow a column. No dense packing:
-   the saved order stays the order on screen, and a gap may be left. */
-@container (min-width: 694px) { .grid > .card.open { grid-column: span 2; } }
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); }
+/* A card with Details open stays one column and grows down. The cards in
+   its grid row (cc.js marks them row-open) keep their own height instead of
+   stretching to it; rows with no card open still stretch as above. */
+.grid > .row-open { align-self: start; }
 .card { background: var(--panel); border: 1px solid var(--rule-2); border-radius: 6px; padding: 12px 14px 10px;
         position: relative; min-width: 0; display: flex; flex-direction: column; }
 

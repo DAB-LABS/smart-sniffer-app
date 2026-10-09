@@ -1028,48 +1028,89 @@ SPAN = """(e) => {
   return [cols, Math.round((e.getBoundingClientRect().width + gap) / (col + gap))];
 }"""
 WIDE_WRAPS = "els => els.filter((w) => w.scrollWidth > w.clientWidth + 0.5).map((w) => w.outerHTML.slice(0, 80))"
+HEIGHTS = "els => els.map((e) => Math.round(e.getBoundingClientRect().height))"
 
 
-@pytest.mark.parametrize("width,cols,span", [(1280, 3, 2), (740, 2, 2), (390, 1, 1)])
-def test_open_card_spans_two_columns(open_page, width, cols, span):
+@pytest.mark.parametrize("width,cols", [(1280, 3), (740, 2), (390, 1)])
+def test_open_card_stays_one_column(open_page, width, cols):
     p = open_page("", width)
-    c = by_id(p, BARRACUDA)
+    c = by_id(p, NAS_ATT)
     assert c.evaluate(SPAN) == [cols, 1]
+    # Closed, every grid row is as tall as its tallest card.
+    if cols > 1:
+        heights = p.page.eval_on_selector_all(".grid > article.card", HEIGHTS)[:cols * 2]
+        assert len(set(heights[:cols])) == 1 and len(set(heights[cols:])) == 1, heights
+    before = p.page.eval_on_selector_all(".grid > article.card", HEIGHTS)
     c.locator(".chev").click()
     p.page.wait_for_timeout(200)
-    assert c.evaluate(SPAN) == [cols, span]
-    # Two columns: the open card is the whole row.
-    if cols == 2:
-        row = p.page.locator(".grid").bounding_box()
-        box = c.bounding_box()
-        assert abs(box["x"] - row["x"]) < 1 and abs(box["width"] - row["width"]) < 1, (box, row)
-    # The saved order is still the order on screen.
-    assert card_ids(p)[:2] == [NVME, BARRACUDA]
-    # The raw table fits: no wrapper scrolls sideways, on any open card.
-    for cid in (NAS_ATT, NAS_POOL, REP_FAILED, REP_NVME):
+    assert c.evaluate(SPAN) == [cols, 1]
+    assert card_ids(p)[:3] == [NVME, BARRACUDA, NAS_ATT]
+    after = p.page.eval_on_selector_all(".grid > article.card", HEIGHTS)
+    i = card_ids(p).index(NAS_ATT)
+    row = range(i - i % cols, i - i % cols + cols)
+    # The open card grows down; the cards beside it keep their own height.
+    assert after[i] > before[i] + 100, (before[i], after[i])
+    if cols > 1:
+        own = p.page.eval_on_selector_all(".grid > article.card", """els => els.map((e) => {
+          const kids = [...e.children].filter((k) => getComputedStyle(k).display !== 'none');
+          const last = kids[kids.length - 1].getBoundingClientRect();
+          const cs = getComputedStyle(e);
+          return Math.round(last.bottom + parseFloat(cs.paddingBottom) + parseFloat(cs.borderBottomWidth)
+            - e.getBoundingClientRect().top);
+        })""")
+        for j in row:
+            if j != i:
+                assert after[j] < after[i] and abs(after[j] - own[j]) <= 1, (j, after[j], own[j], after[i])
+        # Rows with no card open still stretch to their tallest card.
+        nxt = after[(row[-1] + 1):(row[-1] + 1 + cols)]
+        assert len(set(nxt)) == 1, nxt
+    # The table fits without scrolling sideways, on every open card.
+    for cid in (NAS_POOL, REP_FAILED, REP_NVME, BARRACUDA):
         by_id(p, cid).locator(".chev").click()
     p.page.wait_for_timeout(200)
     assert p.page.locator(".table-wrap").count() >= 5
     assert p.page.eval_on_selector_all(".table-wrap", WIDE_WRAPS) == []
+    assert p.page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert_no_scroll(p)
     assert_inside_cards(p)
-    heads = c.locator("table.attrs").first.locator("thead th:visible").all_inner_texts()
-    if width == 390:
-        # A phone keeps Name, Value and Raw; long names wrap, with the whole name as a tooltip.
-        assert heads == ["Name", "Value", "Raw"], heads
-        assert c.locator("td.c-worst:visible, td.c-thresh:visible, td.c-id:visible").count() == 0
-        name = c.locator("table.attrs td.nm").first
-        assert name.get_attribute("title") == name.inner_text()
-        assert_no_overflow(p)
-    else:
-        assert heads == ["ID", "Name", "Value", "Worst", "Thresh", "Raw"], heads
-    # Closed again, it is one column.
+    assert_no_overflow(p)
+    heads = c.locator("table.attrs thead th:visible").all_inner_texts()
+    # One column wide: ID, Name, Value and Raw; Worst and Thresh hide.
+    assert heads == ["ID", "Name", "Value", "Raw"], heads
+    assert c.locator("td.c-worst:visible, td.c-thresh:visible").count() == 0
+    name = c.locator("table.attrs td.nm").first
+    assert name.get_attribute("title") == name.locator(".lb").inner_text()
+    # Raw sits right next to Value: no spare space between the number columns.
+    gap = c.locator("tbody tr").first.evaluate("""r => {
+      const cells = [...r.cells].filter((x) => getComputedStyle(x).display !== 'none');
+      const v = cells[cells.length - 2].getBoundingClientRect(), raw = cells[cells.length - 1];
+      const text = document.createRange(); text.selectNodeContents(raw);
+      return text.getBoundingClientRect().left - v.right; }""")
+    assert gap < 40, gap
+    # Closed again, the row stretches as before.
+    for cid in (NAS_ATT, NAS_POOL, REP_FAILED, REP_NVME, BARRACUDA):
+        by_id(p, cid).locator(".chev").click()
+    p.page.wait_for_timeout(200)
+    assert p.page.eval_on_selector_all(".grid > article.card", HEIGHTS) == before
+
+
+def test_wide_card_has_no_spacer_column(open_page):
+    p = open_page("", 1280)
+    p.page.add_style_tag(content=".grid { grid-template-columns: 1fr !important; }")
+    c = by_id(p, NAS_ATT)
     c.locator(".chev").click()
     p.page.wait_for_timeout(200)
-    assert c.evaluate(SPAN) == [cols, 1]
+    assert c.locator("table.attrs thead th:visible").all_inner_texts() == ["ID", "Name", "Value", "Worst", "Thresh", "Raw"]
+    # Name takes the spare width; Thresh and Raw sit together at the right.
+    gap = c.locator("tbody tr").first.evaluate("""r => {
+      const t = r.cells[4].getBoundingClientRect(), raw = r.cells[5];
+      const text = document.createRange(); text.selectNodeContents(raw);
+      return text.getBoundingClientRect().left - t.right; }""")
+    assert gap < 120, gap
+    assert c.locator("td.nm").first.bounding_box()["width"] > 600
 
 
-def test_drag_with_a_wide_card(open_page):
+def test_drag_with_an_open_card(open_page):
     p = open_page()
     by_id(p, BARRACUDA).locator(".chev").click()
     p.page.wait_for_timeout(200)
@@ -1085,7 +1126,11 @@ def test_drag_with_a_wide_card(open_page):
     p.page.wait_for_timeout(300)
     ids = card_ids(p)
     assert ids.index(BARRACUDA) == ids.index(NAS_MAYBE) + 1, ids[:6]
-    assert by_id(p, BARRACUDA).evaluate(SPAN) == [3, 2]
+    assert by_id(p, BARRACUDA).evaluate(SPAN) == [3, 1]
+    # The new row of the open card is the one that keeps its own heights.
+    i = ids.index(BARRACUDA)
+    marked = p.page.eval_on_selector_all(".grid > article.card", "els => els.map((e) => e.classList.contains('row-open'))")
+    assert [j for j, m in enumerate(marked) if m] == list(range(i - i % 3, i - i % 3 + 3)), marked
     assert len(p.api("PUT", r"/cards/order$")) == 1
 
 
@@ -1160,9 +1205,9 @@ def test_screenshots(open_page):
             by_id(p, cid).locator(".chev").click()
             _shot(p, name, by_id(p, cid))
             by_id(p, cid).locator(".chev").click()
-        by_id(p, BARRACUDA).locator(".chev").click()
+        by_id(p, NAS_ATT).locator(".chev").click()
         _shot(p, "grid-details-open", None)
-        by_id(p, BARRACUDA).locator(".chev").click()
+        by_id(p, NAS_ATT).locator(".chev").click()
         usb = by_id(p, NAS_USB)
         usb.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
         _shot(p, "exit-grey-confirm", usb)
