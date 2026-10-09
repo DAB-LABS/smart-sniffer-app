@@ -166,13 +166,14 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
    strength, around the health line and its chevron. Closed it holds the
    first three problem rows and an "and N more" line; open it holds all of
    Details and grows with them. Health not known is a grey dashed frame.
-   Nothing in the box scrolls. */
+   The box is filled with its own frame colour at 20% so it sits back
+   from the card. Nothing in the box scrolls. */
 .hbox { margin-top: 10px; border: 1px solid var(--rule-2); border-radius: 0; padding: 6px 10px 7px; min-width: 0;
         display: grid; grid-template-columns: minmax(0, 1fr); }
-.hbox.attention { border-color: var(--att); }
-.hbox.maybe { border-color: var(--maybe); }
-.hbox.ok { border-color: var(--ok); }
-.hbox.unknown { border: 1px dashed var(--dim); }
+.hbox.attention { border-color: var(--att); background: rgb(204 107 99 / 0.20); }
+.hbox.maybe { border-color: var(--maybe); background: rgb(204 159 82 / 0.20); }
+.hbox.ok { border-color: var(--ok); background: rgb(93 163 114 / 0.20); }
+.hbox.unknown { border: 1px dashed var(--dim); background: rgb(143 143 143 / 0.20); }
 
 /* Health line: the word, and the Details chevron in the same colour */
 .c-health { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 0.96rem; font-weight: 700; line-height: 1.3; }

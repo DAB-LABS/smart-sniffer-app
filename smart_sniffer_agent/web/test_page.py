@@ -317,9 +317,13 @@ def test_colours(open_page):
                        ".chev.attention": ATT, ".chev.maybe": MAYBE, ".chev.ok": OK, "a.exit": BLUE}
     assert p.page.evaluate("getComputedStyle(document.querySelector('button.exit.add')).color") != BLUE
     # The health box: a 1 px frame in the full state colour, all the way
-    # round; Health not known is grey and dashed.
-    for cid, rgb, style in ((NAS_ATT, ATT, "solid"), (NAS_MAYBE, MAYBE, "solid"), (NVME, OK, "solid"),
-                            (NAS_USB, None, "dashed")):
+    # round; Health not known is grey and dashed. Each box is filled with
+    # its own frame colour at 20%.
+    for cid, rgb, style, fill in ((NAS_ATT, ATT, "solid", "rgba(204, 107, 99, 0.2)"),
+                                  (NAS_MAYBE, MAYBE, "solid", "rgba(204, 159, 82, 0.2)"),
+                                  (NVME, OK, "solid", "rgba(93, 163, 114, 0.2)"),
+                                  (NAS_USB, None, "dashed", "rgba(143, 143, 143, 0.2)")):
+        assert by_id(p, cid).locator(".hbox").evaluate("e => getComputedStyle(e).backgroundColor") == fill, cid
         box = by_id(p, cid).locator(".hbox").evaluate(BOX_STROKE)
         assert len({tuple(side) for side in box}) == 1, (cid, box)
         colour, width, kind = box[0]
@@ -398,6 +402,8 @@ def test_health_box(open_page):
             assert r["x"] >= b["x"] and r["x"] + r["width"] <= b["x"] + b["width"] + 0.5, (r, b)
             assert r["y"] >= b["y"] and r["y"] + r["height"] <= b["y"] + b["height"] + 0.5, (r, b)
         assert att.locator(".hbox").evaluate(BOX_STROKE)[0][0] == ATT
+        # Open, the fill is the same 20% tint behind all of Details.
+        assert att.locator(".hbox").evaluate("e => getComputedStyle(e).backgroundColor") == "rgba(204, 107, 99, 0.2)"
         # Open every box: still nothing scrolls.
         closed = p.page.locator(".chev[aria-expanded=false]")
         while closed.count():
