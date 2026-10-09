@@ -15,7 +15,12 @@
 // Row keys of the drive view, and where each one sits in the raw table.
 const ATA_IDS = { reallocated: 5, pending: 197, offline_unc: 198, reported_unc: 187, cmd_timeout: 188,
   realloc_events: 196, spin_retries: 10, wear: 177 };
-const DEVSTAT_ROWS = { reported_unc_devstat: [4, 8], reallocated_devstat: [3, 32], wear_devstat: [7, 8] };
+// Device Statistics rows: page, offset, and the watched row they stand in for.
+const DEVSTAT_ROWS = { reported_unc_devstat: [4, 8, 'reported_unc'], reallocated_devstat: [3, 32, 'reallocated'],
+  wear_devstat: [7, 8, 'wear'] };
+// The wear attribute names the rules read, as the proxy has them.
+const WEAR_NAMES = ['Wear_Leveling_Count', 'Media_Wearout_Indicator', 'SSD_Life_Left', 'Remaining_Lifetime_Perc',
+  'Percent_Lifetime_Remain', 'Perc_Rated_Life_Remain', 'Percent_Life_Remaining'];
 const NVME_FIELDS = { critical_warning: 'critical_warning', media_errors: 'media_errors',
   available_spare: 'available_spare', wear: 'percentage_used' };
 const NONE = { kind: 'none', href: null };
@@ -537,51 +542,76 @@ function cc() {
       if (((sd.ata_smart_attributes || {}).table || []).length) return 'ata';
       return 'none';
     },
-    markOf(it) {
-      const m = {};
-      this.rows(it).forEach((r) => { if (r.mark === 'crit' || r.mark === 'warn') m[r.key] = r.mark; });
-      return m;
-    },
-    ataTable(it) {
-      const marks = this.markOf(it);
-      const byId = {};
-      Object.entries(ATA_IDS).forEach(([k, id]) => { if (marks[k]) byId[id] = marks[k]; });
-      const pad = (n) => (typeof n === 'number' ? String(n).padStart(3, '0') : '');
-      return (((it.drive.smart_data || {}).ata_smart_attributes || {}).table || []).map((a) => ({
-        id: a.id, name: a.name, value: pad(a.value), worst: pad(a.worst), thresh: pad(a.thresh),
-        raw: (a.raw && (a.raw.string ?? String(a.raw.value))) || '', rawValue: a.raw ? a.raw.value : '',
-        mark: byId[a.id] || null,
-      }));
-    },
-    nvmeTable(it) {
-      const marks = this.markOf(it);
-      const byField = {};
-      Object.entries(NVME_FIELDS).forEach(([k, f]) => { if (marks[k]) byField[f] = marks[k]; });
-      const log = (it.drive.smart_data || {}).nvme_smart_health_information_log || {};
-      return Object.entries(log).map(([k, v]) => ({
-        name: k, value: Array.isArray(v) ? v.join(' ') : String(v), editable: typeof v === 'number', mark: byField[k] || null,
-      }));
-    },
-    // The Device Statistics pages that hold a gap-fill reading.
-    devstatTable(it) {
-      const marks = this.markOf(it);
-      const byEntry = {};
-      const pages = new Set();
-      this.rows(it).forEach((r) => {
-        const at = DEVSTAT_ROWS[r.key];
-        if (!at) return;
-        pages.add(at[0]);
-        if (marks[r.key]) byEntry[`${at[0]}.${at[1]}`] = marks[r.key];
-      });
-      const out = [];
-      (((it.drive.device_statistics || {}).pages) || []).forEach((p) => {
-        if (!pages.has(p.number)) return;
-        (p.table || []).forEach((e) => {
-          const key = `${p.number}.${e.offset}`;
-          out.push({ key, page: p.number, name: e.name, value: e.value, editable: key === '4.8', mark: byEntry[key] || null });
+    // Details holds one table. An ATA drive: its attribute table, with each
+    // watched row's mark and note on the attribute it reads, a watched
+    // attribute the drive does not report as a row of its own, and a Device
+    // Statistics reading after the row it stands in for. An NVMe drive: its
+    // health log, the same way. Anything else: the watched rows.
+    detailTable(it) {
+      const kind = this.reportKind(it);
+      const sd = (it.drive && it.drive.smart_data) || {};
+      const entries = [];
+      const extras = [];
+      const place = (r, entry) => {
+        if (r.mark === 'crit' || r.mark === 'warn') entry.mark = r.mark;
+        const note = this.rowNote(r);
+        if (note) entry.note = note;
+      };
+      const extra = (r, sortId) => {
+        const missing = r.value === 'not known';
+        extras.push({ key: `r:${r.key}:${r.name}`, id: (r.key !== 'wear' && ATA_IDS[r.key]) || '', name: r.name, value: missing ? '' : r.value,
+          worst: '', thresh: '', raw: missing ? '' : r.value, missing, gap: 'not reported', note: this.rowNote(r),
+          mark: r.mark === 'crit' || r.mark === 'warn' ? r.mark : null, sortId,
+          edit: r.key === 'reported_unc_devstat' ? 'devstat' : null, rawValue: this.devstatValue(it, r) });
+      };
+      if (kind === 'ata') {
+        const pad = (n) => (typeof n === 'number' ? String(n).padStart(3, '0') : '');
+        ((sd.ata_smart_attributes || {}).table || []).forEach((a) => entries.push({
+          key: `a:${a.id}`, id: a.id, name: a.name, value: pad(a.value), worst: pad(a.worst), thresh: pad(a.thresh),
+          raw: (a.raw && (a.raw.string ?? String(a.raw.value))) || '', rawValue: a.raw ? a.raw.value : '',
+          mark: null, note: '', edit: 'ata', field: a.name,
+        }));
+        this.rows(it).forEach((r) => {
+          const id = r.key === 'wear' ? null : ATA_IDS[r.key];
+          const hit = r.value === 'not known' ? null : r.key === 'wear'
+            ? entries.find((e) => WEAR_NAMES.includes(e.name)) : entries.find((e) => e.id === id);
+          if (hit) { place(r, hit); return; }
+          const base = DEVSTAT_ROWS[r.key] ? DEVSTAT_ROWS[r.key][2] : r.key;
+          extra(r, ATA_IDS[base] && base !== 'wear' ? ATA_IDS[base] : 1000);
         });
-      });
-      return out;
+        // Each extra row by the attribute number it reads, else at the end.
+        extras.forEach((x) => {
+          x.value = '';
+          const at = entries.findIndex((e) => typeof e.id === 'number' && e.sortId === undefined && e.id > x.sortId);
+          if (at < 0) entries.push(x); else entries.splice(at, 0, x);
+        });
+        return { kind, rows: entries };
+      }
+      if (kind === 'nvme') {
+        const log = sd.nvme_smart_health_information_log || {};
+        Object.entries(log).forEach(([k, v]) => entries.push({
+          key: `n:${k}`, name: k, value: Array.isArray(v) ? v.join(' ') : String(v), mark: null, note: '',
+          edit: typeof v === 'number' ? 'nvme' : null, field: k, rawValue: v,
+        }));
+        this.rows(it).forEach((r) => {
+          const hit = r.value === 'not known' ? null : entries.find((e) => e.field === NVME_FIELDS[r.key]);
+          if (hit) place(r, hit); else extra(r, 1000);
+        });
+        extras.forEach((x) => { x.edit = null; entries.push(x); });
+        return { kind, rows: entries };
+      }
+      // An unsupported drive: its watched rows are not known, not missing.
+      this.rows(it).forEach((r) => extra(r, 1000));
+      extras.forEach((x) => { x.edit = null; x.gap = 'not known'; });
+      return { kind, rows: extras };
+    },
+    // The number behind a Device Statistics row, for a replica's input.
+    devstatValue(it, r) {
+      const at = DEVSTAT_ROWS[r.key];
+      if (!at) return '';
+      const page = (((it.drive && it.drive.device_statistics) || {}).pages || []).find((p) => p.number === at[0]);
+      const e = page && (page.table || []).find((x) => x.offset === at[1]);
+      return e ? e.value : String(r.value).replace(/,/g, '');
     },
 
     // Pools

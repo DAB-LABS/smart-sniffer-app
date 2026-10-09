@@ -33,8 +33,11 @@ Referer.
     HOSTS           board | one | none        board: nas-01, studio-mac and backup-pi;
                                               one: only proxmox-01; none: first run
     POOL            online | degraded         the tank pools of nas-01 and proxmox-01
-    REPLICAS        board | 0                 three replicas (SMART failed, NVMe wear, a
-                                              degraded pool), the first in HA; none
+    REPLICAS        board | carried | 0       three replicas (SMART failed, NVMe wear, a
+                                              degraded pool), the first in HA; carried:
+                                              the same, the NVMe one with no current
+                                              scenario (as the old Test Lab left it), and
+                                              the Device Statistics replica; none
     REPLICA_FOLDER  ok | missing | read_only  upload and save enabled or not
     LATENCY         seconds                   added to every route (default 0.02)
     SLUG, HOSTNAME, HA_VERSION                the app's slug, its agent host name, Home
@@ -943,15 +946,18 @@ class World:
         self.user_files: dict[str, dict] = {}  # file id -> {"entry", "doc"}
         self.replicas: list[dict] = []
         self.counter = 0
-        if flags["REPLICAS"] == "board":
+        if flags["REPLICAS"] in ("board", "carried"):
             for fid in ("shipped.smart-failed", "shipped.nvme-wear", "shipped.zfs-pool-degraded"):
                 self.add_replica(fid)
+            if flags["REPLICAS"] == "carried":
+                self.replicas[1]["scenario"] = None
+                self.add_replica("shipped.sata-hdd-devstat-uncorrectables")
         # Home Assistant: target -> {"entry_id", "devices": {serial or pool:<name>: device id}}
         self.ha: dict[str, dict] = {}
         if flags["HA"] == "installed":
             if flags["HA_SELF"] == "1":
                 self.ha["self"] = self._entry("01J9AGENT", self_drives(flags), [])
-            if flags["REPLICAS"] == "board":
+            if flags["REPLICAS"] in ("board", "carried"):
                 self.ha["replicas"] = {"entry_id": "01J9REPLICAS",
                                        "devices": {"MOCK-SATA-0001": "d58c3a1f7e0b4c92a6f4b8e2d1c90a73"}}
             if any(h["address"] == "10.0.10.20" for h in self.hosts):

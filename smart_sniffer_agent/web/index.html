@@ -113,9 +113,6 @@
               <div class="details">
                 <template x-if="unsupportedNote(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
                 <dl class="kv">
-                  <template x-for="r in rows(c.it)" :key="r.key + r.name">
-                    <div :class="r.mark"><dt><span class="lb" x-text="r.name"></span><template x-if="rowNote(r)"><small x-text="' (' + rowNote(r) + ')'"></small></template></dt><dd><span class="v" x-text="r.value"></span></dd></div>
-                  </template>
                   <div><dt><span class="lb">Data Read</span><template x-if="vol(c.it, 'read')"><small x-text="' (' + volNote(vol(c.it, 'read')) + ')'"></small></template></dt><dd><span class="v" :class="{ na: !vol(c.it, 'read') }" x-text="vol(c.it, 'read') ? tb(vol(c.it, 'read').bytes) : 'not reported'"></span></dd></div>
                   <div><dt><span class="lb">Device Statistics</span><template x-if="devstat(c.it).note"><small x-text="' (' + devstat(c.it).note + ')'"></small></template></dt><dd><span class="v" x-text="devstat(c.it).value"></span></dd></div>
                 </dl>
@@ -126,39 +123,26 @@
                     </template>
                   </div>
                 </template>
-                <template x-if="reportKind(c.it) === 'ata'">
-                  <div>
-                    <div class="table-wrap">
-                      <table class="attrs">
-                        <thead><tr><th class="num c-id">ID</th><th>Name</th><th class="num">Value</th><th class="num c-worst">Worst</th><th class="num c-thresh">Thresh</th><th class="num c-raw">Raw</th></tr></thead>
-                        <tbody>
-                          <template x-for="a in ataTable(c.it)" :key="a.id">
-                            <tr :class="a.mark"><td class="num c-id" x-text="a.id"></td><td class="nm" x-text="a.name" :title="a.name"></td><td class="num" x-text="a.value"></td><td class="num c-worst" x-text="a.worst"></td><td class="num c-thresh" x-text="a.thresh"></td><td class="num c-raw"><template x-if="c.src !== 'replicas'"><span x-text="a.raw"></span></template><template x-if="c.src === 'replicas'"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(c.it, 'ata', a.name, $event.target.value)"></template></td></tr>
-                          </template>
-                        </tbody>
-                      </table>
-                    </div>
-                    <template x-if="devstatTable(c.it).length">
-                      <div class="table-wrap">
-                        <table class="attrs">
-                          <thead><tr><th class="num">Page</th><th>Device Statistics</th><th class="num">Value</th></tr></thead>
-                          <tbody>
-                            <template x-for="e in devstatTable(c.it)" :key="e.key">
-                              <tr :class="e.mark"><td class="num" x-text="e.page"></td><td class="nm" x-text="e.name" :title="e.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && e.editable)"><span x-text="e.value"></span></template><template x-if="c.src === 'replicas' && e.editable"><input class="input raw-in" :value="e.value" inputmode="numeric" :aria-label="'Value of ' + e.name" @change="editRaw(c.it, 'devstat', null, $event.target.value)"></template></td></tr>
-                            </template>
-                          </tbody>
-                        </table>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-                <template x-if="reportKind(c.it) === 'nvme'">
+                <!-- One table: the attributes (or the NVMe health log, or the
+                     watched rows), flagged rows in the state colour, notes muted
+                     after the name. -->
+                <template x-if="detailTable(c.it).rows.length">
                   <div class="table-wrap">
-                    <table class="attrs">
-                      <thead><tr><th>Field</th><th class="num">Value</th></tr></thead>
+                    <table class="attrs" :class="detailTable(c.it).kind">
+                      <thead>
+                        <template x-if="detailTable(c.it).kind === 'ata'"><tr><th class="num c-id">ID</th><th class="nm">Name</th><th class="num">Value</th><th class="num c-worst">Worst</th><th class="num c-thresh">Thresh</th><th class="num c-raw">Raw</th></tr></template>
+                        <template x-if="detailTable(c.it).kind !== 'ata'"><tr><th class="nm">Name</th><th class="num c-raw">Value</th></tr></template>
+                      </thead>
                       <tbody>
-                        <template x-for="f in nvmeTable(c.it)" :key="f.name">
-                          <tr :class="f.mark"><td class="nm" x-text="f.name" :title="f.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && f.editable)"><span x-text="f.value"></span></template><template x-if="c.src === 'replicas' && f.editable"><input class="input raw-in" :value="f.value" inputmode="numeric" :aria-label="'Value of ' + f.name" @change="editRaw(c.it, 'nvme', f.name, $event.target.value)"></template></td></tr>
+                        <template x-for="a in detailTable(c.it).rows" :key="a.key">
+                          <tr :class="a.mark">
+                            <template x-if="detailTable(c.it).kind === 'ata'"><td class="num c-id" x-text="a.id"></td></template>
+                            <td class="nm" :title="a.name"><span class="lb" x-text="a.name"></span><template x-if="a.note"><small x-text="' (' + a.note + ')'"></small></template></td>
+                            <template x-if="detailTable(c.it).kind === 'ata'"><td class="num" x-text="a.value"></td></template>
+                            <template x-if="detailTable(c.it).kind === 'ata'"><td class="num c-worst" x-text="a.worst"></td></template>
+                            <template x-if="detailTable(c.it).kind === 'ata'"><td class="num c-thresh" x-text="a.thresh"></td></template>
+                            <td class="num c-raw"><template x-if="a.missing"><span class="na" x-text="a.gap"></span></template><template x-if="!a.missing && !(c.src === 'replicas' && a.edit)"><span x-text="detailTable(c.it).kind === 'ata' ? a.raw : a.value"></span></template><template x-if="!a.missing && c.src === 'replicas' && a.edit"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(c.it, a.edit, a.field, $event.target.value)"></template></td>
+                          </tr>
                         </template>
                       </tbody>
                     </table>

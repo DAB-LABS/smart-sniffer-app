@@ -388,8 +388,8 @@ def test_health_box(open_page):
         assert att.locator(".chev").get_attribute("aria-expanded") == "true"
         assert att.locator(".hbox").count() == 1
         assert att.locator(".hbox").evaluate("(e, h) => e === h", handle)
-        assert att.locator(".hbox .details .kv > div.crit").count() >= 3
-        assert att.locator(".hbox .details table.attrs").count() >= 1
+        assert att.locator(".hbox .details table.attrs tr.crit").count() >= 3
+        assert att.locator(".hbox .details table.attrs").count() == 1
         assert att.locator(".details").evaluate("e => !!e.closest('.hbox')")
         assert att.locator(".hbox .pw").count() == 0
         # Open, the frame goes all the way round everything in Details.
@@ -417,23 +417,73 @@ def test_health_box(open_page):
         assert by_id(p, REP_FAILED).locator(".hbox .c-health .h-fail").count() == 1
 
 
-def test_details_flagged_rows_in_state_colour(open_page):
+TABLE_ROWS = """t => [...t.querySelectorAll('tbody tr')].map((r) => [r.className,
+  ...[...r.cells].filter((c) => getComputedStyle(c).display !== 'none').map((c) => c.innerText.trim())])"""
+
+
+def test_details_one_table_with_flags(open_page):
+    """Details: a short summary, then one table; flagged rows in the state colour, notes muted after the name."""
     p = open_page()
     att = by_id(p, NAS_ATT)
     att.locator(".chev").click()
+    det = att.locator(".details")
+    # The summary keeps Data Read and Device Statistics; no watched list.
+    assert det.locator(".kv dt .lb").all_inner_texts() == ["Data Read", "Device Statistics"]
+    assert det.locator("table").count() == 1 and det.locator(".table-wrap").count() == 1
+    heads = det.locator("thead th").all_inner_texts()
+    assert heads == ["ID", "Name", "Value", "Worst", "Thresh", "Raw"], heads
+    rows = det.locator("table.attrs").evaluate(TABLE_ROWS)
+    flagged = {r[1]: r for r in rows if r[0] in ("crit", "warn")}
+    assert sorted(flagged) == ["187", "188", "197", "198", "5"], flagged
+    assert flagged["5"][0] == "crit" and flagged["188"][0] == "warn"
+    assert flagged["5"][2] == "Reallocated_Sector_Ct (expected 0)" and flagged["5"][-1] == "24"
+    assert flagged["188"][2] == "Command_Timeout (warns above 100)"
+    # Each reading appears once: no name twice in the table.
+    names = [r[2].split(" (")[0] for r in rows]
+    assert len(names) == len(set(names)), names
     for mark, rgb in (("crit", ATT), ("warn", MAYBE)):
-        rows = att.locator(f".kv > div.{mark}")
-        assert rows.count() >= 1, mark
-        for row in rows.all():
-            assert row.locator("dt .lb").evaluate("e => getComputedStyle(e).color") == rgb
-            assert row.locator("dd .v").evaluate("e => getComputedStyle(e).color") == rgb
-            note = row.locator("dt small")
-            if note.count():
-                assert note.evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
-    # Healthy rows stay grey.
-    plain = att.locator(".kv > div:not(.crit):not(.warn)").first
-    assert plain.locator("dd .v").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
+        for row in det.locator(f"tbody tr.{mark}").all():
+            colours = row.evaluate("""r => [...r.cells].map((c) => getComputedStyle(c).color)""")
+            assert set(colours) == {rgb}, (mark, colours)
+            assert row.locator("td.nm .lb").evaluate("e => getComputedStyle(e).color") == rgb
+            assert row.locator("td.nm small").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
+            # The note sits right after the name, never in a number cell.
+            assert row.locator("td:not(.nm) small").count() == 0
+    plain = det.locator("tbody tr:not(.crit):not(.warn)").first
+    assert plain.locator("td.c-raw").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
     assert_colours(p)
+
+
+def test_details_gap_rows_and_nvme(open_page):
+    p = open_page("REPLICAS=carried")
+    ds = by_id(p, "replicas|MOCK-DS-9JG0X1")
+    ds.locator(".chev").click()
+    rows = ds.locator("table.attrs").evaluate(TABLE_ROWS)
+    # A watched attribute the drive does not report: its own row, "not reported" muted in Raw.
+    gap = next(r for r in rows if r[1] == "187")
+    assert gap[2] == "Reported uncorrectable (no attribute 187)" and gap[-1] == "not reported", gap
+    na = ds.locator("tbody tr", has_text="Reported uncorrectable").locator("td.c-raw .na")
+    assert na.evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE, OK)
+    # The Device Statistics reading that stands in for it follows, flagged.
+    after = rows[rows.index(gap) + 1]
+    assert after[0] == "crit" and after[2] == "Uncorrectable, page 4 (expected 0, from device statistics)", after
+    assert ds.locator("tbody tr.crit input.raw-in").input_value() == "18"
+    assert ds.locator("table").count() == 1
+    # An NVMe drive: its health log is the table, Name and Value, with the same flags.
+    nv = by_id(p, REP_NVME)
+    nv.locator(".chev").click()
+    assert nv.locator(".details table").count() == 1
+    assert nv.locator(".details thead th").all_inner_texts() == ["Name", "Value"]
+    hit = nv.locator("tbody tr.warn")
+    assert hit.count() == 1 and hit.locator("td.nm").inner_text() == "available_spare (warns below 20%)"
+    assert hit.locator("td.nm .lb").evaluate("e => getComputedStyle(e).color") == MAYBE
+    # Replica inputs stay narrow.
+    widths = p.page.eval_on_selector_all("input.raw-in", "els => els.map((e) => e.getBoundingClientRect().width)")
+    assert widths and max(widths) <= 96.5, widths
+    # Pools keep their per-disk table.
+    pool = by_id(p, REP_POOL)
+    pool.locator(".chev").click()
+    assert pool.locator(".details thead th").all_inner_texts()[:2] == ["Disk", "State"]
 
 
 def test_notes_follow_labels(open_page):

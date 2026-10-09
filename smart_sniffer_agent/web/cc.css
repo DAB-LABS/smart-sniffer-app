@@ -227,25 +227,28 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .fs-list { display: grid; grid-template-columns: minmax(0, 1fr); border-top: 1px solid var(--rule); padding-top: 4px; }
 .fs-line { display: flex; justify-content: space-between; gap: 10px; font-size: 0.76rem; color: var(--grey); padding: 2px 0; }
 .fs-used { font-family: var(--mono); font-size: 0.72rem; color: var(--grey); white-space: nowrap; }
-/* The table fits the box: long names wrap, nothing scrolls. */
+/* One attribute table. It fits the box: Name takes the spare width and
+   wraps, the numbers sit together at the right, nothing scrolls. */
 .table-wrap { border: 1px solid var(--rule); container-type: inline-size; min-width: 0; }
 .table-wrap + .table-wrap { margin-top: 8px; }
 table.attrs { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.7rem; }
 table.attrs th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--rule); background: var(--panel-2); font-family: var(--sans); }
 table.attrs td { padding: 2px 6px; color: var(--grey); border-bottom: 1px solid #151515; white-space: nowrap; }
+table.attrs td.nm, table.attrs th.nm { width: 100%; }
 table.attrs td.nm { white-space: normal; overflow-wrap: anywhere; }
 table.attrs td.num, table.attrs th.num { text-align: right; }
 table.attrs tr.crit td { color: var(--att); font-weight: 600; }
 table.attrs tr.warn td { color: var(--maybe); font-weight: 600; }
+/* The note after a name, and a watched reading the drive does not report */
+table.attrs td small, table.attrs tr td .na { font-family: var(--sans); font-size: 0.66rem; color: var(--dim); font-weight: 400; }
+table.attrs td .na { white-space: nowrap; }
 table.attrs .input { padding: 1px 6px; font-size: 0.7rem; }
-table.attrs .raw-in { width: 100%; min-width: 64px; max-width: 150px; text-align: right; }
-/* A card that cannot get wider (one column, a phone): the raw table keeps
-   Name, Value and Raw, and long names wrap. The Download keeps every column. */
+table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
+/* A one-column card or a phone: ID, Name, Value and Raw; long raw strings
+   wrap too. The Download keeps every column. */
 @container (max-width: 459px) {
-  table.attrs .c-id, table.attrs .c-worst, table.attrs .c-thresh { display: none; }
-  table.attrs td.nm { white-space: normal; overflow-wrap: anywhere; }
+  table.attrs .c-worst, table.attrs .c-thresh { display: none; }
   table.attrs td.c-raw { white-space: normal; }
-  table.attrs .raw-in { min-width: 56px; max-width: 96px; }
 }
 
 /* A field agent with nothing to show, and this app's agent not answering */
