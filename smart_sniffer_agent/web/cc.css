@@ -1,9 +1,9 @@
 /* Control Center styles: one grid of cards (design Rev 4).
    Black, white and grey. Four colour exceptions, muted, defined once below:
-   --att   Attention: the word, FAILED, its chevron, the problem window's
+   --att   Attention: the word, FAILED, its chevron, the health box's
            stroke and the labels and values of rows that caused it;
    --maybe Maybe: the same places, for warnings;
-   --ok    Health OK and its chevron, nowhere else;
+   --ok    Health OK, its chevron and its health box, nowhere else;
    --ha    the exit icon of something in Home Assistant, nowhere else.
    Space is not health: disk space bars are grey only. */
 :root {
@@ -19,8 +19,6 @@
   --att: #cc6b63;
   --maybe: #cc9f52;
   --ok: #5da372;
-  --att-line: rgba(204, 107, 99, 0.15);
-  --maybe-line: rgba(204, 159, 82, 0.15);
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   color-scheme: dark;
@@ -164,8 +162,21 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .sp-row.na .sp-bar { border: 1px dashed var(--rule-2); background: transparent; }
 .sp-more { font-size: 0.7rem; color: var(--dim); padding-left: 76px; }
 
+/* The health box: one frame, sharp corners, in the state colour at full
+   strength, around the health line and its chevron. Closed it holds the
+   first three problem rows and an "and N more" line; open it holds all of
+   Details and grows with them. Health not known is a grey dashed frame.
+   Nothing in the box scrolls. */
+.hbox { margin-top: 10px; border: 1px solid var(--rule-2); border-radius: 0; padding: 6px 10px 7px; min-width: 0;
+        display: grid; grid-template-columns: minmax(0, 1fr); }
+.hbox.attention { border-color: var(--att); }
+.hbox.maybe { border-color: var(--maybe); }
+.hbox.ok { border-color: var(--ok); }
+.hbox.unknown { border: 1px dashed var(--dim); }
+
 /* Health line: the word, and the Details chevron in the same colour */
-.c-health { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 10px; font-size: 0.96rem; font-weight: 700; line-height: 1.3; }
+.c-health { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 0.96rem; font-weight: 700; line-height: 1.3; }
+.card > .c-health { margin-top: 10px; }
 .h-att { color: var(--att); white-space: nowrap; }
 .h-fail { color: var(--paper); white-space: nowrap; }
 .h-fail b { color: var(--att); }
@@ -187,11 +198,10 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .chev.unknown { color: var(--grey); }
 .c-note { font-size: 0.76rem; color: var(--dim); margin: 6px 0 0; }
 
-/* The problem window: the only box on a card. Sharp corners; its stroke and
-   each row's label and value carry the state, the rows carry no marks. The
-   note in brackets sits after the label, muted; the value stands alone. */
-.pw { margin-top: 8px; border: 1px solid var(--att-line); padding: 4px 9px; display: grid; grid-template-columns: minmax(0, 1fr); }
-.pw.warn { border-color: var(--maybe-line); }
+/* Problem rows, closed: at most three, then "and N more". The rows carry
+   no marks; each row's label and value carry the state. The note in
+   brackets sits after the label, muted; the value stands alone. */
+.pw { margin-top: 6px; border-top: 1px solid #1c1c1c; padding-top: 2px; display: grid; grid-template-columns: minmax(0, 1fr); }
 .pw-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 3px 0; font-size: 0.8rem; color: var(--paper); }
 .pw-row + .pw-row { border-top: 1px solid #161616; }
 .pw-label { min-width: 0; overflow-wrap: anywhere; }
@@ -199,9 +209,13 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .pw-val { font-family: var(--mono); font-size: 0.78rem; font-weight: 600; white-space: nowrap; text-align: right; }
 .pw-row.crit .lb, .pw-row.crit .pw-val { color: var(--att); }
 .pw-row.warn .lb, .pw-row.warn .pw-val { color: var(--maybe); }
+.pw-more { justify-self: start; background: none; border: 0; padding: 3px 0 1px; margin: 0; font: 400 0.76rem/1.3 var(--sans); color: var(--dim); cursor: pointer;
+           text-align: left; border-top: 1px solid #161616; width: 100%; }
+.pw-more:hover { color: var(--grey); }
+.pw-more:focus:not(:focus-visible) { outline: none; }
 
-/* Details, in place of the problem window */
-.details { margin-top: 8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+/* Details, open inside the health box in place of the problem rows */
+.details { margin-top: 8px; padding-top: 8px; border-top: 1px solid #1c1c1c; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 .kv { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
 .kv > div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 2px 0; border-bottom: 1px solid #141414; font-size: 0.78rem; }
 .kv dt { color: var(--dim); min-width: 0; }
@@ -213,11 +227,13 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .fs-list { display: grid; grid-template-columns: minmax(0, 1fr); border-top: 1px solid var(--rule); padding-top: 4px; }
 .fs-line { display: flex; justify-content: space-between; gap: 10px; font-size: 0.76rem; color: var(--grey); padding: 2px 0; }
 .fs-used { font-family: var(--mono); font-size: 0.72rem; color: var(--grey); white-space: nowrap; }
-.table-wrap { overflow-x: auto; border: 1px solid var(--rule); container-type: inline-size; }
+/* The table fits the box: long names wrap, nothing scrolls. */
+.table-wrap { border: 1px solid var(--rule); container-type: inline-size; min-width: 0; }
 .table-wrap + .table-wrap { margin-top: 8px; }
 table.attrs { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.7rem; }
 table.attrs th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--rule); background: var(--panel-2); font-family: var(--sans); }
 table.attrs td { padding: 2px 6px; color: var(--grey); border-bottom: 1px solid #151515; white-space: nowrap; }
+table.attrs td.nm { white-space: normal; overflow-wrap: anywhere; }
 table.attrs td.num, table.attrs th.num { text-align: right; }
 table.attrs tr.crit td { color: var(--att); font-weight: 600; }
 table.attrs tr.warn td { color: var(--maybe); font-weight: 600; }

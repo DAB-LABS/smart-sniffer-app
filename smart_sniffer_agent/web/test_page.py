@@ -164,11 +164,11 @@ COLOUR_AUDIT = """
 () => {
   const want = { att: 'rgb(204, 107, 99)', maybe: 'rgb(204, 159, 82)', ok: 'rgb(93, 163, 114)', blue: 'rgb(3, 169, 244)' };
   const allowed = {
-    att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .pw-row.crit .lb, .pw-row.crit .pw-val, '
+    att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .hbox.attention, .pw-row.crit .lb, .pw-row.crit .pw-val, '
       + '.kv > div.crit .lb, .kv > div.crit .v, table.attrs tr.crit'),
-    maybe: (el) => !!el.closest('.h-maybe, .chev.maybe, .pw-row.warn .lb, .pw-row.warn .pw-val, '
+    maybe: (el) => !!el.closest('.h-maybe, .chev.maybe, .hbox.maybe, .pw-row.warn .lb, .pw-row.warn .pw-val, '
       + '.kv > div.warn .lb, .kv > div.warn .v, table.attrs tr.warn'),
-    ok: (el) => !!el.closest('.h-ok, .chev.ok'),
+    ok: (el) => !!el.closest('.h-ok, .chev.ok, .hbox.ok'),
     blue: (el) => !!el.closest('.exit:not(.add)'),
   };
   const bad = [];
@@ -316,22 +316,102 @@ def test_colours(open_page):
     assert colours == {".h-ok": OK, ".h-att": ATT, ".h-maybe": MAYBE, ".h-fail b": ATT,
                        ".chev.attention": ATT, ".chev.maybe": MAYBE, ".chev.ok": OK, "a.exit": BLUE}
     assert p.page.evaluate("getComputedStyle(document.querySelector('button.exit.add')).color") != BLUE
-    # The problem window: its stroke and values carry the state, rows carry no marks.
-    pw = by_id(p, NAS_ATT).locator(".pw")
-    assert pw.evaluate("e => getComputedStyle(e).borderTopColor") == "rgba(204, 107, 99, 0.15)"
-    assert by_id(p, NAS_MAYBE).locator(".pw").evaluate("e => getComputedStyle(e).borderTopColor") \
-        == "rgba(204, 159, 82, 0.15)"
+    # The health box: a 1 px frame in the full state colour, all the way
+    # round; Health not known is grey and dashed.
+    for cid, rgb, style in ((NAS_ATT, ATT, "solid"), (NAS_MAYBE, MAYBE, "solid"), (NVME, OK, "solid"),
+                            (NAS_USB, None, "dashed")):
+        box = by_id(p, cid).locator(".hbox").evaluate(BOX_STROKE)
+        assert len({tuple(side) for side in box}) == 1, (cid, box)
+        colour, width, kind = box[0]
+        assert width == "1px" and kind == style, (cid, box)
+        if rgb:
+            assert colour == rgb, (cid, box)
+        else:
+            assert colour not in (ATT, MAYBE, OK), (cid, box)
     # A flagged row's label and value are in its state colour; its note is not.
-    for mark, rgb in (("crit", ATT), ("warn", MAYBE)):
-        row = by_id(p, NAS_ATT).locator(f".pw-row.{mark}").first
+    for mark, rgb, cid in (("crit", ATT, NAS_ATT), ("warn", MAYBE, NAS_MAYBE)):
+        row = by_id(p, cid).locator(f".pw-row.{mark}").first
         assert row.locator(".lb").evaluate("e => getComputedStyle(e).color") == rgb
         assert row.locator(".pw-val").evaluate("e => getComputedStyle(e).color") == rgb
         assert row.locator("small").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
     assert p.page.locator(".mk, .pw-row .mark").count() == 0
-    # Pills and the problem window have sharp corners; cards round ones.
-    radii = p.page.evaluate("""() => ['.pill', '.pw', '.card'].map((s) =>
+    # Pills and the health box have sharp corners; cards round ones.
+    radii = p.page.evaluate("""() => ['.pill', '.hbox', '.card'].map((s) =>
         getComputedStyle(document.querySelector(s)).borderTopLeftRadius)""")
     assert radii[0] == "0px" and radii[1] == "0px" and radii[2] != "0px"
+
+
+BOX_STROKE = """e => ['Top', 'Right', 'Bottom', 'Left'].map((s) => {
+  const cs = getComputedStyle(e);
+  return [cs['border' + s + 'Color'], cs['border' + s + 'Width'], cs['border' + s + 'Style']];
+})"""
+
+# Elements inside a card's health box that scroll, or would.
+BOX_SCROLLERS = """els => els.flatMap((b) => [b, ...b.querySelectorAll('*')])
+  .filter((e) => { const cs = getComputedStyle(e);
+    return ['auto', 'scroll'].includes(cs.overflowX) || ['auto', 'scroll'].includes(cs.overflowY)
+      || e.scrollHeight > e.clientHeight + 1 && cs.overflowY !== 'visible'; })
+  .map((e) => e.outerHTML.slice(0, 80))"""
+
+
+def test_health_box(open_page):
+    """One framed box: health line and chevron, three rows and "and N more" closed, Details open."""
+    for width in (1280, 390):
+        p = open_page("", width)
+        att = by_id(p, NAS_ATT)
+        box = att.locator(".hbox")
+        assert box.count() == 1
+        # The health line and the chevron are in the box, the chevron at its top right.
+        assert box.locator(".c-health .h-att").count() == 1 and box.locator(".c-health .chev").count() == 1
+        b, ch = box.bounding_box(), box.locator(".chev").bounding_box()
+        assert b["x"] + b["width"] - (ch["x"] + ch["width"]) < 16 and ch["y"] - b["y"] < 16, (b, ch)
+        # Closed: the first three of five problem rows, then "and 2 more", muted.
+        assert box.locator(".pw-row").count() == 3
+        assert box.locator(".pw-row").first.inner_text().replace("\n", " ").startswith("Reallocated sectors (expected 0)")
+        more = box.locator(".pw-more")
+        assert more.inner_text() == "and 2 more"
+        assert more.evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE, OK)
+        # A card with three problem rows or fewer has no "and N more".
+        maybe = by_id(p, NAS_MAYBE)
+        assert 1 <= maybe.locator(".hbox .pw-row").count() <= 3 and maybe.locator(".pw-more").count() == 0
+        # A healthy card's box holds just Health OK and the chevron.
+        ok = by_id(p, NVME).locator(".hbox")
+        assert ok.locator(".pw, .pw-row, .details").count() == 0
+        assert ok.locator(".c-health").inner_text().strip() == "Health OK" and ok.locator(".chev").count() == 1
+        # Nothing in any box scrolls, closed.
+        assert p.page.eval_on_selector_all(".hbox", BOX_SCROLLERS) == []
+        # "and N more" opens Details, inside the same bordered element.
+        handle = box.element_handle()
+        more.click()
+        p.page.wait_for_timeout(200)
+        assert att.locator(".chev").get_attribute("aria-expanded") == "true"
+        assert att.locator(".hbox").count() == 1
+        assert att.locator(".hbox").evaluate("(e, h) => e === h", handle)
+        assert att.locator(".hbox .details .kv > div.crit").count() >= 3
+        assert att.locator(".hbox .details table.attrs").count() >= 1
+        assert att.locator(".details").evaluate("e => !!e.closest('.hbox')")
+        assert att.locator(".hbox .pw").count() == 0
+        # Open, the frame goes all the way round everything in Details.
+        b = att.locator(".hbox").bounding_box()
+        for el in att.locator(".hbox .details > :not(template)").all():
+            r = el.bounding_box()
+            assert r["x"] >= b["x"] and r["x"] + r["width"] <= b["x"] + b["width"] + 0.5, (r, b)
+            assert r["y"] >= b["y"] and r["y"] + r["height"] <= b["y"] + b["height"] + 0.5, (r, b)
+        assert att.locator(".hbox").evaluate(BOX_STROKE)[0][0] == ATT
+        # Open every box: still nothing scrolls.
+        closed = p.page.locator(".chev[aria-expanded=false]")
+        while closed.count():
+            closed.first.click()
+        p.page.wait_for_timeout(200)
+        assert p.page.eval_on_selector_all(".hbox", BOX_SCROLLERS) == []
+        # And closed again, back to three rows and the line.
+        att.locator(".chev").click()
+        assert att.locator(".hbox .pw-row").count() == 3 and att.locator(".hbox .pw-more").count() == 1
+        # No box on a FILESYSTEM card, the placeholder or this app's agent down.
+        assert by_id(p, NAS_FS).locator(".hbox").count() == 0
+        assert by_id(p, BACKUP_PI).locator(".hbox").count() == 0
+        # Health FAILED stays next to Attention, in the box.
+        assert by_id(p, REP_FAILED).locator(".hbox .c-health .h-fail").count() == 1
 
 
 def test_details_flagged_rows_in_state_colour(open_page):
@@ -417,22 +497,22 @@ def test_one_grid_of_cards(open_page):
     assert fs_card.get_by_role("button", name="Save as replica").count() == 0
 
 
-def test_rows_stretch_and_every_problem_row_shows(open_page):
+def test_rows_stretch_and_three_problem_rows_show(open_page):
     p = open_page()
-    # The third card (five problem rows) sets its row's height for the two beside it.
+    # Cards in a grid row stretch to the tallest one.
     heights = p.page.eval_on_selector_all(".grid > article.card", "els => els.slice(0, 3).map((e) => e.offsetHeight)")
     assert len(set(heights)) == 1, heights
     att = by_id(p, NAS_ATT)
     rows = att.locator(".pw-row")
-    assert rows.count() == 5
+    assert rows.count() == 3
     assert all(r.is_visible() for r in rows.all())
-    assert att.locator(".pw-row").first.inner_text().replace("\n", " ").startswith("Reallocated sectors (expected 0)")
-    # Details replaces the problem window, in place.
+    assert att.locator(".pw-more").inner_text() == "and 2 more"
+    # Details replaces the problem rows, in place.
     att.locator(".chev").click()
     assert att.locator(".pw").count() == 0 and att.locator(".details table.attrs").count() == 1
     assert att.locator(".chev").get_attribute("aria-expanded") == "true"
     att.locator(".chev").click()
-    assert att.locator(".pw-row").count() == 5
+    assert att.locator(".pw-row").count() == 3
     # A pool with a failing disk shows its row.
     p = open_page("POOL=degraded")
     pool = by_id(p, NAS_POOL)
@@ -1011,7 +1091,7 @@ def test_screenshots(open_page):
         p = open_page("", width)
         _shot(p, "grid", None)
         _shot(p, "header", p.page.locator("header.app-head"))
-        _shot(p, "attention-five-rows", by_id(p, NAS_ATT))
+        _shot(p, "attention-three-rows-and-more", by_id(p, NAS_ATT))
         _shot(p, "maybe-space-91-97", by_id(p, NAS_MAYBE))
         _shot(p, "health-ok-haos-space", by_id(p, NVME))
         _shot(p, "health-not-known", by_id(p, NAS_USB))

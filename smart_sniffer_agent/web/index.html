@@ -84,68 +84,81 @@
           </div>
         </template>
 
-        <!-- Health, and the Details chevron in its colour -->
-        <template x-if="health(c)">
-          <div class="c-health">
-            <template x-if="health(c) === 'attention'"><span class="h-att">Attention</span></template>
-            <template x-if="health(c) === 'attention' && failed(c)"><span class="h-fail">Health <b>FAILED</b></span></template>
-            <template x-if="health(c) === 'maybe'"><span class="h-maybe">Maybe</span></template>
-            <template x-if="health(c) === 'ok'"><span class="h-ok">Health OK</span></template>
-            <template x-if="health(c) === 'unknown'"><span class="h-unk"><span class="ghost-dot" aria-hidden="true"></span>Health not known</span></template>
-            <template x-if="hasDetails(c)">
-              <button class="chev" :class="health(c)" type="button" :aria-expanded="isOpen(c) ? 'true' : 'false'" :aria-label="isOpen(c) ? 'Hide details' : 'Details'" title="Details" @mousedown.prevent="$el.blur()" @click="toggleOpen(c)"><svg aria-hidden="true"><use href="#chevron"/></svg></button>
-            </template>
-          </div>
-        </template>
-        <template x-if="unsupportedNote(c) && !isOpen(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
-        <template x-if="c.kind === 'pool' && vanished(c.it)"><p class="c-note">Not served to Home Assistant, which reports this pool as missing.</p></template>
-
-        <!-- The problem window: every flagged row -->
-        <template x-if="!isOpen(c) && problems(c).length">
-          <div class="pw" :class="problemTone(c)">
-            <template x-for="p in problems(c)" :key="p.key">
-              <div class="pw-row" :class="p.mark"><span class="pw-label"><span class="lb" x-text="p.label"></span><template x-if="p.note"><small x-text="' (' + p.note + ')'"></small></template></span><span class="pw-val" x-text="p.value"></span></div>
-            </template>
-          </div>
-        </template>
-
-        <!-- Details, in place of the problem window -->
-        <template x-if="isOpen(c) && c.kind === 'drive'">
-          <div class="details">
-            <template x-if="unsupportedNote(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
-            <dl class="kv">
-              <template x-for="r in rows(c.it)" :key="r.key + r.name">
-                <div :class="r.mark"><dt><span class="lb" x-text="r.name"></span><template x-if="rowNote(r)"><small x-text="' (' + rowNote(r) + ')'"></small></template></dt><dd><span class="v" x-text="r.value"></span></dd></div>
+        <!-- The health box: one frame in the state colour around the health
+             line and its chevron, the first three problem rows closed, and
+             all of Details open. Nothing in it scrolls. -->
+        <template x-if="health(c) && c.kind !== 'down'">
+          <div class="hbox" :class="health(c)">
+            <div class="c-health">
+              <template x-if="health(c) === 'attention'"><span class="h-att">Attention</span></template>
+              <template x-if="health(c) === 'attention' && failed(c)"><span class="h-fail">Health <b>FAILED</b></span></template>
+              <template x-if="health(c) === 'maybe'"><span class="h-maybe">Maybe</span></template>
+              <template x-if="health(c) === 'ok'"><span class="h-ok">Health OK</span></template>
+              <template x-if="health(c) === 'unknown'"><span class="h-unk"><span class="ghost-dot" aria-hidden="true"></span>Health not known</span></template>
+              <template x-if="hasDetails(c)">
+                <button class="chev" :class="health(c)" type="button" :aria-expanded="isOpen(c) ? 'true' : 'false'" :aria-label="isOpen(c) ? 'Hide details' : 'Details'" title="Details" @mousedown.prevent="$el.blur()" @click="toggleOpen(c)"><svg aria-hidden="true"><use href="#chevron"/></svg></button>
               </template>
-              <div><dt><span class="lb">Data Read</span><template x-if="vol(c.it, 'read')"><small x-text="' (' + volNote(vol(c.it, 'read')) + ')'"></small></template></dt><dd><span class="v" :class="{ na: !vol(c.it, 'read') }" x-text="vol(c.it, 'read') ? tb(vol(c.it, 'read').bytes) : 'not reported'"></span></dd></div>
-              <div><dt><span class="lb">Device Statistics</span><template x-if="devstat(c.it).note"><small x-text="' (' + devstat(c.it).note + ')'"></small></template></dt><dd><span class="v" x-text="devstat(c.it).value"></span></dd></div>
-            </dl>
-            <template x-if="spaces(c).length">
-              <div class="fs-list">
-                <template x-for="f in spaces(c)" :key="f.id || f.mountpoint">
-                  <div class="fs-line"><span><span class="mono" x-text="f.mountpoint"></span> <small x-text="f.fstype"></small></span><span class="fs-used" x-text="spaceUsed(f)"></span></div>
+            </div>
+            <template x-if="unsupportedNote(c) && !isOpen(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
+            <template x-if="c.kind === 'pool' && vanished(c.it)"><p class="c-note">Not served to Home Assistant, which reports this pool as missing.</p></template>
+            <template x-if="!isOpen(c) && problems(c).length">
+              <div class="pw">
+                <template x-for="p in problems(c).slice(0, 3)" :key="p.key">
+                  <div class="pw-row" :class="p.mark"><span class="pw-label"><span class="lb" x-text="p.label"></span><template x-if="p.note"><small x-text="' (' + p.note + ')'"></small></template></span><span class="pw-val" x-text="p.value"></span></div>
                 </template>
+                <template x-if="problems(c).length > 3"><button class="pw-more" type="button" :aria-label="'and ' + (problems(c).length - 3) + ' more. Details'" @click="toggleOpen(c)" x-text="'and ' + (problems(c).length - 3) + ' more'"></button></template>
               </div>
             </template>
-            <template x-if="reportKind(c.it) === 'ata'">
-              <div>
-                <div class="table-wrap">
-                  <table class="attrs">
-                    <thead><tr><th class="num c-id">ID</th><th>Name</th><th class="num">Value</th><th class="num c-worst">Worst</th><th class="num c-thresh">Thresh</th><th class="num c-raw">Raw</th></tr></thead>
-                    <tbody>
-                      <template x-for="a in ataTable(c.it)" :key="a.id">
-                        <tr :class="a.mark"><td class="num c-id" x-text="a.id"></td><td class="nm" x-text="a.name" :title="a.name"></td><td class="num" x-text="a.value"></td><td class="num c-worst" x-text="a.worst"></td><td class="num c-thresh" x-text="a.thresh"></td><td class="num c-raw"><template x-if="c.src !== 'replicas'"><span x-text="a.raw"></span></template><template x-if="c.src === 'replicas'"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(c.it, 'ata', a.name, $event.target.value)"></template></td></tr>
-                      </template>
-                    </tbody>
-                  </table>
-                </div>
-                <template x-if="devstatTable(c.it).length">
+            <template x-if="isOpen(c) && c.kind === 'drive'">
+              <div class="details">
+                <template x-if="unsupportedNote(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
+                <dl class="kv">
+                  <template x-for="r in rows(c.it)" :key="r.key + r.name">
+                    <div :class="r.mark"><dt><span class="lb" x-text="r.name"></span><template x-if="rowNote(r)"><small x-text="' (' + rowNote(r) + ')'"></small></template></dt><dd><span class="v" x-text="r.value"></span></dd></div>
+                  </template>
+                  <div><dt><span class="lb">Data Read</span><template x-if="vol(c.it, 'read')"><small x-text="' (' + volNote(vol(c.it, 'read')) + ')'"></small></template></dt><dd><span class="v" :class="{ na: !vol(c.it, 'read') }" x-text="vol(c.it, 'read') ? tb(vol(c.it, 'read').bytes) : 'not reported'"></span></dd></div>
+                  <div><dt><span class="lb">Device Statistics</span><template x-if="devstat(c.it).note"><small x-text="' (' + devstat(c.it).note + ')'"></small></template></dt><dd><span class="v" x-text="devstat(c.it).value"></span></dd></div>
+                </dl>
+                <template x-if="spaces(c).length">
+                  <div class="fs-list">
+                    <template x-for="f in spaces(c)" :key="f.id || f.mountpoint">
+                      <div class="fs-line"><span><span class="mono" x-text="f.mountpoint"></span> <small x-text="f.fstype"></small></span><span class="fs-used" x-text="spaceUsed(f)"></span></div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="reportKind(c.it) === 'ata'">
+                  <div>
+                    <div class="table-wrap">
+                      <table class="attrs">
+                        <thead><tr><th class="num c-id">ID</th><th>Name</th><th class="num">Value</th><th class="num c-worst">Worst</th><th class="num c-thresh">Thresh</th><th class="num c-raw">Raw</th></tr></thead>
+                        <tbody>
+                          <template x-for="a in ataTable(c.it)" :key="a.id">
+                            <tr :class="a.mark"><td class="num c-id" x-text="a.id"></td><td class="nm" x-text="a.name" :title="a.name"></td><td class="num" x-text="a.value"></td><td class="num c-worst" x-text="a.worst"></td><td class="num c-thresh" x-text="a.thresh"></td><td class="num c-raw"><template x-if="c.src !== 'replicas'"><span x-text="a.raw"></span></template><template x-if="c.src === 'replicas'"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(c.it, 'ata', a.name, $event.target.value)"></template></td></tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                    <template x-if="devstatTable(c.it).length">
+                      <div class="table-wrap">
+                        <table class="attrs">
+                          <thead><tr><th class="num">Page</th><th>Device Statistics</th><th class="num">Value</th></tr></thead>
+                          <tbody>
+                            <template x-for="e in devstatTable(c.it)" :key="e.key">
+                              <tr :class="e.mark"><td class="num" x-text="e.page"></td><td class="nm" x-text="e.name" :title="e.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && e.editable)"><span x-text="e.value"></span></template><template x-if="c.src === 'replicas' && e.editable"><input class="input raw-in" :value="e.value" inputmode="numeric" :aria-label="'Value of ' + e.name" @change="editRaw(c.it, 'devstat', null, $event.target.value)"></template></td></tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="reportKind(c.it) === 'nvme'">
                   <div class="table-wrap">
                     <table class="attrs">
-                      <thead><tr><th class="num">Page</th><th>Device Statistics</th><th class="num">Value</th></tr></thead>
+                      <thead><tr><th>Field</th><th class="num">Value</th></tr></thead>
                       <tbody>
-                        <template x-for="e in devstatTable(c.it)" :key="e.key">
-                          <tr :class="e.mark"><td class="num" x-text="e.page"></td><td class="nm" x-text="e.name" :title="e.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && e.editable)"><span x-text="e.value"></span></template><template x-if="c.src === 'replicas' && e.editable"><input class="input raw-in" :value="e.value" inputmode="numeric" :aria-label="'Value of ' + e.name" @change="editRaw(c.it, 'devstat', null, $event.target.value)"></template></td></tr>
+                        <template x-for="f in nvmeTable(c.it)" :key="f.name">
+                          <tr :class="f.mark"><td class="nm" x-text="f.name" :title="f.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && f.editable)"><span x-text="f.value"></span></template><template x-if="c.src === 'replicas' && f.editable"><input class="input raw-in" :value="f.value" inputmode="numeric" :aria-label="'Value of ' + f.name" @change="editRaw(c.it, 'nvme', f.name, $event.target.value)"></template></td></tr>
                         </template>
                       </tbody>
                     </table>
@@ -153,43 +166,35 @@
                 </template>
               </div>
             </template>
-            <template x-if="reportKind(c.it) === 'nvme'">
-              <div class="table-wrap">
-                <table class="attrs">
-                  <thead><tr><th>Field</th><th class="num">Value</th></tr></thead>
-                  <tbody>
-                    <template x-for="f in nvmeTable(c.it)" :key="f.name">
-                      <tr :class="f.mark"><td class="nm" x-text="f.name" :title="f.name"></td><td class="num"><template x-if="!(c.src === 'replicas' && f.editable)"><span x-text="f.value"></span></template><template x-if="c.src === 'replicas' && f.editable"><input class="input raw-in" :value="f.value" inputmode="numeric" :aria-label="'Value of ' + f.name" @change="editRaw(c.it, 'nvme', f.name, $event.target.value)"></template></td></tr>
+            <template x-if="isOpen(c) && c.kind === 'pool'">
+              <div class="details">
+                <template x-if="poolDisks(c.it).length">
+                  <div class="table-wrap">
+                    <table class="attrs" :aria-label="'Disks in pool ' + c.it.pool.name">
+                      <thead><tr><th>Disk</th><th>State</th><th class="num">Read</th><th class="num">Write</th><th class="num">Cksum</th></tr></thead>
+                      <tbody>
+                        <template x-for="d in poolDisks(c.it)" :key="d.name">
+                          <tr :class="d.bad ? 'crit' : ''"><td x-text="d.name"></td><td x-text="d.state"></td><td class="num" x-text="d.read"></td><td class="num" x-text="d.write"></td><td class="num" x-text="d.cksum"></td></tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+                <p class="c-note" x-show="poolFoot(c.it)" x-text="poolFoot(c.it)"></p>
+                <template x-if="spaces(c).length">
+                  <div class="fs-list">
+                    <template x-for="f in spaces(c)" :key="f.id || f.mountpoint">
+                      <div class="fs-line"><span><span class="mono" x-text="f.mountpoint"></span> <small x-text="f.fstype"></small></span><span class="fs-used" x-text="spaceUsed(f)"></span></div>
                     </template>
-                  </tbody>
-                </table>
-              </div>
-            </template>
-          </div>
-        </template>
-        <template x-if="isOpen(c) && c.kind === 'pool'">
-          <div class="details">
-            <template x-if="poolDisks(c.it).length">
-              <div class="table-wrap">
-                <table class="attrs" :aria-label="'Disks in pool ' + c.it.pool.name">
-                  <thead><tr><th>Disk</th><th>State</th><th class="num">Read</th><th class="num">Write</th><th class="num">Cksum</th></tr></thead>
-                  <tbody>
-                    <template x-for="d in poolDisks(c.it)" :key="d.name">
-                      <tr :class="d.bad ? 'crit' : ''"><td x-text="d.name"></td><td x-text="d.state"></td><td class="num" x-text="d.read"></td><td class="num" x-text="d.write"></td><td class="num" x-text="d.cksum"></td></tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </template>
-            <p class="c-note" x-show="poolFoot(c.it)" x-text="poolFoot(c.it)"></p>
-            <template x-if="spaces(c).length">
-              <div class="fs-list">
-                <template x-for="f in spaces(c)" :key="f.id || f.mountpoint">
-                  <div class="fs-line"><span><span class="mono" x-text="f.mountpoint"></span> <small x-text="f.fstype"></small></span><span class="fs-used" x-text="spaceUsed(f)"></span></div>
+                  </div>
                 </template>
               </div>
             </template>
           </div>
+        </template>
+        <!-- This app's agent not answering: the health line alone, unframed -->
+        <template x-if="c.kind === 'down'">
+          <div class="c-health"><span class="h-unk"><span class="ghost-dot" aria-hidden="true"></span>Health not known</span></div>
         </template>
 
         <!-- A field agent with nothing to show yet, and this app's agent down -->
