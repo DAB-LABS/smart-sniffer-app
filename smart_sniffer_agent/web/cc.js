@@ -50,6 +50,9 @@ function block24(octets) {
 }
 
 function cc() {
+  // Row heights while a card is open, kept off the reactive state: each
+  // open card's closed height at the card width it was measured at.
+  const rows = { closedH: {}, busy: false, queued: false };
   return {
     info: null,
     self: null,
@@ -100,6 +103,7 @@ function cc() {
       this.loadHa();
       setInterval(() => this.tick(), 1000);
       this.watchCols();
+      this.watchRows();
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) return;
         this.tick();
@@ -397,11 +401,10 @@ function cc() {
         'is-hidden': this.isHidden(c),
         'drop-gap': !!(this.drag && this.drag.id === c.id),
         open: this.isOpen(c),
-        'row-open': this.rowOpen(this.shownCards.findIndex((x) => x.id === c.id)),
       };
     },
-    // The grid's column count, kept up to date, so a card can tell which
-    // cards share its grid row.
+    // The grid's column count, kept up to date, so the open + card can
+    // tell how wide to be.
     watchCols() {
       const grid = document.querySelector('.grid');
       if (!grid) return;
@@ -412,16 +415,103 @@ function cc() {
       read();
       if (window.ResizeObserver) new ResizeObserver(read).observe(grid);
     },
-    // True for the card at this place in the grid when a card in its grid
-    // row has Details open: that row keeps each card's own height, so an
-    // open card grows down without stretching the cards beside it. Every
-    // card spans one column and there is no dense packing, so the row is
-    // the place divided by the column count.
-    rowOpen(i) {
-      if (i < 0) return false;
-      const cols = this.ui.cols || 1;
-      const row = Math.floor(i / cols);
-      return this.shownCards.slice(row * cols, row * cols + cols).some((x) => this.isOpen(x));
+    // A card with Details open grows down; every other card in its grid
+    // row keeps the height that row had while it was closed, so nothing
+    // beside it shrinks or grows. Rows with no card open stretch as usual.
+    // Rows are read from the page (cards that share a top), so this holds
+    // at any column count, after a drag and after a resize.
+    watchRows() {
+      const grid = document.querySelector('.grid');
+      if (!grid) return;
+      const later = () => {
+        if (rows.queued) return;
+        rows.queued = true;
+        requestAnimationFrame(() => { rows.queued = false; this.pinRows(); });
+      };
+      if (window.ResizeObserver) new ResizeObserver(later).observe(grid);
+      new MutationObserver(later).observe(grid, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+    },
+    gridItems() {
+      const grid = document.querySelector('.grid');
+      if (!grid) return [];
+      return [...grid.children].filter((e) => e.tagName !== 'TEMPLATE' && e.getClientRects().length);
+    },
+    // A card's height at its own content, as a closed card in a closed row.
+    naturalH(e) {
+      e.style.height = '';
+      e.style.alignSelf = 'start';
+      return e.getBoundingClientRect().height;
+    },
+    cardW(e) {
+      return Math.round(e.getBoundingClientRect().width);
+    },
+    pinRows() {
+      if (rows.busy) return;
+      const items = this.gridItems();
+      const isOpen = (e) => e.classList.contains('open');
+      if (!items.some(isOpen)) {
+        items.forEach((e) => { e.style.height = ''; e.style.alignSelf = ''; });
+        return;
+      }
+      // An open card's closed height is known only at the width it was
+      // measured at; after a resize, measure it again.
+      if (items.some((e) => isOpen(e) && !this.knownClosed(e))) {
+        this.remeasure();
+        return;
+      }
+      // Natural heights first (all writes, then all reads), then the rows.
+      items.forEach((e) => { e.style.height = ''; e.style.alignSelf = 'start'; });
+      const got = items.map((e) => ({
+        e, open: isOpen(e), top: Math.round(e.offsetTop),
+        h: isOpen(e) ? rows.closedH[e.dataset.card].h : e.getBoundingClientRect().height,
+      }));
+      const byRow = new Map();
+      got.forEach((g) => { if (!byRow.has(g.top)) byRow.set(g.top, []); byRow.get(g.top).push(g); });
+      byRow.forEach((row) => {
+        if (!row.some((g) => g.open)) {
+          row.forEach((g) => { g.e.style.alignSelf = ''; });
+          return;
+        }
+        const h = Math.max(...row.map((g) => g.h));
+        row.forEach((g) => {
+          if (g.open) { g.e.style.alignSelf = ''; return; }
+          g.e.style.height = h + 'px';
+        });
+      });
+    },
+    knownClosed(e) {
+      const m = rows.closedH[e.dataset.card];
+      return !!(m && m.w === this.cardW(e));
+    },
+    // Close the open cards for one microtask, read their closed heights at
+    // the new width, open them again. No frame is painted in between.
+    async remeasure() {
+      rows.busy = true;
+      const flush = () => new Promise((r) => queueMicrotask(r));
+      const ids = Object.keys(this.ui.open).filter((k) => this.ui.open[k]);
+      const act = document.activeElement;
+      const actCard = act && act.closest && act.closest('[data-card]');
+      const actKey = actCard && [actCard.dataset.card, act.getAttribute('aria-label'), act.className];
+      try {
+        ids.forEach((k) => { this.ui.open[k] = false; });
+        await flush(); await flush();
+        const grid = document.querySelector('.grid');
+        ids.forEach((k) => {
+          const e = grid && grid.querySelector(`[data-card="${CSS.escape(k)}"]`);
+          if (e) rows.closedH[k] = { w: this.cardW(e), h: this.naturalH(e) };
+        });
+      } finally {
+        ids.forEach((k) => { this.ui.open[k] = true; });
+        await flush(); await flush();
+        rows.busy = false;
+      }
+      if (actKey) {
+        const card = document.querySelector(`.grid [data-card="${CSS.escape(actKey[0])}"]`);
+        const back = card && [...card.querySelectorAll('button, input, a, [tabindex]')]
+          .find((x) => x.getAttribute('aria-label') === actKey[1] && x.className === actKey[2]);
+        if (back) back.focus({ preventScroll: true });
+      }
+      this.pinRows();
     },
 
     // Where a card comes from.
@@ -511,6 +601,15 @@ function cc() {
       return !!this.ui.open[c.id];
     },
     toggleOpen(c) {
+      // Before a card opens, note its closed height for its row.
+      if (!this.ui.open[c.id]) {
+        const e = document.querySelector(`.grid [data-card="${CSS.escape(c.id)}"]`);
+        if (e) {
+          const keep = [e.style.height, e.style.alignSelf];
+          rows.closedH[c.id] = { w: this.cardW(e), h: this.naturalH(e) };
+          [e.style.height, e.style.alignSelf] = keep;
+        }
+      }
       this.ui.open[c.id] = !this.ui.open[c.id];
       if (!this.ui.open[c.id] && this.thrEditing(c)) this.ui.thr = null;
     },

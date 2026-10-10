@@ -1197,11 +1197,93 @@ def test_drag_with_an_open_card(open_page):
     ids = card_ids(p)
     assert ids.index(BARRACUDA) == ids.index(NAS_MAYBE) + 1, ids[:6]
     assert by_id(p, BARRACUDA).evaluate(SPAN) == [3, 1]
-    # The new row of the open card is the one that keeps its own heights.
+    # In its new row the other cards keep their closed heights.
+    p.page.wait_for_timeout(200)
+    open_h = _heights(p)
+    by_id(p, BARRACUDA).locator(".chev").click()
+    p.page.wait_for_timeout(300)
+    closed = _heights(p)
     i = ids.index(BARRACUDA)
-    marked = p.page.eval_on_selector_all(".grid > article.card", "els => els.map((e) => e.classList.contains('row-open'))")
-    assert [j for j, m in enumerate(marked) if m] == list(range(i - i % 3, i - i % 3 + 3)), marked
+    _same_but(open_h, closed, i)
+    assert open_h[i] > closed[i] + 20
     assert len(p.api("PUT", r"/cards/order$")) == 1
+
+
+# Every grid item's height: cards, then the + card.
+HEIGHTS = "() => [...document.querySelector('.grid').children].filter((e) => e.tagName !== 'TEMPLATE')" \
+    ".map((e) => e.getBoundingClientRect().height)"
+TWO_COLUMNS = 800
+
+
+def _heights(p: Page) -> list:
+    return p.page.evaluate(HEIGHTS)
+
+
+def _same_but(now: list, before: list, skip: int) -> None:
+    assert len(now) == len(before)
+    moved = [(j, a, b) for j, (a, b) in enumerate(zip(now, before)) if j != skip and abs(a - b) > 1]
+    assert not moved, moved
+
+
+def _cols(p: Page) -> int:
+    return p.page.evaluate("() => getComputedStyle(document.querySelector('.grid')).gridTemplateColumns.split(' ').length")
+
+
+def _toggle(p: Page, cid: str) -> None:
+    by_id(p, cid).locator(".chev").click()
+    p.page.wait_for_timeout(250)
+
+
+@pytest.mark.parametrize("width", [1280, TWO_COLUMNS, 390])
+def test_open_card_keeps_row_heights(open_page, width):
+    """An open card grows down; no other card changes height, open or closed."""
+    p = open_page("", width)
+    assert _cols(p) == {1280: 3, TWO_COLUMNS: 2, 390: 1}[width]
+    closed = _heights(p)
+    for cid in (NAS_ATT, BARRACUDA, NAS_POOL):
+        i = card_ids(p).index(cid)
+        _toggle(p, cid)
+        now = _heights(p)
+        _same_but(now, closed, i)
+        assert now[i] > closed[i] + 20, (now[i], closed[i])
+        _toggle(p, cid)
+        assert all(abs(a - b) <= 1 for a, b in zip(_heights(p), closed)), (_heights(p), closed)
+    # Thresholds edit mode changes the open card only.
+    i = card_ids(p).index(BARRACUDA)
+    _edit(p, BARRACUDA)
+    p.page.wait_for_timeout(250)
+    _same_but(_heights(p), closed, i)
+    by_id(p, BARRACUDA).get_by_role("button", name="Cancel").click()
+    p.page.wait_for_timeout(250)
+    _same_but(_heights(p), closed, i)
+    _toggle(p, BARRACUDA)
+    assert all(abs(a - b) <= 1 for a, b in zip(_heights(p), closed))
+
+
+def test_open_card_keeps_row_heights_through_a_resize(open_page):
+    p = open_page("", 1280)
+    p.page.set_viewport_size({"width": TWO_COLUMNS, "height": 900})
+    p.page.wait_for_timeout(300)
+    closed2 = _heights(p)
+    p.page.set_viewport_size({"width": 1280, "height": 900})
+    p.page.wait_for_timeout(300)
+    closed3 = _heights(p)
+    i = card_ids(p).index(NAS_ATT)
+    _toggle(p, NAS_ATT)
+    _same_but(_heights(p), closed3, i)
+    edit = by_id(p, NAS_ATT).locator(".chev")
+    edit.focus()
+    for size, closed in ((TWO_COLUMNS, closed2), (1280, closed3), (TWO_COLUMNS, closed2)):
+        p.page.set_viewport_size({"width": size, "height": 900})
+        p.page.wait_for_timeout(400)
+        now = _heights(p)
+        _same_but(now, closed, i)
+        assert now[i] > closed[i] + 20
+        assert by_id(p, NAS_ATT).locator(".chev").get_attribute("aria-expanded") == "true"
+    # The chevron keeps the focus through the measuring.
+    assert edit.evaluate("e => document.activeElement === e")
+    _toggle(p, NAS_ATT)
+    assert all(abs(a - b) <= 1 for a, b in zip(_heights(p), closed2))
 
 
 def test_chevron_outline_only_for_the_keyboard(open_page):
@@ -1619,11 +1701,21 @@ def _shot(p: Page, name: str, target=None):
         assert_no_overflow(p)
 
 
+def _top(p: Page, name: str):
+    """The top of the page, header to the first row of cards."""
+    SHOTS.mkdir(parents=True, exist_ok=True)
+    width = p.page.viewport_size["width"]
+    p.page.wait_for_timeout(250)
+    bottom = p.page.locator(".grid").bounding_box()["y"] + 40
+    p.page.screenshot(path=str(SHOTS / f"{name}-{width}.png"), clip={"x": 0, "y": 0, "width": width, "height": bottom})
+
+
 def test_screenshots(open_page):
     for width in WIDTHS:
         p = open_page("", width)
         _shot(p, "grid", None)
         _shot(p, "header", p.page.locator("header.app-head"))
+        _top(p, "top-agent-up")
         _shot(p, "attention-three-rows-and-more", by_id(p, NAS_ATT))
         _shot(p, "maybe-space-91-97", by_id(p, NAS_MAYBE))
         _shot(p, "health-ok-haos-space", by_id(p, NVME))
@@ -1681,6 +1773,7 @@ def test_screenshots(open_page):
         _shot(p, "exit-absent", by_id(p, NVME))
         p = open_page("AGENT=down", width)
         _shot(p, "haos-not-answering", by_id(p, NVME))
+        _top(p, "top-agent-down")
         p = open_page("", width)
         pi = by_id(p, BACKUP_PI)
         pi.get_by_label("Agent password").fill("wrong")

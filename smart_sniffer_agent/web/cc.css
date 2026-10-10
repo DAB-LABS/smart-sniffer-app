@@ -97,10 +97,9 @@ p.sec-label { margin: 22px 0 10px; }
    line up and every problem row shows; at phone width one column.
    ------------------------------------------------------------------ */
 .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); }
-/* A card with Details open stays one column and grows down. The cards in
-   its grid row (cc.js marks them row-open) keep their own height instead of
-   stretching to it; rows with no card open still stretch as above. */
-.grid > .row-open { align-self: start; }
+/* A card with Details open stays one column and grows down. The other
+   cards in its grid row keep the height the row had while closed (cc.js
+   pinRows sets it on them); rows with no card open stretch as above. */
 .card { background: var(--panel); border: 1px solid var(--rule-2); border-radius: 6px; padding: 12px 14px 10px;
         position: relative; min-width: 0; display: flex; flex-direction: column; }
 
