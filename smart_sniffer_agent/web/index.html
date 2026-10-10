@@ -88,9 +88,10 @@
 
         <!-- The health box: one frame in the state colour around the health
              line and its chevron, the first three problem rows closed, and
-             all of Details open. Nothing in it scrolls. -->
+             all of Details open. Nothing in it scrolls. It sits at the
+             bottom of the card, on the footer rule; spare height goes above. -->
         <template x-if="health(c) && c.kind !== 'down'">
-          <div class="hbox" :class="health(c)">
+          <div class="hwrap"><div class="hbox" :class="health(c)">
             <div class="c-health">
               <template x-if="health(c) === 'attention'"><span class="h-att">Attention</span></template>
               <template x-if="health(c) === 'attention' && failed(c)"><span class="h-fail">Health <b>FAILED</b></span></template>
@@ -233,7 +234,7 @@
                 </template>
               </div>
             </template>
-          </div>
+          </div></div>
         </template>
         <!-- This app's agent not answering: the health line alone, unframed -->
         <template x-if="c.kind === 'down'">

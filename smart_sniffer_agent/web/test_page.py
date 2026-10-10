@@ -420,6 +420,47 @@ def test_health_box(open_page):
         assert by_id(p, REP_FAILED).locator(".hbox .c-health .h-fail").count() == 1
 
 
+BOX_BOTTOMS = """els => els.map((c) => {
+  const box = c.querySelector('.hbox'), rule = c.querySelector('.c-foot');
+  if (!box) return null;
+  const b = box.getBoundingClientRect(), r = rule.getBoundingClientRect(), top = c.querySelector('.c-head').getBoundingClientRect();
+  return { state: box.className, bottom: b.bottom, rule: r.top, head: top.top - c.getBoundingClientRect().top };
+})"""
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_health_box_sits_on_footer(open_page, width):
+    """The health box ends on the footer rule; spare height goes above it, the top rows stay at the top."""
+    p = open_page("", width)
+    cards = p.page.eval_on_selector_all(".grid > article.card", BOX_BOTTOMS)
+    first = by_id(p, NVME).evaluate("e => e.getBoundingClientRect().top")
+    row = [c for c, top in zip(cards, p.page.eval_on_selector_all(
+        ".grid > article.card", "els => els.map((e) => e.getBoundingClientRect().top)")) if abs(top - first) < 1]
+    boxes = [c for c in row if c]
+    for c in boxes:
+        assert 0 <= c["rule"] - c["bottom"] <= 8, c
+        assert c["head"] < 16, c
+    if width == 1280:
+        # Mixed states in one grid row: Health OK and a five-line Attention share one bottom edge.
+        states = {c["state"].split()[-1] for c in boxes}
+        assert len(boxes) == 3 and {"ok", "attention"} <= states, boxes
+        assert max(c["bottom"] for c in boxes) - min(c["bottom"] for c in boxes) <= 1, boxes
+    else:
+        # One column: every card's box sits on its own footer rule.
+        assert all(0 <= c["rule"] - c["bottom"] <= 8 for c in cards if c), cards
+    # Open, the box still ends on the footer rule.
+    att = by_id(p, NAS_ATT)
+    att.locator(".chev").click()
+    p.page.wait_for_timeout(200)
+    b, r = att.locator(".hbox").bounding_box(), att.locator(".c-foot").bounding_box()
+    assert 0 <= r["y"] - (b["y"] + b["height"]) <= 8, (b, r)
+    # Cards with no box keep their content at the top and the footer at the bottom.
+    for cid in (NAS_FS, BACKUP_PI):
+        card, foot = by_id(p, cid).bounding_box(), by_id(p, cid).locator(".c-foot").bounding_box()
+        assert card["y"] + card["height"] - (foot["y"] + foot["height"]) < 16, (cid, card, foot)
+        assert by_id(p, cid).locator(".c-head").bounding_box()["y"] - card["y"] < 16, cid
+
+
 TABLE_ROWS = """t => [...t.querySelectorAll('tbody tr')].map((r) => [r.className,
   ...[...r.cells].filter((c) => getComputedStyle(c).display !== 'none').map((c) => c.innerText.trim())])"""
 

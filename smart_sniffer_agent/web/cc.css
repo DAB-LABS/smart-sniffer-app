@@ -167,7 +167,10 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
    first three problem rows and an "and N more" line; open it holds all of
    Details and grows with them. Health not known is a grey dashed frame.
    The words inside keep their full colour. Nothing in the box scrolls. */
-.hbox { margin-top: 10px; border: 1px solid var(--rule-2); border-radius: 0; padding: 6px 10px 7px; min-width: 0;
+/* Its wrapper takes the spare height above it, so every box in a grid row
+   ends on its footer rule and a taller box grows upward. */
+.hwrap { margin-top: auto; padding-top: 10px; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.hbox { border: 1px solid var(--rule-2); border-radius: 0; padding: 6px 10px 7px; min-width: 0;
         display: grid; grid-template-columns: minmax(0, 1fr); background: transparent; }
 .hbox.attention { border-color: rgb(204 107 99 / 0.25); }
 .hbox.maybe { border-color: rgb(204 159 82 / 0.25); }
@@ -267,6 +270,8 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
 .c-spacer { flex: 1 0 12px; }
 .c-foot { padding-top: 7px; display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--rule); margin-top: 10px; }
 .c-spacer + .c-foot { margin-top: 0; }
+.hwrap ~ .c-spacer { flex: 0 0 6px; }
+.hwrap ~ .c-foot { margin-top: 0; }
 .seen { font-family: var(--mono); font-size: 0.7rem; color: var(--dim); min-width: 0; }
 .act-note { font-size: 0.72rem; color: var(--grey); }
 .icons { margin-left: auto; display: inline-flex; gap: 4px; }
