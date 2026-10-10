@@ -167,11 +167,11 @@ COLOUR_AUDIT = """
 () => {
   const want = { att: 'rgb(204, 107, 99)', maybe: 'rgb(204, 159, 82)', ok: 'rgb(93, 163, 114)', blue: 'rgb(3, 169, 244)' };
   const allowed = {
-    att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .hbox.attention, .pw-row.crit .lb, .pw-row.crit .pw-val, '
+    att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .hbox.attention, .agent-dot.down, .pw-row.crit .lb, .pw-row.crit .pw-val, '
       + '.kv > div.crit .lb, .kv > div.crit .v, table.attrs tr.crit'),
     maybe: (el) => !!el.closest('.h-maybe, .chev.maybe, .hbox.maybe, .pw-row.warn .lb, .pw-row.warn .pw-val, '
       + '.kv > div.warn .lb, .kv > div.warn .v, table.attrs tr.warn'),
-    ok: (el) => !!el.closest('.h-ok, .chev.ok, .hbox.ok'),
+    ok: (el) => !!el.closest('.h-ok, .chev.ok, .hbox.ok, .agent-dot.up'),
     blue: (el) => !!el.closest('.exit:not(.add)'),
   };
   const bad = [];
@@ -1397,11 +1397,33 @@ def test_top_of_page(open_page):
     assert "Drive health for this machine" not in p.page.locator("main").inner_text()
     line = p.page.locator(".agent-line")
     assert line.inner_text().replace("\n", " ").split() == [
-        "HAOS", "SMART", "agent", "local-smart-sniffer-agent:9099", "mDNS", "smartha-homeassistant",
-        "agent", "0.8.1", "answering"]
+        "HAOS", "SMART", "AGENT:", "local-smart-sniffer-agent:9099", "mDNS", "smartha-homeassistant"]
+    assert "answering" not in line.inner_text() and "0.8.1" not in line.inner_text()
     assert line.locator("button.copy").count() == 2
-    label = p.page.locator(".sec-label")
-    assert label.inner_text().strip().lower() == "drives"
+    label = p.page.locator("p.sec-drives")
+    assert label.inner_text().strip() == "DRIVES:"
+    # Both section headers: uppercase, a colon, the same element and font.
+    heads = p.page.locator(".sec-label")
+    assert heads.count() == 2
+    assert [h.inner_text().strip() for h in heads.all()] == ["HAOS SMART AGENT:", "DRIVES:"]
+    fonts = [h.evaluate("e => { const c = getComputedStyle(e); return [c.fontFamily, c.fontSize, c.fontWeight, "
+                        "c.letterSpacing, c.textTransform, c.color].join('|') }") for h in heads.all()]
+    assert fonts[0] == fonts[1], fonts
+    # No rules line under the grid; the rules version sits in the header.
+    assert p.page.locator(".rules-line").count() == 0
+    assert "rules from integration" not in p.page.locator("main").inner_text()
+    vers = p.page.locator(".versions")
+    words = vers.inner_text().replace("\n", " ").split()
+    assert words[:5] == ["app", "0.3.0", "agent", "0.8.1", "rules"] and len(words) == 6, words
+    assert re.fullmatch(r"v?\d+(\.\d+)+\S*", words[5]), words
+    rules = vers.locator("span[title]", has_text="rules")
+    assert rules.get_attribute("title") == "Integration rules this app judges drives with"
+    dot = vers.locator(".agent-dot")
+    assert dot.evaluate("e => getComputedStyle(e).backgroundColor") == "rgb(93, 163, 114)"
+    assert dot.get_attribute("title") == "This app's agent is answering"
+    box = dot.bounding_box()
+    assert round(box["width"]) == 7 and round(box["height"]) == 7
+    assert dot.bounding_box()["x"] < vers.get_by_text("0.8.1").bounding_box()["x"]
     head = p.page.locator("header.app-head").bounding_box()
     tops = [line.bounding_box()["y"], label.bounding_box()["y"], p.page.locator(".grid").bounding_box()["y"]]
     assert head["y"] < tops[0] < tops[1] < tops[2]
@@ -1412,10 +1434,11 @@ def test_top_of_page(open_page):
     line = p.page.locator(".agent-line")
     assert "mDNS" not in line.inner_text() and line.locator("button.copy").count() == 1
     p = open_page("AGENT=down")
-    state = p.page.locator(".agent-line .al-state")
-    assert state.inner_text() == "not answering"
-    assert state.evaluate("e => getComputedStyle(e).color") == "rgb(143, 143, 143)"
-    assert "agent 0.8.1" not in p.page.locator(".agent-line").inner_text()
+    dot = p.page.locator(".versions .agent-dot")
+    assert dot.evaluate("e => getComputedStyle(e).backgroundColor") == "rgb(204, 107, 99)"
+    assert dot.get_attribute("title") == "This app's agent is not answering"
+    assert "answering" not in p.page.locator(".agent-line").inner_text()
+    assert_colours(p)
 
 
 @pytest.mark.parametrize("width", [390])

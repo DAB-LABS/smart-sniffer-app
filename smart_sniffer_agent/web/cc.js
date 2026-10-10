@@ -315,11 +315,17 @@ function cc() {
       const s = Math.max(0, Math.ceil((this.selfNext - this.now) / 1000));
       return `asking again in ${s} s`;
     },
-    get rulesLine() {
-      const v = (this.self && this.self.rules_version) || (this.info && this.info.rules_version);
-      if (v) return `rules from integration ${v}`;
-      if (this.info) return 'rules from the integration are not loaded, so no drive is judged; the Mission Log says why';
-      return '';
+    get rulesVersion() {
+      return (this.self && this.self.rules_version) || (this.info && this.info.rules_version) || '';
+    },
+    // The dot before the agent version: unknown, up or down.
+    get agentState() {
+      if (!this.selfLoaded) return 'unknown';
+      return this.agentDown ? 'down' : 'up';
+    },
+    get agentDotTitle() {
+      if (!this.selfLoaded) return "Asking this app's agent";
+      return this.agentDown ? "This app's agent is not answering" : "This app's agent is answering";
     },
     get selfEmpty() {
       return !this.agentDown && this.self && this.self.status === 'ok'

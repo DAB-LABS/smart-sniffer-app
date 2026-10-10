@@ -36,7 +36,7 @@
       <span class="page-name">Control Center</span>
     </div>
     <div class="head-side">
-      <div class="versions"><span x-show="info && info.app_version">app <b x-text="info && info.app_version"></b></span><span x-show="agentVersion">agent <b x-text="agentVersion"></b></span><span x-show="!agentVersion && agentDown">agent not answering</span></div>
+      <div class="versions"><span x-show="info && info.app_version">app <b x-text="info && info.app_version"></b></span><span class="v-agent"><i class="agent-dot" :class="agentState" :title="agentDotTitle" role="img" :aria-label="agentDotTitle"></i><span x-show="agentVersion">agent <b x-text="agentVersion"></b></span><span x-show="!agentVersion && agentDown">agent not answering</span><span x-show="!agentVersion && !agentDown">agent</span></span><span x-show="info" title="Integration rules this app judges drives with">rules <b x-text="rulesVersion || 'not loaded'"></b></span></div>
       <div class="head-tools">
         <button class="btn btn-sm eye-btn" type="button" :aria-pressed="showHidden ? 'true' : 'false'" :disabled="!hiddenCount && !showHidden" :aria-label="showHidden ? 'Hidden cards shown, ' + hiddenCount : hiddenCount + ' hidden, press to see them'" title="Hidden cards" @click="toggleShowHidden()"><svg class="eye-g" aria-hidden="true" x-show="!showHidden"><use href="#eye-shut"/></svg><svg class="eye-g" aria-hidden="true" x-show="showHidden" style="display:none"><use href="#eye"/></svg><span x-text="hiddenCount">0</span></button>
         <button class="btn btn-sm" type="button" @click="refresh()">Refresh</button>
@@ -46,14 +46,12 @@
   <!-- This app's own agent, on one line, with what to type into the integration -->
   <template x-if="topAgent">
     <section class="agent-line" aria-label="This app's agent">
-      <span class="al-name">HAOS SMART agent</span>
+      <span class="sec-label al-name">HAOS SMART AGENT:</span>
       <span class="cp"><span class="cp-v mono" x-text="topAgent.addr"></span><button class="copy" type="button" aria-label="Copy the agent address" title="Copy" @click="copy($event, topAgent.addr, 'top:addr')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'top:addr'" x-text="ui.copiedText"></small></span>
       <template x-if="topAgent.mdns"><span class="cp al-mdns"><span class="cp-k">mDNS</span><span class="cp-v mono" x-text="topAgent.mdns"></span><button class="copy" type="button" aria-label="Copy the mDNS name" title="Copy" @click="copy($event, topAgent.mdns, 'top:mdns')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'top:mdns'" x-text="ui.copiedText"></small></span></template>
-      <span class="al-ver mono" x-show="agentVersion" x-text="'agent ' + agentVersion"></span>
-      <span class="al-state" :class="{ down: agentDown }" x-show="selfLoaded" x-text="agentDown ? 'not answering' : 'answering'"></span>
     </section>
   </template>
-  <p class="sec-label">Drives</p>
+  <p class="sec-label sec-drives">DRIVES:</p>
   <p class="page-err" x-show="pageErr || hostsErr" x-text="pageErr || hostsErr" role="alert"></p>
   <template x-if="selfEmpty">
     <p class="empty-line">This machine's agent reports no readable drives. If the <a :href="appPage('logs')" target="_top">Mission Log</a> says DRIVE ACCESS BLOCKED, turn off Protection Mode on the <a :href="appPage('info')" target="_top">app's info page</a> and restart the app.</p>
@@ -360,7 +358,6 @@
       </div>
     </template>
   </div>
-  <p class="rules-line" x-show="rulesLine" x-text="rulesLine"></p>
   <div id="drag-layer" x-ignore aria-hidden="true"></div>
 
   <footer class="app-foot">

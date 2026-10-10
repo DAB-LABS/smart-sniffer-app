@@ -1,9 +1,9 @@
 /* Control Center styles: one grid of cards (design Rev 4).
    Black, white and grey. Four colour exceptions, muted, defined once below:
-   --att   Attention: the word, FAILED, its chevron, the health box's
+   --att   Attention: the word, FAILED, its chevron, the agent dot, the health box's
            stroke and the labels and values of rows that caused it;
    --maybe Maybe: the same places, for warnings;
-   --ok    Health OK, its chevron and its health box, nowhere else;
+   --ok    Health OK, its chevron and its health box, and the agent dot;
    --ha    the exit icon of something in Home Assistant, nowhere else.
    Space is not health: disk space bars are grey only. */
 :root {
@@ -55,16 +55,19 @@ img { display: block; }
    name each with a copy button. It wraps by whole items on a phone. */
 .agent-line { margin: 12px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; font-size: 0.76rem; color: var(--dim); }
 .agent-line > * { white-space: nowrap; }
-.agent-line .al-name { color: var(--grey); font-weight: 600; font-size: 0.8rem; }
 .agent-line .cp-v { font-size: 0.74rem; overflow-wrap: normal; }
-.agent-line .al-ver { font-size: 0.74rem; color: var(--grey); }
-.agent-line .al-state { color: var(--grey); }
-.agent-line .al-state.down { color: var(--dim); }
-.sec-label { margin: 22px 0 10px; font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--grey); }
+/* The two section headers, HAOS SMART AGENT: and DRIVES:, read the same. */
+.sec-label { font-family: var(--sans); font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--grey); }
+p.sec-label { margin: 22px 0 10px; }
+/* This app's agent status, a dot before its version: grey until known,
+   then Health OK green or Attention red. */
+.versions .v-agent { display: inline-flex; align-items: center; gap: 6px; }
+.agent-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
+.agent-dot.up { background: var(--ok); }
+.agent-dot.down { background: var(--att); }
 .page-err { margin: 0 0 12px; font-size: 0.82rem; color: var(--paper); }
 .empty-line { margin: 0 0 14px; font-size: 0.86rem; color: var(--dim); max-width: 82ch; }
 .empty-line a { color: var(--grey); }
-.rules-line { margin-top: 12px; font-family: var(--mono); font-size: 0.72rem; color: var(--dim); }
 .app-foot { margin-top: 34px; border-top: 1px solid var(--rule); padding-top: 14px; display: flex; gap: 8px 20px; flex-wrap: wrap; font-size: 0.82rem; color: var(--dim); }
 .app-foot a { color: var(--grey); }
 .app-foot .spacer { flex: 1; }
