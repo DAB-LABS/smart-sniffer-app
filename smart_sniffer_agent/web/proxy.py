@@ -2408,6 +2408,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         keys = {(h["address"], h["port"]) for h in stored}
         row["added"] = (address, port) in keys or (
             (connect_to, port) in stored_keys(stored))
+        # The address it was reached at, so the page can find a typed name
+        # among the scan's rows, which carry addresses.
+        row["resolved"] = connect_to
         self._send_json(200, row)
 
     def _added_hosts(self) -> list[dict[str, Any]]:

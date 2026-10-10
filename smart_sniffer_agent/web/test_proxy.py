@@ -1446,6 +1446,7 @@ def test_probe_address_and_name(proxy, field):
     assert status == 200
     assert row["address"] == "localhost"  # what was typed
     assert row["id"] == f"localhost:{field}"
+    assert row["resolved"] == "127.0.0.1"
     assert row["hostname"] == "own-host"
     status, row = proxy.post("/fleet/probe", {"host": "127.0.0.3", "port": field})
     assert row["auth"] == "password"

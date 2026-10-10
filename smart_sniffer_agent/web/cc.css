@@ -51,14 +51,25 @@ img { display: block; }
 .versions { font-family: var(--mono); font-size: 0.76rem; color: var(--dim); display: flex; gap: 16px; }
 .versions b { color: var(--grey); font-weight: 500; }
 .head-tools { display: flex; gap: 8px; }
-.app-tag { margin: 10px 0 18px; font-size: 0.86rem; color: var(--grey); max-width: 82ch; }
-.page-err { margin: -8px 0 12px; font-size: 0.82rem; color: var(--paper); }
-.empty-line { margin: -6px 0 14px; font-size: 0.86rem; color: var(--dim); max-width: 82ch; }
+/* This app's agent: one quiet line under the header, its address and mDNS
+   name each with a copy button. It wraps by whole items on a phone. */
+.agent-line { margin: 12px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; font-size: 0.76rem; color: var(--dim); }
+.agent-line > * { white-space: nowrap; }
+.agent-line .al-name { color: var(--grey); font-weight: 600; font-size: 0.8rem; }
+.agent-line .cp-v { font-size: 0.74rem; overflow-wrap: normal; }
+.agent-line .al-ver { font-size: 0.74rem; color: var(--grey); }
+.agent-line .al-state { color: var(--grey); }
+.agent-line .al-state.down { color: var(--dim); }
+.sec-label { margin: 22px 0 10px; font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--grey); }
+.page-err { margin: 0 0 12px; font-size: 0.82rem; color: var(--paper); }
+.empty-line { margin: 0 0 14px; font-size: 0.86rem; color: var(--dim); max-width: 82ch; }
 .empty-line a { color: var(--grey); }
 .rules-line { margin-top: 12px; font-family: var(--mono); font-size: 0.72rem; color: var(--dim); }
 .app-foot { margin-top: 34px; border-top: 1px solid var(--rule); padding-top: 14px; display: flex; gap: 8px 20px; flex-wrap: wrap; font-size: 0.82rem; color: var(--dim); }
 .app-foot a { color: var(--grey); }
 .app-foot .spacer { flex: 1; }
+.app-foot .foot-sep { width: 1px; height: 12px; background: var(--rule-2); align-self: center; }
+.app-foot .also { color: var(--dim); }
 
 /* Buttons and inputs */
 .btn { cursor: pointer; border-radius: 3px; padding: 6px 14px; font: 600 0.8rem/1.3 var(--sans); border: 1px solid var(--rule-2);
@@ -95,6 +106,17 @@ img { display: block; }
 .grip { background: none; border: 0; padding: 4px 3px; margin: -1px 0 0 -6px; color: var(--dim); cursor: grab; line-height: 0;
         touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; border-radius: 3px; }
 .grip:hover { color: var(--paper); }
+/* The card's controls (grip, download, eye, trash) rest dimmed and come up
+   while the pointer is anywhere on the card, or on keyboard focus. On a
+   touch screen they stay dimmed and come up while pressed. */
+.card .grip, .card .c-foot .icon { opacity: 0.3; transition: opacity 0.15s ease; }
+.card:hover .grip, .card:hover .c-foot .icon,
+.card .grip:focus-visible, .card .c-foot .icon:focus-visible, .card .c-foot .icon[aria-expanded="true"] { opacity: 1; }
+@media (hover: none) {
+  .card:hover .grip, .card:hover .c-foot .icon { opacity: 0.3; }
+  .card .grip:active, .card .c-foot .icon:active,
+  .card .grip:focus-visible, .card .c-foot .icon:focus-visible, .card .c-foot .icon[aria-expanded="true"] { opacity: 1; }
+}
 .grip svg { width: 10px; height: 16px; fill: currentColor; }
 .c-title { margin: 0; font-size: 0.98rem; font-weight: 650; line-height: 1.3; overflow-wrap: anywhere;
            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -297,18 +319,36 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
    row with three areas, each its own panel, and one Add button.
    ------------------------------------------------------------------ */
 .card.ghost { background: transparent; border: 1.5px dashed var(--rule-2); display: grid; place-items: center; align-content: center;
-              gap: 6px; min-height: 180px; cursor: pointer; color: var(--grey); text-align: center; font: inherit; width: 100%; padding: 18px; }
+              gap: 6px; min-height: 180px; cursor: pointer; color: var(--grey); text-align: center; font: inherit; width: 100%; padding: 18px;
+              opacity: 0.3; transition: opacity 0.15s ease, border-color 0.15s ease; }
 .card.ghost:hover { border-color: var(--grey); }
+.card.ghost:hover, .card.ghost:focus-visible { opacity: 1; }
+@media (hover: none) { .card.ghost, .card.ghost:hover { opacity: 0.45; } .card.ghost:focus-visible { opacity: 1; } }
 .ghost .plus { font-size: 4.4rem; font-weight: 200; line-height: 0.9; color: var(--paper); }
 .ghost .ghost-sub { font-size: 0.82rem; color: var(--grey); }
-.card.ghost-open { grid-column: 1 / -1; border: 1.5px dashed var(--grey); padding: 10px 16px 16px; display: grid; gap: 12px; }
+/* Opened: two of three columns, or the full row when the grid has fewer
+   than three. Network on the left, Add by hand and Replicas stacked on the
+   right; one column when it is narrow. */
+.card.ghost-open { grid-column: 1 / -1; border: 1.5px dashed var(--grey); padding: 8px 14px 12px; display: grid; gap: 10px;
+                   container: addcard / inline-size; }
+.card.ghost-open.wide { grid-column: auto / span 2; }
+.add-body, .add-side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-content: start; min-width: 0; }
+@container addcard (min-width: 620px) {
+  .add-body { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; }
+}
 .add-head { display: flex; align-items: center; gap: 8px; }
 .add-head h3 { margin: 0; font-size: 1rem; font-weight: 650; }
 .plus-close { background: none; border: 0; padding: 0 2px; margin-left: -3px; color: var(--paper); font: 200 1.9rem/1 var(--sans); cursor: pointer; transform: rotate(45deg); }
 .plus-close:hover { color: #fff; }
-.area { border: 1px solid var(--rule-2); background: var(--panel); padding: 10px 12px 12px; display: grid; gap: 10px; min-width: 0; container-type: inline-size; }
+.area { border: 1px solid var(--rule-2); background: var(--panel); padding: 8px 10px 10px; display: grid; gap: 8px; min-width: 0; container-type: inline-size; }
 .area h4 { margin: 0; font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--grey); }
 .area-help { margin: 0; font-size: 0.74rem; color: var(--dim); }
+/* Check's answer, under the Add by hand fields */
+.check-msg { margin: 0; font-size: 0.78rem; color: var(--grey); overflow-wrap: anywhere; }
+.check-msg.muted { color: var(--dim); }
+/* A row Check found already in the list: one outline pulse */
+.pick-row.flash { animation: pick-flash 0.9s ease-out 1; }
+@keyframes pick-flash { 0%, 30% { outline: 2px solid var(--paper); outline-offset: -2px; } 100% { outline: 2px solid rgb(241 241 241 / 0); outline-offset: -2px; } }
 .add-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .add-line .pair { display: inline-flex; align-items: center; gap: 8px; }
 .add-line .lbl { font-size: 0.78rem; color: var(--dim); white-space: nowrap; }
@@ -415,7 +455,6 @@ table.attrs tr td.def { color: var(--dim); font-weight: 400; }
 .copy svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linejoin: round; }
 .copied { font-size: 0.66rem; color: var(--dim); }
 .conn-note { margin: 0; flex-basis: 100%; font-size: 0.72rem; color: var(--dim); }
-.foot-agent { flex-basis: 100%; margin: 4px 0 0; font-size: 0.74rem; color: var(--dim); display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; }
 @media (pointer: coarse) {
   .tune { padding: 8px 6px; margin-top: -6px; margin-bottom: -6px; }
   .copy { padding: 7px; margin: -7px -3px; }

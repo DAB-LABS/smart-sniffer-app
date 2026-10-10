@@ -86,7 +86,7 @@ function cc() {
     ui: { open: {}, cols: 1, confirm: null, ask: null, pw: {}, pwState: {}, busy: {}, note: {}, thr: null, copied: '', copiedText: '' },
     add: {
       open: false, block: '', port: '9099', scan: null, scanId: null, last: null, wide: null, error: '',
-      ticks: {}, manualHost: '', manualPort: '9099', manualRows: [], manualNone: null, checking: false,
+      ticks: {}, manualHost: '', manualPort: '9099', manualRows: [], checkMsg: null, checking: false,
       repTicks: {}, upMsg: '', uploading: false, busy: false, err: '',
     },
 
@@ -781,7 +781,8 @@ function cc() {
       if (!c.h) return null;
       return { fields: [{ k: 'Host', v: c.h.address }, { k: 'Port', v: String(c.h.port) }], password: !!c.h.has_password };
     },
-    get footAgent() {
+    // This app's agent, for the line at the top of the page.
+    get topAgent() {
       const i = this.info;
       if (!i || !i.hostname) return null;
       return { addr: `${i.hostname}:${i.agent_port || 9099}`, mdns: i.mdns_name || '' };
@@ -1297,7 +1298,7 @@ function cc() {
     closeAdd() {
       this.stopScan();
       Object.assign(this.add, {
-        open: false, scan: null, last: null, wide: null, error: '', ticks: {}, manualRows: [], manualNone: null,
+        open: false, scan: null, last: null, wide: null, error: '', ticks: {}, manualRows: [], checkMsg: null,
         manualHost: '', repTicks: {}, upMsg: '', err: '',
       });
     },
@@ -1417,21 +1418,58 @@ function cc() {
     driveCount(n) {
       return typeof n === 'number' ? this.plural(n, 'drive', 'drives') : '';
     },
+    // Check one machine by hand. It always answers in a line under the
+    // fields: a machine already in the list is ticked, scrolled to and
+    // flashed there; a new one joins the list, ticked; a stored machine with
+    // cards is already on the page; else nothing answered, or what answered
+    // is not an agent. The list drops a second row for a machine it has, so
+    // without this line a Check of a listed machine showed nothing at all.
     async check() {
       const host = this.add.manualHost.trim();
       const port = Number(String(this.add.manualPort).trim()) || 9099;
       if (!host || this.add.checking) return;
-      this.add.manualNone = null;
+      this.add.checkMsg = null;
       this.add.checking = true;
       const r = await this.request('fleet/probe', { method: 'POST', body: { host, port } });
       this.add.checking = false;
-      if (r.ok && r.data && r.data.id) {
-        this.add.manualRows = this.add.manualRows.filter((x) => x.id !== r.data.id).concat([r.data]);
-        if (!r.data.added) this.add.ticks[r.data.id] = true;
-        this.add.manualHost = '';
-      } else {
-        this.add.manualNone = { host, port };
+      if (!(r.ok && r.data && r.data.id)) {
+        const notAgent = r.status === 404 && r.data && r.data.error === 'not_an_agent';
+        this.add.checkMsg = notAgent
+          ? { text: `${host}:${port} answered, but it is not a SMART Sniffer agent.`, muted: false }
+          : { text: `Nothing answered at ${host}:${port}.`, muted: true };
+        return;
       }
+      const row = r.data;
+      this.add.manualHost = '';
+      if (row.added) {
+        this.add.checkMsg = { text: `${host} is already on the page.`, muted: false };
+        return;
+      }
+      const same = (x) => x.id === row.id || (Number(x.port) === Number(row.port)
+        && [row.address, row.resolved].filter(Boolean).map((a) => String(a).toLowerCase())
+          .includes(String(x.address).toLowerCase()));
+      const listed = this.pickRows.find((x) => !x.added && same(x));
+      if (listed) {
+        this.add.ticks[listed.id] = true;
+        this.add.checkMsg = { text: `${host} is in the list above, ticked.`, muted: false };
+        this.flashRow(listed.id);
+        return;
+      }
+      this.add.manualRows = this.add.manualRows.concat([row]);
+      this.add.ticks[row.id] = true;
+      this.add.checkMsg = { text: `Added ${host} to the list, ticked.`, muted: false };
+    },
+    // Scroll a Network row into view and pulse its outline once.
+    flashRow(id) {
+      this.$nextTick(() => {
+        const el = [...document.querySelectorAll('.pick-row')].find((e) => e.dataset.id === id);
+        if (!el) return;
+        el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        el.classList.remove('flash');
+        void el.offsetWidth;  // restart the animation on a second Check
+        el.classList.add('flash');
+        el.addEventListener('animationend', () => el.classList.remove('flash'), { once: true });
+      });
     },
     get folderOk() {
       const f = this.replicaFiles && this.replicaFiles.folder;

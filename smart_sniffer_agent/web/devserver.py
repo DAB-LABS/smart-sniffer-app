@@ -67,7 +67,9 @@ Assistant.
 
 A scan of 10.0.10.0/24 on port 9099 finds office-nuc (10.0.10.61, open),
 backup-pi (10.0.10.52, 401) and proxmox-01 (10.0.10.21), at 0.8 s, 1.6 s
-and 2.2 s; Check answers for nas.lan and 10.0.20.14 and nothing else.
+and 2.2 s; Check answers for every machine of the catalog (nas.lan and
+10.0.20.14 among them), 10.0.10.98 answers but is not an agent, and
+nothing else answers.
 
 The repo's alpine.min.js and tailwind.min.js are placeholders that the image
 build replaces. Download the real ones (URLs are in the placeholders) into a
@@ -1549,9 +1551,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, "bad_request")
             if not host:
                 return self._err(400, "bad_request")
-            if host in ("nas.lan", "10.0.20.14") and port == 9099:
+            # Every machine of the catalog answers on 9099; 10.0.10.98 answers
+            # but is no agent; anything else is silent.
+            if host in world.catalog and port == 9099:
                 time.sleep(0.3)
-                return self._send(200, scan_row(world, host, port))
+                return self._send(200, dict(scan_row(world, host, port), resolved=host))
+            if host == "10.0.10.98":
+                time.sleep(0.2)
+                return self._err(404, "not_an_agent")
             time.sleep(0.6)
             return self._err(504, "not_answering")
         if parts == ["hosts"]:

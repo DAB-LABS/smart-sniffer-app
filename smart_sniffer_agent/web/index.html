@@ -43,7 +43,17 @@
       </div>
     </div>
   </header>
-  <p class="app-tag">Drive health for this machine and your field agents, complete on its own; the SMART Sniffer integration adds entities, history, notifications and automations in Home Assistant.</p>
+  <!-- This app's own agent, on one line, with what to type into the integration -->
+  <template x-if="topAgent">
+    <section class="agent-line" aria-label="This app's agent">
+      <span class="al-name">HAOS SMART agent</span>
+      <span class="cp"><span class="cp-v mono" x-text="topAgent.addr"></span><button class="copy" type="button" aria-label="Copy the agent address" title="Copy" @click="copy($event, topAgent.addr, 'top:addr')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'top:addr'" x-text="ui.copiedText"></small></span>
+      <template x-if="topAgent.mdns"><span class="cp al-mdns"><span class="cp-k">mDNS</span><span class="cp-v mono" x-text="topAgent.mdns"></span><button class="copy" type="button" aria-label="Copy the mDNS name" title="Copy" @click="copy($event, topAgent.mdns, 'top:mdns')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'top:mdns'" x-text="ui.copiedText"></small></span></template>
+      <span class="al-ver mono" x-show="agentVersion" x-text="'agent ' + agentVersion"></span>
+      <span class="al-state" :class="{ down: agentDown }" x-show="selfLoaded" x-text="agentDown ? 'not answering' : 'answering'"></span>
+    </section>
+  </template>
+  <p class="sec-label">Drives</p>
   <p class="page-err" x-show="pageErr || hostsErr" x-text="pageErr || hostsErr" role="alert"></p>
   <template x-if="selfEmpty">
     <p class="empty-line">This machine's agent reports no readable drives. If the <a :href="appPage('logs')" target="_top">Mission Log</a> says DRIVE ACCESS BLOCKED, turn off Protection Mode on the <a :href="appPage('info')" target="_top">app's info page</a> and restart the app.</p>
@@ -285,16 +295,17 @@
 
     <!-- The + card: one for the page, always last, never dragged. -->
     <template x-if="!add.open">
-      <button class="card ghost" :class="{ 'row-open': rowOpen(shownCards.length) }" type="button" aria-expanded="false" aria-label="Add field agents and replicas" @click="openAdd()">
+      <button class="card ghost" :class="{ 'row-open': rowOpen(shownCards.length) }" type="button" aria-expanded="false" @click="openAdd()">
         <span class="plus" aria-hidden="true">+</span>
-        <span class="ghost-sub">Field agents and replicas</span>
+        <span class="ghost-sub">Add a drive, or a replica for testing</span>
       </button>
     </template>
     <template x-if="add.open">
-      <div class="card ghost-open" role="region" aria-label="Add">
+      <div class="card ghost-open" :class="{ wide: ui.cols >= 3 }" role="region" aria-label="Add">
         <div class="add-head"><button class="plus-close" type="button" aria-label="Close" title="Close" aria-expanded="true" @click="closeAdd()">+</button><h3>Add</h3></div>
 
-        <section class="area" aria-label="Network">
+        <div class="add-body">
+        <section class="area area-net" aria-label="Network">
           <h4>Network</h4>
           <div class="add-line">
             <span class="pair"><span class="lbl net">Network:</span><input class="input" x-model="add.block" @input="fieldsChanged()" @keydown.enter="scan()" aria-label="Network block" spellcheck="false" autocomplete="off"></span>
@@ -312,7 +323,7 @@
             <div class="pick" role="group" aria-label="Agents that answered">
               <div class="pick-head"><span></span><span>Host</span><span>Address</span><span>Agent</span><span>Drives</span><span></span></div>
               <template x-for="r in pickRows" :key="r.id">
-                <label class="pick-row" :class="{ on: !r.added && add.ticks[r.id], done: r.added }"><input class="tick" type="checkbox" :checked="!r.added && !!add.ticks[r.id]" :disabled="r.added" @change="add.ticks[r.id] = $event.target.checked"><span class="h" x-text="r.added ? r.hostname + ', already added' : r.hostname"></span><span class="a" x-text="r.address + ':' + r.port"></span><span class="v" x-text="r.version ? 'agent ' + r.version : ''"></span><span class="d" x-text="driveCount(r.drives)"></span><span class="k"><template x-if="r.auth === 'password'"><svg class="lock" role="img" aria-label="wants a password"><use href="#lock"/></svg></template></span></label>
+                <label class="pick-row" :data-id="r.id" :class="{ on: !r.added && add.ticks[r.id], done: r.added }"><input class="tick" type="checkbox" :checked="!r.added && !!add.ticks[r.id]" :disabled="r.added" @change="add.ticks[r.id] = $event.target.checked"><span class="h" x-text="r.added ? r.hostname + ', already added' : r.hostname"></span><span class="a" x-text="r.address + ':' + r.port"></span><span class="v" x-text="r.version ? 'agent ' + r.version : ''"></span><span class="d" x-text="driveCount(r.drives)"></span><span class="k"><template x-if="r.auth === 'password'"><svg class="lock" role="img" aria-label="wants a password"><use href="#lock"/></svg></template></span></label>
               </template>
             </div>
           </template>
@@ -321,6 +332,7 @@
           </template>
         </section>
 
+        <div class="add-side">
         <section class="area" aria-label="Add by hand">
           <h4>Add by hand</h4>
           <div class="add-line">
@@ -328,10 +340,8 @@
             <span class="pair"><span class="lbl">Port</span><input class="input port" x-model="add.manualPort" aria-label="Port" inputmode="numeric" autocomplete="off"></span>
             <button class="btn btn-sm" type="button" :disabled="add.checking" @click="check()">Check</button>
           </div>
-          <template x-if="add.manualNone">
-            <p class="scan-none">Nothing answered on <span class="mono" x-text="add.manualNone.host"></span>, port <span class="mono" x-text="add.manualNone.port"></span>.</p>
-          </template>
-          <p class="area-help" x-show="!add.manualNone">A machine found here joins the Network list, ticked.</p>
+          <p class="check-msg" :class="{ muted: add.checkMsg && add.checkMsg.muted }" role="status" x-show="add.checkMsg" x-text="add.checkMsg ? add.checkMsg.text : ''"></p>
+          <p class="area-help" x-show="!add.checkMsg">A machine found here joins the Network list, ticked.</p>
         </section>
 
         <section class="area" aria-label="Replicas">
@@ -343,6 +353,8 @@
             <div class="replica-up"><span x-text="folderOk ? 'Upload a replica' : 'Your replica folder is not available.'"></span><button class="btn btn-sm" type="button" :disabled="!folderOk || add.uploading" @click="$refs.upfile.click()">Choose file</button><span class="ext">.json</span><input type="file" accept=".json,application/json" hidden aria-label="Upload a replica" x-ref="upfile" @change="upload($event)"><span class="up-msg" x-show="add.upMsg" x-text="add.upMsg" role="alert"></span></div>
           </div>
         </section>
+        </div>
+        </div>
 
         <div class="add-foot"><template x-if="tickedLock"><span><svg class="lock" aria-hidden="true"><use href="#lock"/></svg> wants a password, asked for on its card after you add it</span></template><template x-if="add.err"><span class="add-err" role="alert" x-text="add.err"></span></template><button class="btn btn-primary" type="button" :disabled="!tickCount || add.busy" @click="addTicked()" x-text="tickCount ? 'Add ' + tickCount : 'Add'"></button></div>
       </div>
@@ -352,15 +364,14 @@
   <div id="drag-layer" x-ignore aria-hidden="true"></div>
 
   <footer class="app-foot">
-    <a :href="appPage('logs')" target="_top">Mission Log</a>
+    <a :href="appPage('logs')" target="_top" title="The app's log in Home Assistant">Mission Log</a>
     <a :href="appPage('config')" target="_top">App configuration</a>
     <a x-show="integrationInstalled" :href="integrationUrl" target="_top">Integration</a>
     <a href="https://github.com/DAB-LABS/smart-sniffer-app" target="_blank" rel="noopener">GitHub</a>
+    <span class="foot-sep" aria-hidden="true"></span>
+    <span class="also">Also from DAB-LABS: <a href="https://github.com/DAB-LABS/HAIR" target="_blank" rel="noopener">HAIR, infrared remotes in Home Assistant</a></span>
     <span class="spacer"></span>
     <span class="mono" style="font-size:0.72rem">DAB-LABS</span>
-    <template x-if="footAgent">
-      <p class="foot-agent">This app's agent: <span class="cp"><span class="cp-v mono" x-text="footAgent.addr"></span><button class="copy" type="button" aria-label="Copy the agent address" title="Copy" @click="copy($event, footAgent.addr, 'foot:addr')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'foot:addr'" x-text="ui.copiedText"></small></span><template x-if="footAgent.mdns"><span class="cp"><span class="cp-k">mDNS</span><span class="cp-v mono" x-text="footAgent.mdns"></span><button class="copy" type="button" aria-label="Copy the mDNS name" title="Copy" @click="copy($event, footAgent.mdns, 'foot:mdns')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'foot:mdns'" x-text="ui.copiedText"></small></span></template></p>
-    </template>
   </footer>
 </main>
 </body>

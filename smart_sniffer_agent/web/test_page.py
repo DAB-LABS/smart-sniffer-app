@@ -157,7 +157,7 @@ def last_is_plus(p: Page) -> bool:
 
 
 def open_add(p: Page):
-    p.page.get_by_role("button", name="Add field agents and replicas").click()
+    p.page.get_by_role("button", name="Add a drive, or a replica for testing").click()
     p.page.wait_for_selector("[role=region][aria-label=Add]")
 
 
@@ -961,8 +961,10 @@ def test_add_card_areas_and_flow(open_page):
     areas = region.locator("section.area")
     assert [a.get_attribute("aria-label") for a in areas.all()] == ["Network", "Add by hand", "Replicas"]
     assert all(a.evaluate("e => getComputedStyle(e).borderTopStyle") == "solid" for a in areas.all())
-    tops = [a.bounding_box()["y"] for a in areas.all()]
-    assert tops == sorted(tops) and len(set(tops)) == 3
+    # Network on the left; Add by hand and Replicas stacked on the right.
+    net, hand, reps = (a.bounding_box() for a in areas.all())
+    assert hand["x"] > net["x"] + net["width"] - 1 and abs(hand["y"] - net["y"]) < 1
+    assert abs(reps["x"] - hand["x"]) < 1 and reps["y"] > hand["y"] + hand["height"] - 1
     block = region.get_by_label("Network block")
     assert block.input_value() == "10.0.10.0/24"
     assert region.get_by_role("button", name="Rescan").is_visible()
@@ -989,7 +991,7 @@ def test_add_card_areas_and_flow(open_page):
     # Add by hand: a machine found drops into the Network list, ticked.
     region.get_by_label("Host or IP").fill("nowhere.lan")
     region.get_by_role("button", name="Check").click()
-    p.page.wait_for_selector("text=Nothing answered on nowhere.lan, port 9099.")
+    p.page.wait_for_selector("text=Nothing answered at nowhere.lan:9099.")
     region.get_by_label("Host or IP").fill("nas.lan")
     region.get_by_role("button", name="Check").click()
     p.page.wait_for_selector("section.area[aria-label=Network] .pick-row.on:has-text('nas.lan:9099')")
@@ -1074,8 +1076,9 @@ def test_first_run(open_page):
     eye = p.page.locator(".eye-btn")
     assert eye.is_visible() and eye.is_disabled() and eye.inner_text().strip() == "0"
     assert p.page.get_by_role("button", name="Refresh").is_visible()
-    assert p.page.get_by_role("button", name="Add field agents and replicas").is_visible()
-    assert p.page.locator(".app-foot a:visible").all_inner_texts() == ["Mission Log", "App configuration", "GitHub"]
+    assert p.page.get_by_role("button", name="Add a drive, or a replica for testing").is_visible()
+    assert p.page.locator(".app-foot a:visible").all_inner_texts() == [
+        "Mission Log", "App configuration", "GitHub", "HAIR, infrared remotes in Home Assistant"]
     assert p.page.locator(".exit").count() == 0
 
 
@@ -1387,23 +1390,186 @@ def test_connect_by_hand(open_page):
     assert c.locator(".conn-note").inner_text() == "This agent wants its password (the token: line in its config)"
 
 
-def test_footer_agent_line(open_page):
+def test_top_of_page(open_page):
     p = open_page()
-    line = p.page.locator(".foot-agent")
+    # No intro paragraph; the agent line, then the Drives label, then the grid.
+    assert p.page.locator(".app-tag").count() == 0
+    assert "Drive health for this machine" not in p.page.locator("main").inner_text()
+    line = p.page.locator(".agent-line")
     assert line.inner_text().replace("\n", " ").split() == [
-        "This", "app's", "agent:", "local-smart-sniffer-agent:9099", "mDNS", "smartha-homeassistant"]
+        "HAOS", "SMART", "agent", "local-smart-sniffer-agent:9099", "mDNS", "smartha-homeassistant",
+        "agent", "0.8.1", "answering"]
     assert line.locator("button.copy").count() == 2
+    label = p.page.locator(".sec-label")
+    assert label.inner_text().strip().lower() == "drives"
+    head = p.page.locator("header.app-head").bounding_box()
+    tops = [line.bounding_box()["y"], label.bounding_box()["y"], p.page.locator(".grid").bounding_box()["y"]]
+    assert head["y"] < tops[0] < tops[1] < tops[2]
+    # The footer no longer carries the agent.
+    foot = p.page.locator("footer.app-foot")
+    assert "This app's agent" not in foot.inner_text() and foot.locator(".foot-agent").count() == 0
     p = open_page("MDNS=off")
-    line = p.page.locator(".foot-agent")
+    line = p.page.locator(".agent-line")
     assert "mDNS" not in line.inner_text() and line.locator("button.copy").count() == 1
+    p = open_page("AGENT=down")
+    state = p.page.locator(".agent-line .al-state")
+    assert state.inner_text() == "not answering"
+    assert state.evaluate("e => getComputedStyle(e).color") == "rgb(143, 143, 143)"
+    assert "agent 0.8.1" not in p.page.locator(".agent-line").inner_text()
+
+
+@pytest.mark.parametrize("width", [390])
+def test_agent_line_wraps_on_a_phone(open_page, width):
+    p = open_page("", width)
+    assert_no_scroll(p)
+    assert_no_overflow(p)
+    # Each part wraps whole: no part is split over two lines.
+    heights = p.page.eval_on_selector_all(".agent-line > *", "els => els.map((e) => e.getBoundingClientRect().height)")
+    assert max(heights) < 24, heights
+
+
+def test_footer_links(open_page):
+    p = open_page()
+    foot = p.page.locator("footer.app-foot")
+    assert foot.locator("a:visible").all_inner_texts() == [
+        "Mission Log", "App configuration", "Integration", "GitHub", "HAIR, infrared remotes in Home Assistant"]
+    assert foot.get_by_role("link", name="Mission Log").get_attribute("title") == "The app's log in Home Assistant"
+    hair = foot.get_by_role("link", name="HAIR, infrared remotes in Home Assistant")
+    assert hair.get_attribute("href") == "https://github.com/DAB-LABS/HAIR"
+    assert hair.get_attribute("target") == "_blank" and hair.get_attribute("rel") == "noopener"
+    assert "Also from DAB-LABS:" in foot.locator(".also").inner_text()
+    assert foot.locator(".foot-sep").count() == 1
+    # Quiet, like the other links.
+    colour = "e => getComputedStyle(e).color"
+    assert hair.evaluate(colour) == foot.get_by_role("link", name="GitHub").evaluate(colour)
+
+
+OPACITY = "e => Number(getComputedStyle(e).opacity)"
+
+
+def test_plus_card_rests_dim(open_page):
+    p = open_page()
+    plus = p.page.locator("button.card.ghost")
+    assert plus.inner_text().split("\n")[-1].strip() == "Add a drive, or a replica for testing"
+    assert abs(plus.evaluate(OPACITY) - 0.3) < 0.01
+    plus.hover()
+    p.page.wait_for_timeout(300)
+    assert plus.evaluate(OPACITY) == 1
+    p.page.mouse.move(2, 2)
+    p.page.wait_for_timeout(300)
+    assert abs(plus.evaluate(OPACITY) - 0.3) < 0.01
+    plus.focus()
+    p.page.keyboard.press("Shift+Tab")
+    p.page.keyboard.press("Tab")
+    p.page.wait_for_timeout(300)
+    assert plus.evaluate(OPACITY) == 1
+
+
+def test_plus_card_rests_brighter_on_touch(browser, server):
+    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
+    ctx = browser.new_context(viewport={"width": 390, "height": 900}, has_touch=True, is_mobile=True)
+    page = ctx.new_page()
+    page.goto(server + "/")
+    page.wait_for_selector("article.card")
+    try:
+        assert page.evaluate("matchMedia('(hover: none)').matches")
+        assert abs(page.locator("button.card.ghost").evaluate(OPACITY) - 0.45) < 0.01
+        grip = page.locator("article.card .grip").first
+        assert abs(grip.evaluate(OPACITY) - 0.3) < 0.01
+    finally:
+        ctx.close()
+
+
+def test_card_controls_dim_until_hover(open_page):
+    p = open_page()
+    c = by_id(p, NAS_MAYBE)
+    other = by_id(p, NVME)
+    controls = lambda card: [card.locator(".grip")] + card.locator(".c-foot .icon").all()  # noqa: E731
+    assert len(controls(c)) == 4  # grip, download, eye, trash
+    p.page.mouse.move(2, 2)
+    p.page.wait_for_timeout(250)
+    for el in controls(c):
+        assert abs(el.evaluate(OPACITY) - 0.3) < 0.01
+    # The exit icon, the pill and the health box stay as they are.
+    for sel in (".exit", ".pill", ".hbox"):
+        assert c.locator(sel).evaluate(OPACITY) == 1
+    # The pointer anywhere on the card brings them all up, on that card only.
+    box = c.locator(".c-vitals").bounding_box()
+    p.page.mouse.move(box["x"] + 4, box["y"] + 4)
+    p.page.wait_for_timeout(250)
+    assert all(el.evaluate(OPACITY) == 1 for el in controls(c))
+    assert all(abs(el.evaluate(OPACITY) - 0.3) < 0.01 for el in controls(other))
+    # Keyboard focus brings one up without the pointer.
+    p.page.mouse.move(2, 2)
+    c.locator(".grip").focus()
+    p.page.keyboard.press("Shift+Tab")
+    p.page.keyboard.press("Tab")
+    p.page.wait_for_timeout(250)
+    assert c.locator(".grip").evaluate(OPACITY) == 1
+    assert abs(c.locator(".c-foot .icon").first.evaluate(OPACITY) - 0.3) < 0.01
+
+
+@pytest.mark.parametrize("width,span", [(1280, 2), (740, 2), (390, 1)])
+def test_open_plus_card_spans(open_page, width, span):
+    p = open_page("", width)
+    open_add(p)
+    region = p.page.get_by_role("region", name="Add", exact=True)
+    cols, spans = region.evaluate(SPAN)
+    assert spans == span and (cols == 3 if width == 1280 else spans == cols), (cols, spans)
+    areas = region.locator("section.area").all()
+    if width == 390:
+        tops = [a.bounding_box()["y"] for a in areas]
+        assert tops == sorted(tops) and len(set(tops)) == 3
+    assert_no_scroll(p)
+
+
+def _check(region, host: str, text: str):
+    region.get_by_label("Host or IP").fill(host)
+    region.get_by_role("button", name="Check").click()
+    msg = region.locator(".check-msg")
+    msg.filter(has_text=text).wait_for(timeout=4000)
+    return msg
+
+
+def test_check_answers_every_time(open_page):
+    p = open_page("HOSTS=one")
+    open_add(p)
+    region = p.page.get_by_role("region", name="Add", exact=True)
+    p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
+    p.page.wait_for_timeout(500)
+    # (a) A machine already in the scan's list: ticked again, flashed, said.
+    row = region.locator(".pick-row", has_text="10.0.10.61")
+    row.click()
+    assert not row.locator("input").is_checked()
+    msg = _check(region, "10.0.10.61", "10.0.10.61 is in the list above, ticked.")
+    assert msg.inner_text() == "10.0.10.61 is in the list above, ticked."
+    region.locator(".pick-row.flash", has_text="10.0.10.61").wait_for(timeout=1000)
+    assert row.locator("input").is_checked()
+    assert region.locator(".pick-row").count() == 3
+    # The flash is an outline in white or grey only.
+    assert_colours(p)
+    # (b) A new machine joins the list, ticked.
+    msg = _check(region, "nas.lan", "Added nas.lan to the list, ticked.")
+    assert region.locator(".pick-row.on", has_text="nas.lan:9099").count() == 1
+    # (c) A stored machine with cards on the page.
+    msg = _check(region, "10.0.10.21", "10.0.10.21 is already on the page.")
+    # (d) Nothing answered, muted.
+    msg = _check(region, "10.0.10.99", "Nothing answered at 10.0.10.99:9099.")
+    assert msg.evaluate("e => getComputedStyle(e).color") == "rgb(143, 143, 143)"
+    # (e) Something answered that is no agent.
+    msg = _check(region, "10.0.10.98", "10.0.10.98:9099 answered, but it is not a SMART Sniffer agent.")
+    assert msg.evaluate("e => getComputedStyle(e).color") != "rgb(143, 143, 143)"
+    # The scan stays; Check never starts one.
+    assert len(p.api("POST", r"/fleet/scan$")) == 1
+    assert region.locator(".pick-row").count() == 4
 
 
 def test_copy_buttons(open_page):
     p = open_page()
     p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
-    p.page.locator(".foot-agent button.copy").first.click()
+    p.page.locator(".agent-line button.copy").first.click()
     assert p.page.evaluate("navigator.clipboard.readText()") == "local-smart-sniffer-agent:9099"
-    assert p.page.locator(".foot-agent .copied:visible").inner_text() == "copied"
+    assert p.page.locator(".agent-line .copied:visible").inner_text() == "copied"
     c = by_id(p, NAS_ATT)
     c.locator(".chev").click()
     c.get_by_role("button", name="Copy Host").click()
@@ -1484,7 +1650,8 @@ def test_screenshots(open_page):
         _shot(p, "threshold-edit", c)
         c.get_by_role("button", name="Accept current readings").click()
         _shot(p, "threshold-accept-confirm", c)
-        _shot(p, "footer-agent", p.page.locator("footer.app-foot"))
+        _shot(p, "footer", p.page.locator("footer.app-foot"))
+        _shot(p, "agent-line", p.page.locator(".agent-line"))
         p = open_page("POOL=degraded", width)
         _shot(p, "pool-degraded", by_id(p, NAS_POOL))
         p = open_page("HA=not_installed", width)

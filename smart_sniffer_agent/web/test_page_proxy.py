@@ -153,7 +153,7 @@ def test_cards_render_and_a_replica_adds(tab, app):
         tab.card(f"{app.nas}|{serial}").wait_for(timeout=10000)
     assert "nas-01" in tab.card(f"{app.nas}|NAS-A").inner_text().lower()
 
-    tab.page.get_by_role("button", name="Add field agents and replicas").click()
+    tab.page.get_by_role("button", name="Add a drive, or a replica for testing").click()
     region = tab.page.get_by_role("region", name="Add", exact=True)
     region.locator(".replica-pick label").first.wait_for(timeout=10000)
     region.locator(".replica-pick label").first.click()
@@ -196,3 +196,37 @@ def test_assets_are_versioned_and_revalidated(app, static_dir):
         pytest.fail("expected 304")
     except urllib.error.HTTPError as err:
         assert err.code == 304
+
+
+def test_check_answers_against_the_proxy(tab, app):
+    """Check by hand, through proxy.py's probe route: every outcome says so
+    in a line under the fields."""
+    other = _serve(agent_handler(AgentState(hostname="spare-01", drives=[simple_drive("sda", "SPARE-A")])))
+    stranger = _serve(agent_handler(AgentState(mode="notagent")))
+    try:
+        tab.load()
+        tab.page.get_by_role("button", name="Add a drive, or a replica for testing").click()
+        region = tab.page.get_by_role("region", name="Add", exact=True)
+        msg = region.locator(".check-msg")
+
+        def check(port: int, text: str) -> None:
+            region.get_by_label("Host or IP").fill("127.0.0.1")
+            region.get_by_label("Port", exact=True).nth(1).fill(str(port))
+            region.get_by_role("button", name="Check").click()
+            msg.filter(has_text=text).wait_for(timeout=10000)
+
+        spare = other.server_address[1]
+        check(spare, "Added 127.0.0.1 to the list, ticked.")
+        row = region.locator(".pick-row", has_text=f"127.0.0.1:{spare}")
+        assert row.locator("input").is_checked()
+        row.click()
+        check(spare, "127.0.0.1 is in the list above, ticked.")
+        assert row.locator("input").is_checked() and region.locator(".pick-row").count() >= 1
+        check(int(app.nas.split(":")[1]), "127.0.0.1 is already on the page.")
+        free = _free_port()
+        check(free, f"Nothing answered at 127.0.0.1:{free}.")
+        check(stranger.server_address[1], f"127.0.0.1:{stranger.server_address[1]} answered, but it is not a SMART Sniffer agent.")
+        assert not tab.errors, tab.errors
+    finally:
+        other.shutdown()
+        stranger.shutdown()
