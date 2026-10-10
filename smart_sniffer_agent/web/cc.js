@@ -1506,6 +1506,11 @@ function cc() {
     get foundCount() {
       return ((this.add.scan && this.add.scan.found) || []).filter((r) => !r.added).length;
     },
+    // Rows the scan listed that are on the board already, named after the
+    // new count so a scan of known machines does not read as nothing found.
+    get addedCount() {
+      return ((this.add.scan && this.add.scan.found) || []).filter((r) => r.added).length;
+    },
     get scanNone() {
       const s = this.add.scan;
       return !!s && s.state !== 'running' && !(s.found || []).length;

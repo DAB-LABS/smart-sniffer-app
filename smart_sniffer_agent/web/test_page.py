@@ -961,16 +961,18 @@ def test_add_card_areas_and_flow(open_page):
     areas = region.locator("section.area")
     assert [a.get_attribute("aria-label") for a in areas.all()] == ["Network", "Add by hand", "Replicas"]
     assert all(a.evaluate("e => getComputedStyle(e).borderTopStyle") == "solid" for a in areas.all())
-    # Network on the left; Add by hand and Replicas stacked on the right.
+    # Network with Add by hand under it on the left; Replicas on the right.
     net, hand, reps = (a.bounding_box() for a in areas.all())
-    assert hand["x"] > net["x"] + net["width"] - 1 and abs(hand["y"] - net["y"]) < 1
-    assert abs(reps["x"] - hand["x"]) < 1 and reps["y"] > hand["y"] + hand["height"] - 1
+    assert abs(hand["x"] - net["x"]) < 1 and abs(hand["width"] - net["width"]) < 1
+    assert hand["y"] > net["y"] + net["height"] - 1
+    assert reps["x"] > net["x"] + net["width"] - 1 and abs(reps["y"] - net["y"]) < 1
     block = region.get_by_label("Network block")
     assert block.input_value() == "10.0.10.0/24"
     assert region.get_by_role("button", name="Rescan").is_visible()
     p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
     p.page.wait_for_timeout(500)
     assert region.locator(".found b").inner_text() == "2"
+    assert region.locator(".found small").inner_text() == "new, 1 already added"
     done = region.locator(".pick-row.done")
     assert "proxmox-01, already added" in done.inner_text() and done.locator("input").is_disabled()
     add = region.locator(".add-foot .btn-primary")
@@ -1006,6 +1008,70 @@ def test_add_card_areas_and_flow(open_page):
     assert "This agent wants a password." in by_id(p, BACKUP_PI).inner_text()
     # New cards land just before the + card.
     assert last_is_plus(p)
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_add_card_columns(open_page, width):
+    """Network and Add by hand share the left column, Replicas the right;
+    a phone stacks them in that order. Check stays on the host's line."""
+    p = open_page("HOSTS=one", width)
+    open_add(p)
+    region = p.page.get_by_role("region", name="Add", exact=True)
+    net, hand, reps = (region.locator(f"section.area[aria-label='{n}']").bounding_box()
+                       for n in ("Network", "Add by hand", "Replicas"))
+    assert hand["y"] > net["y"] + net["height"] - 1 and abs(hand["x"] - net["x"]) < 1
+    if width == 1280:
+        assert abs(hand["width"] - net["width"]) < 1
+        assert reps["x"] > net["x"] + net["width"] - 1 and abs(reps["y"] - net["y"]) < 1
+        host = region.get_by_label("Host or IP").bounding_box()
+        check = region.get_by_role("button", name="Check").bounding_box()
+        assert abs((check["y"] + check["height"] / 2) - (host["y"] + host["height"] / 2)) < 2
+        help_ = region.locator(".area-help").bounding_box()
+        assert help_["y"] > check["y"] + check["height"] - 1
+    else:
+        assert abs(reps["x"] - net["x"]) < 1 and reps["y"] > hand["y"] + hand["height"] - 1
+    add = region.locator(".add-foot .btn-primary").bounding_box()
+    box = region.bounding_box()
+    assert add["y"] > max(hand["y"] + hand["height"], reps["y"] + reps["height"]) - 1
+    assert box["x"] + box["width"] - (add["x"] + add["width"]) < 30
+
+
+def test_scan_counter_names_new_and_already_added(open_page):
+    p = open_page("HOSTS=one")
+    open_add(p)
+    p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
+    p.page.wait_for_timeout(500)
+    found = p.page.locator(".found")
+    assert found.locator("b").inner_text() == "2"
+    assert found.locator("small").inner_text() == "new, 1 already added"
+    old = found.locator(".found-old")
+    assert old.evaluate("e => getComputedStyle(e).color") == DIM
+    # Every listed row already added: nothing new, the rest named.
+    p.page.evaluate("""() => { const d = Alpine.$data(document.body);
+        d.add.scan = Object.assign({}, d.add.scan, { found: d.add.scan.found.map((r) => Object.assign({}, r, { added: true })) }); }""")
+    p.page.wait_for_timeout(100)
+    assert found.locator("b").inner_text() == "0"
+    assert found.locator("small").inner_text() == "new, 3 already added"
+
+
+def test_attribute_cells_sit_at_the_top(open_page):
+    p = open_page()
+    c = by_id(p, NAS_ATT)
+    _toggle(p, NAS_ATT)
+    c.locator("table.attrs").first.wait_for()
+    aligns = c.locator("table.attrs td").evaluate_all("els => [...new Set(els.map((e) => getComputedStyle(e).verticalAlign))]")
+    assert aligns == ["top"]
+    p.page.set_viewport_size({"width": 390, "height": 900})
+    # A flagged row whose name and note wrap to a second line.
+    row = c.locator("table.attrs tr.crit, table.attrs tr.warn").filter(has=p.page.locator("td.nm small")).first
+    row.locator("td.nm").wait_for()
+    p.page.wait_for_function("(e) => e.getBoundingClientRect().height > 20", arg=row.locator("td.nm").element_handle(), timeout=3000)
+    # The first line of text in every shown cell starts at the same height.
+    tops = row.locator("td").evaluate_all("""els => els.filter((e) => e.getClientRects().length).map((e) => {
+      const w = document.createTreeWalker(e, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.textContent.trim() ? 1 : 3 });
+      const n = w.nextNode(); const r = document.createRange(); r.selectNodeContents(n);
+      return r.getClientRects()[0].top; })""")
+    assert len(tops) >= 3 and max(tops) - min(tops) < 3, tops
 
 
 def test_closing_the_add_card_cancels_the_scan(open_page):
@@ -1049,6 +1115,7 @@ def test_nothing_answered_and_wide_prefill(open_page):
     open_add(p)
     p.page.wait_for_selector("text=None answered on 10.0.10.0/24, port 9099.", timeout=6000)
     assert p.page.locator(".found b").inner_text() == "0"
+    assert p.page.locator(".found small").inner_text() == "new"
     p = open_page("NETWORK=wide")
     open_add(p)
     p.page.wait_for_timeout(500)
@@ -1784,5 +1851,10 @@ def test_screenshots(open_page):
         open_add(p)
         p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length >= 1", timeout=15000)
         _shot(p, "plus-open-scanning", p.page.get_by_role("region", name="Add", exact=True))
+        p = open_page("HOSTS=one", width)
+        open_add(p)
+        p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
+        p.page.wait_for_timeout(500)
+        _shot(p, "plus-open-scanned", p.page.get_by_role("region", name="Add", exact=True))
         p = open_page("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", width)
         _shot(p, "first-run", None)

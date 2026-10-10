@@ -261,7 +261,7 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .table-wrap + .table-wrap { margin-top: 8px; }
 table.attrs { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.7rem; }
 table.attrs th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--rule); background: var(--panel-2); font-family: var(--sans); }
-table.attrs td { padding: 2px 6px; color: var(--grey); border-bottom: 1px solid #151515; white-space: nowrap; }
+table.attrs td { padding: 2px 6px; color: var(--grey); border-bottom: 1px solid #151515; white-space: nowrap; vertical-align: top; }
 table.attrs td.nm, table.attrs th.nm { width: 100%; }
 table.attrs td.nm { white-space: normal; overflow-wrap: anywhere; }
 table.attrs td.num, table.attrs th.num { text-align: right; }
@@ -329,14 +329,14 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
 .ghost .plus { font-size: 4.4rem; font-weight: 200; line-height: 0.9; color: var(--paper); }
 .ghost .ghost-sub { font-size: 0.82rem; color: var(--grey); }
 /* Opened: two of three columns, or the full row when the grid has fewer
-   than three. Network on the left, Add by hand and Replicas stacked on the
-   right; one column when it is narrow. */
+   than three. Network with Add by hand under it on the left, Replicas on
+   the right; one column when it is narrow. */
 .card.ghost-open { grid-column: 1 / -1; border: 1.5px dashed var(--grey); padding: 8px 14px 12px; display: grid; gap: 10px;
                    container: addcard / inline-size; }
 .card.ghost-open.wide { grid-column: auto / span 2; }
-.add-body, .add-side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-content: start; min-width: 0; }
+.add-body, .add-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-content: start; min-width: 0; }
 @container addcard (min-width: 620px) {
-  .add-body { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; }
+  .add-body { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-items: start; }
 }
 .add-head { display: flex; align-items: center; gap: 8px; }
 .add-head h3 { margin: 0; font-size: 1rem; font-weight: 650; }
@@ -364,7 +364,8 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
 .scan-of { font-family: var(--mono); font-size: 0.74rem; color: var(--dim); white-space: nowrap; }
 .found { display: inline-grid; justify-items: center; line-height: 1; min-width: 28px; }
 .found b { font-family: var(--mono); font-size: 1.3rem; font-weight: 700; color: var(--paper); }
-.found small { font-size: 0.64rem; color: var(--dim); margin-top: 2px; }
+.found small { font-size: 0.64rem; color: var(--grey); margin-top: 2px; white-space: nowrap; }
+.found small .found-old { color: var(--dim); }
 .scan-none { margin: 0; font-size: 0.8rem; color: var(--dim); }
 .scan-none .mono { color: var(--grey); font-size: 0.76rem; }
 .scan-wide { display: inline-flex; align-items: center; gap: 10px; margin-left: 4px; font-size: 0.8rem; color: var(--paper); flex-wrap: wrap; }
@@ -434,7 +435,6 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
 .tune svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
 .tune ~ .chev { margin-left: -6px; }  /* 8 px from the tune button, not the line's 14 */
 .thr { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
-table.attrs.thr-t td { vertical-align: middle; }
 table.attrs .thr-in { width: 72px; max-width: 72px; text-align: right; }
 table.attrs tr td.def { color: var(--dim); font-weight: 400; }
 .thr-where { margin: 0; font-size: 0.72rem; color: var(--dim); }

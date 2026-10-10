@@ -303,6 +303,7 @@
         <div class="add-head"><button class="plus-close" type="button" aria-label="Close" title="Close" aria-expanded="true" @click="closeAdd()">+</button><h3>Add</h3></div>
 
         <div class="add-body">
+        <div class="add-main">
         <section class="area area-net" aria-label="Network">
           <h4>Network</h4>
           <div class="add-line">
@@ -310,7 +311,7 @@
             <span class="pair"><span class="lbl">Port</span><input class="input port" x-model="add.port" @input="fieldsChanged()" @keydown.enter="scan()" aria-label="Port" inputmode="numeric" autocomplete="off"></span>
             <button class="btn btn-sm" type="button" @click="scan()" x-text="scanLabel"></button>
             <template x-if="add.scan">
-              <span class="scan-prog" role="status"><span class="bar" aria-hidden="true"><i :style="'width:' + scanPct + '%'"></i></span><span class="scan-of" x-show="add.scan.state === 'running'" x-text="num(add.scan.probed) + ' of ' + num(add.scan.total)"></span><span class="found"><b x-text="foundCount"></b><small>found</small></span></span>
+              <span class="scan-prog" role="status"><span class="bar" aria-hidden="true"><i :style="'width:' + scanPct + '%'"></i></span><span class="scan-of" x-show="add.scan.state === 'running'" x-text="num(add.scan.probed) + ' of ' + num(add.scan.total)"></span><span class="found"><b x-text="foundCount"></b><small>new<span class="found-old" x-show="addedCount" x-text="', ' + num(addedCount) + ' already added'"></span></small></span></span>
             </template>
             <template x-if="add.wide">
               <span class="scan-wide" role="alert"><span x-text="'That is ' + num(add.wide.addresses) + ' addresses.'"></span><button class="btn btn-sm" type="button" @click="useSuggest()" x-text="'Use ' + add.wide.suggest"></button></span>
@@ -330,7 +331,6 @@
           </template>
         </section>
 
-        <div class="add-side">
         <section class="area" aria-label="Add by hand">
           <h4>Add by hand</h4>
           <div class="add-line">
@@ -341,6 +341,7 @@
           <p class="check-msg" :class="{ muted: add.checkMsg && add.checkMsg.muted }" role="status" x-show="add.checkMsg" x-text="add.checkMsg ? add.checkMsg.text : ''"></p>
           <p class="area-help" x-show="!add.checkMsg">A machine found here joins the Network list, ticked.</p>
         </section>
+        </div>
 
         <section class="area" aria-label="Replicas">
           <h4>Replicas</h4>
@@ -351,7 +352,6 @@
             <div class="replica-up"><span x-text="folderOk ? 'Upload a replica' : 'Your replica folder is not available.'"></span><button class="btn btn-sm" type="button" :disabled="!folderOk || add.uploading" @click="$refs.upfile.click()">Choose file</button><span class="ext">.json</span><input type="file" accept=".json,application/json" hidden aria-label="Upload a replica" x-ref="upfile" @change="upload($event)"><span class="up-msg" x-show="add.upMsg" x-text="add.upMsg" role="alert"></span></div>
           </div>
         </section>
-        </div>
         </div>
 
         <div class="add-foot"><template x-if="tickedLock"><span><svg class="lock" aria-hidden="true"><use href="#lock"/></svg> wants a password, asked for on its card after you add it</span></template><template x-if="add.err"><span class="add-err" role="alert" x-text="add.err"></span></template><button class="btn btn-primary" type="button" :disabled="!tickCount || add.busy" @click="addTicked()" x-text="tickCount ? 'Add ' + tickCount : 'Add'"></button></div>
