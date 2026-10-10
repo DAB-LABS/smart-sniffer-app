@@ -21,12 +21,15 @@ Run with:
 
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import importlib.util
 import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -146,6 +149,15 @@ class FakeState:
         self.options_flow: dict[str, Any] = {}
         # Added to entries and devices when the config flow creates an entry.
         self.on_create: tuple[dict[str, Any], list[dict[str, Any]]] | None = None
+        # Core's websocket behind the Supervisor: "ok", "refuse" (the
+        # command fails), "auth" (the token is refused), "down" (no upgrade),
+        # "drop" (the connection closes after auth). The fake pings before
+        # auth_required and splits its result into two frames, so the
+        # client's pong and continuation handling are used every time.
+        self.ws_mode = "ok"
+        self.ws_commands: list[dict[str, Any]] = []
+        self.ws_pongs: list[bytes] = []
+        self.ws_closed_cleanly: list[bool] = []
 
 
 STATE = FakeState()
@@ -169,6 +181,10 @@ class FakeSupervisor(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length)) if length else None
 
     def _dispatch(self, method: str) -> None:
+        if self.path == "/core/websocket" and self.headers.get("Upgrade", "").lower() == "websocket":
+            STATE.calls.append(("WS", self.path, None))
+            _fake_core_websocket(self)
+            return
         body = self._body()
         path = self.path
         STATE.calls.append((method, path, body))
@@ -299,6 +315,93 @@ class FakeSupervisor(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self._dispatch("DELETE")
+
+
+# ── A fake of Core's websocket API (server side of RFC 6455) ────────────────
+
+def _ws_send(handler: BaseHTTPRequestHandler, opcode: int, payload: bytes, fin: bool = True) -> None:
+    size = len(payload)
+    head = bytes([(0x80 if fin else 0) | opcode])
+    if size < 126:
+        head += bytes([size])
+    elif size < 65536:
+        head += bytes([126]) + struct.pack("!H", size)
+    else:
+        head += bytes([127]) + struct.pack("!Q", size)
+    handler.wfile.write(head + payload)
+    handler.wfile.flush()
+
+
+def _ws_read(handler: BaseHTTPRequestHandler) -> tuple[int, bytes]:
+    first, second = handler.rfile.read(2)
+    assert second & 0x80, "a client frame must be masked"
+    size = second & 0x7F
+    if size == 126:
+        size = struct.unpack("!H", handler.rfile.read(2))[0]
+    elif size == 127:
+        size = struct.unpack("!Q", handler.rfile.read(8))[0]
+    mask = handler.rfile.read(4)
+    data = handler.rfile.read(size)
+    return first & 0x0F, bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+
+
+def _ws_message(handler: BaseHTTPRequestHandler) -> Any:
+    while True:
+        opcode, payload = _ws_read(handler)
+        if opcode == 0xA:
+            STATE.ws_pongs.append(payload)
+            continue
+        if opcode == 0x8:
+            return None
+        return json.loads(payload)
+
+
+def _fake_core_websocket(handler: BaseHTTPRequestHandler) -> None:
+    if STATE.ws_mode == "down":
+        _json_reply(handler, 502, {"message": "Bad Gateway"})
+        return
+    key = handler.headers.get("Sec-WebSocket-Key", "")
+    accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+    handler.send_response(101, "Switching Protocols")
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    handler.wfile.flush()
+    send = lambda data: _ws_send(handler, 0x1, json.dumps(data).encode())  # noqa: E731
+    _ws_send(handler, 0x9, b"hello")
+    send({"type": "auth_required", "ha_version": STATE.ha_version})
+    auth = _ws_message(handler)
+    if STATE.ws_mode == "auth" or not isinstance(auth, dict) or auth.get("access_token") != TOKEN:
+        send({"type": "auth_invalid", "message": "Invalid access token or password"})
+        _ws_send(handler, 0x8, struct.pack("!H", 1000))
+        return
+    send({"type": "auth_ok", "ha_version": STATE.ha_version})
+    if STATE.ws_mode == "drop":
+        _ws_send(handler, 0x8, struct.pack("!H", 1011))
+        return
+    command = _ws_message(handler)
+    STATE.ws_commands.append(command)
+    if command.get("type") == "test/echo":
+        reply = {"id": command["id"], "type": "result", "success": True, "result": command.get("data")}
+    elif STATE.ws_mode == "refuse" or command.get("type") != "config/device_registry/update":
+        reply = {"id": command["id"], "type": "result", "success": False,
+                 "error": {"code": "not_found", "message": "Device not found"}}
+    else:
+        reply = {"id": command["id"], "type": "result", "success": True,
+                 "result": {"id": command["device_id"], "name_by_user": command["name_by_user"]}}
+        for device in STATE.devices or []:
+            if device["id"] == command["device_id"]:
+                device["name_by_user"] = command["name_by_user"]
+    # An event for another subscription first, then the result in two frames.
+    send({"id": 99, "type": "event", "event": {}})
+    text = json.dumps(reply).encode()
+    _ws_send(handler, 0x1, text[:5], fin=False)
+    _ws_send(handler, 0x0, text[5:])
+    opcode, _payload = _ws_read(handler)
+    STATE.ws_closed_cleanly.append(opcode == 0x8)
+    if opcode == 0x8:
+        _ws_send(handler, 0x8, struct.pack("!H", 1000))
 
 
 # The integration's threshold form as Home Assistant serves it: one number
@@ -1814,6 +1917,8 @@ def test_ha_devices_registry(proxy):
         "entry_url": "/config/integrations/integration/smart_sniffer#config_entry=e-agent",
         "state": "loaded",
         "devices": {"S5GXNF0R412233A": "dev-self", "id:dev-sda": "dev-qemu"},
+        "names": {"S5GXNF0R412233A": {"name": "S5GXNF0R412233A", "name_by_user": None},
+                  "id:dev-sda": {"name": "QEMU", "name_by_user": None}},
     }
     assert body["targets"]["replicas"]["entry_id"] == "e-lab"
     assert body["targets"]["10.0.10.20:9099"]["devices"] == {
@@ -2314,7 +2419,8 @@ def test_cards_order(proxy, field):
     assert len(_option_writes()) == 1
     assert STATE.options["card_order"] == body["order"]
     assert STATE.options["hosts"] == [{"address": "127.0.0.2", "port": field}]
-    assert proxy.get("/cards") == (200, {"order": body["order"], "hidden": []})
+    assert proxy.get("/cards") == (200, {"order": body["order"], "hidden": [],
+                                         "names": {}, "host_names": {}})
     # A later order keeps the stored cards the page did not send, after it.
     status, body = proxy.request("PUT", "/cards/order", {"order": ["self|SER-A"]})
     assert body["order"] == ["self|SER-A", f"{key}|NUC-2", f"{key}|NUC-1", key]
@@ -2323,7 +2429,7 @@ def test_cards_order(proxy, field):
 
 def test_cards_without_order_options(proxy):
     # Options written by 0.3.0 before cards have neither key.
-    assert proxy.get("/cards") == (200, {"order": [], "hidden": []})
+    assert proxy.get("/cards") == (200, {"order": [], "hidden": [], "names": {}, "host_names": {}})
 
 
 def test_card_hide_and_show(proxy, field):
@@ -2919,3 +3025,186 @@ def test_view_override_notes(mod):
     assert limits["Reallocated Sector Count"]["flagged"] and not limits["Current Pending Sector Count"]["flagged"]
     assert mod.accept_value(91, "ge") == 92 and mod.accept_value(15, "lt") == 15
     assert mod.threshold_text(15, 20, "lt", "%") == "alert below 15%, default 20%"
+
+
+# ── The websocket client, against the fake Core websocket ──────────────────
+
+def _ws_url(backends) -> str:
+    return f"ws://127.0.0.1:{backends[0].server_address[1]}/core/websocket"
+
+
+def test_ws_client_renames_a_device(mod, backends):
+    STATE.devices = [_device("dev-1", "e-1", serial="SER-1")]
+    reply = mod.ha_ws_command(_ws_url(backends), TOKEN, {
+        "type": "config/device_registry/update", "device_id": "dev-1", "name_by_user": "Boot disk"})
+    assert reply["success"] is True and reply["result"]["name_by_user"] == "Boot disk"
+    assert STATE.ws_commands == [{"type": "config/device_registry/update", "device_id": "dev-1",
+                                  "name_by_user": "Boot disk", "id": 1}]
+    assert STATE.devices[0]["name_by_user"] == "Boot disk"
+    # The ping before auth was answered with its payload; the result came in
+    # two frames after another message; the client closed with a close frame.
+    assert STATE.ws_pongs == [b"hello"]
+    assert STATE.ws_closed_cleanly == [True]
+
+
+@pytest.mark.parametrize("size", [10, 300, 70000])
+def test_ws_client_frame_lengths(mod, backends, size):
+    """Payloads under 126 bytes, up to 65535 (16-bit length) and above
+    (64-bit length), both ways."""
+    data = "x" * size
+    reply = mod.ha_ws_command(_ws_url(backends), TOKEN, {"type": "test/echo", "data": data})
+    assert reply["result"] == data and STATE.ws_commands[0]["data"] == data
+
+
+@pytest.mark.parametrize("mode,words", [
+    ("refuse", "Device not found"), ("auth", "refused the auth"),
+    ("down", "upgrade was refused"), ("drop", ""),
+])
+def test_ws_client_failures(mod, backends, mode, words):
+    STATE.ws_mode = mode
+    with pytest.raises(mod.WebSocketError) as err:
+        mod.ha_ws_command(_ws_url(backends), TOKEN, {
+            "type": "config/device_registry/update", "device_id": "dev-1", "name_by_user": "x"})
+    assert words in str(err.value)
+    assert TOKEN not in str(err.value)
+
+
+def test_ws_client_bad_accept_and_no_server(mod):
+    """A server that answers 101 with the wrong accept key, and a closed port."""
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def answer() -> None:
+            conn, _ = srv.accept()
+            with conn:
+                conn.recv(4096)
+                conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                             b"Connection: Upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n")
+
+        thread = threading.Thread(target=answer, daemon=True)
+        thread.start()
+        with pytest.raises(mod.WebSocketError, match="Sec-WebSocket-Accept"):
+            mod.WebSocket(f"ws://127.0.0.1:{port}/core/websocket").connect()
+        thread.join(5)
+    with pytest.raises(mod.WebSocketError, match="could not connect"):
+        mod.WebSocket(f"ws://127.0.0.1:{_free_port()}/x", timeout=1).connect()
+    with pytest.raises(mod.WebSocketError, match="not a ws://"):
+        mod.WebSocket("wss://supervisor/core/websocket")
+
+
+def test_ws_url_from_the_supervisor_address(mod):
+    assert mod.Supervisor("http://supervisor", "t").ws_url() == "ws://supervisor/core/websocket"
+    assert mod.Supervisor("http://127.0.0.1:8080/", "t").ws_url() == "ws://127.0.0.1:8080/core/websocket"
+
+
+# ── Names: /cards/<id>/name and /hosts/<id>/name ────────────────────────────
+
+def _put_name(proxy, path: str, name: Any) -> tuple[int, Any]:
+    return proxy.request("PUT", path, {"name": name})
+
+
+def test_card_name_kept_in_the_options(proxy):
+    cid = "self|SER-A"
+    path = f"/cards/{quote(cid, safe='')}/name"
+    status, body = _put_name(proxy, path, "  Boot   disk ")
+    assert status == 200 and body == {"id": cid, "name": "Boot disk", "home_assistant": None}
+    assert STATE.options["card_names"] == [{"card": cid, "name": "Boot disk"}]
+    assert proxy.get("/cards")[1]["names"] == {cid: "Boot disk"}
+    assert not STATE.ws_commands  # not in Home Assistant: nothing sent there
+    # The same name again writes nothing; empty restores the original.
+    writes = len(_option_writes())
+    _put_name(proxy, path, "Boot disk")
+    assert len(_option_writes()) == writes
+    status, body = _put_name(proxy, path, "")
+    assert status == 200 and body["name"] == ""
+    assert STATE.options["card_names"] == []
+    assert proxy.get("/cards")[1]["names"] == {}
+
+
+def test_card_name_refusals(proxy):
+    assert _put_name(proxy, f"/cards/{quote('self|SER-A', safe='')}/name", 5)[0] == 400
+    assert proxy.request("PUT", f"/cards/{quote('self|SER-A', safe='')}/name", ["x"])[0] == 400
+    assert _put_name(proxy, f"/cards/{quote('10.9.9.9:9099|X', safe='')}/name", "x")[0] == 404
+    assert _put_name(proxy, "/cards/self/name", "x")[0] == 404
+    status, _ = _put_name(proxy, f"/cards/{quote('self|SER-A', safe='')}/name", "y" * 300)
+    assert status == 200 and len(STATE.options["card_names"][0]["name"]) == 100
+
+
+def _self_in_ha(proxy, serial: str) -> str:
+    STATE.entries = [_entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})")]
+    STATE.devices = [_device(f"dev-{serial}", "e-agent", serial=serial)]
+    return f"self|{serial}"
+
+
+def test_card_name_sets_the_home_assistant_device_name(proxy):
+    cid = _self_in_ha(proxy, "SER-HA")
+    path = f"/cards/{quote(cid, safe='')}/name"
+    status, body = _put_name(proxy, path, "Boot disk")
+    assert status == 200 and body["home_assistant"] == "saved"
+    assert STATE.ws_commands == [{"type": "config/device_registry/update", "device_id": "dev-SER-HA",
+                                  "name_by_user": "Boot disk", "id": 1}]
+    assert STATE.options["card_names"] == [{"card": cid, "name": "Boot disk"}]
+    # Read back from Home Assistant on the next /ha/devices.
+    names = proxy.get("/ha/devices")[1]["targets"]["self"]["names"]
+    assert names["SER-HA"] == {"name": "SER-HA", "name_by_user": "Boot disk"}
+    # Empty clears the device's name too (null, Home Assistant's own name).
+    _put_name(proxy, path, "")
+    assert STATE.ws_commands[-1]["name_by_user"] is None
+    assert proxy.get("/ha/devices")[1]["targets"]["self"]["names"]["SER-HA"]["name_by_user"] is None
+    assert STATE.options["card_names"] == []
+
+
+def test_card_name_home_assistant_refuses(proxy):
+    cid = _self_in_ha(proxy, "SER-NO")
+    STATE.ws_mode = "refuse"
+    status, body = _put_name(proxy, f"/cards/{quote(cid, safe='')}/name", "Boot disk")
+    assert status == 200 and body == {"id": cid, "name": "Boot disk", "home_assistant": "failed"}
+    assert STATE.options["card_names"] == [{"card": cid, "name": "Boot disk"}]  # kept in the app
+    STATE.ws_mode = "down"
+    assert _put_name(proxy, f"/cards/{quote(cid, safe='')}/name", "Other")[1]["home_assistant"] == "failed"
+
+
+def test_ha_devices_reads_names_given_in_home_assistant(proxy):
+    _self_in_ha(proxy, "SER-RB")
+    STATE.devices[0]["name_by_user"] = "Renamed in HA"
+    names = proxy.get("/ha/devices")[1]["targets"]["self"]["names"]
+    assert names == {"SER-RB": {"name": "SER-RB", "name_by_user": "Renamed in HA"}}
+    template = [c[2] for c in STATE.calls if c[1] == "/core/api/template"][-1]["template"]
+    assert "device_attr(d, 'name_by_user')" in template and "device_attr(d, 'name')" in template
+
+
+def test_host_name(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    status, body = _put_name(proxy, f"/hosts/{quote(key, safe='')}/name", "Basement NAS")
+    assert status == 200 and body == {"id": key, "name": "Basement NAS"}
+    assert STATE.options["host_names"] == [{"host": key, "name": "Basement NAS"}]
+    # Every card of that machine follows: the page reads one name per host.
+    assert proxy.get("/cards")[1]["host_names"] == {key: "Basement NAS"}
+    assert STATE.options["hosts"] == [{"address": "127.0.0.2", "port": field}]
+    _put_name(proxy, f"/hosts/{quote(key, safe='')}/name", "")
+    assert STATE.options["host_names"] == []
+    assert _put_name(proxy, "/hosts/self/name", "x")[0] == 409
+    assert _put_name(proxy, "/hosts/replicas/name", "x")[0] == 409
+    assert _put_name(proxy, "/hosts/10.9.9.9:9099/name", "x")[0] == 404
+    assert not STATE.ws_commands
+
+
+def test_names_leave_with_their_cards(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    STATE.options["card_names"] = [{"card": f"{key}|NUC-1", "name": "One"},
+                                   {"card": f"{key}|NUC-2", "name": "Two"},
+                                   {"card": "self|SER-A", "name": "Mine"}]
+    STATE.options["host_names"] = [{"host": key, "name": "Basement"}]
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    proxy.request("DELETE", f"/cards/{quote(f'{key}|NUC-1', safe='')}")
+    assert [n["card"] for n in STATE.options["card_names"]] == [f"{key}|NUC-2", "self|SER-A"]
+    assert STATE.options["host_names"] == [{"host": key, "name": "Basement"}]
+    proxy.request("DELETE", f"/cards/{quote(f'{key}|NUC-2', safe='')}")
+    assert STATE.options["card_names"] == [{"card": "self|SER-A", "name": "Mine"}]
+    assert STATE.options["host_names"] == []

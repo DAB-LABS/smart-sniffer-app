@@ -23,5 +23,11 @@ configuration:
   thresholds:
     name: Thresholds
     description: Alert thresholds of drives that are not in Home Assistant, one line per card and label. Set from a drive's Details in the Control Center; a drive in Home Assistant keeps its thresholds in the integration.
+  card_names:
+    name: Card Names
+    description: Names given to cards in the Control Center, one line per card. A drive or pool in Home Assistant takes the name there too, as its device name.
+  host_names:
+    name: Machine Names
+    description: Names given to field agents' machines in the Control Center, shown on every card of that machine.
 network:
   9099/tcp: SMART Sniffer Agent API

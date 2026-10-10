@@ -25,6 +25,10 @@ It also answers the Control Center's own routes:
   GET  /cards                    the card order and the hidden cards
   PUT  /cards/order              save the card order
   PATCH /cards/<id>              hide or show one card
+  PUT  /cards/<id>/name          name a card (empty for the original); a
+                                 drive or pool in Home Assistant takes it
+                                 as its device name (websocket API)
+  PUT  /hosts/<id>/name          name a field agent's machine
   DELETE /cards/<id>             remove one card (not a drive of this machine)
   GET  /cards/<id>/file          one card as a JSON file
   GET, PUT /cards/<id>/thresholds  a drive's thresholds, from Home Assistant
@@ -52,6 +56,7 @@ CORS. Python standard library only.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import http.client
 import importlib
@@ -109,8 +114,10 @@ INTEGRATION_URL = "/config/integrations/integration/smart_sniffer"
 
 # Every device of the integration with its id, name, serial number,
 # identifiers and config entry, printed as JSON by Core's template
-# endpoint. The REST API has no device registry list; the websocket API does,
-# but this proxy has no websocket client. Sets become lists for to_json.
+# endpoint, with the name the user gave it in Home Assistant (name_by_user).
+# The REST API has no device registry list; reading it here keeps the
+# websocket (used only for renames) out of every refresh. Sets become lists
+# for to_json.
 # The entry comes from config_entry_id() of the device's first entity:
 # device_attr(d, 'config_entries') raises on Home Assistant 2026.10, where
 # DeviceEntry.config_entries is deprecated.
@@ -124,6 +131,7 @@ DEVICES_TEMPLATE = (
     "[{%- for d in ns.ids -%}"
     '{"id": {{ d | to_json }}, '
     '"name": {{ device_attr(d, \'name\') | to_json }}, '
+    '"name_by_user": {{ device_attr(d, \'name_by_user\') | to_json }}, '
     '"serial_number": {{ device_attr(d, \'serial_number\') | to_json }}, '
     '"identifiers": {{ (device_attr(d, \'identifiers\') or []) | list | map(\'list\') | list | to_json }}, '
     '"config_entries": {{ [ns.entries[loop.index0]] | select | list | to_json }}}'
@@ -950,6 +958,213 @@ def pool_view(pool: dict[str, Any], verdict: dict[str, Any] | None,
     }
 
 
+# ── A small websocket client (RFC 6455) ─────────────────────────────────────
+#
+# Home Assistant changes its device registry only over its websocket API, so
+# a rename made here reaches it through this client: the HTTP upgrade, masked
+# text frames out, text frames in (continuations joined), ping answered with
+# pong, and close. No extensions, no TLS: the Supervisor's proxy to Core is
+# plain ws:// on the internal network.
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_MAX_MESSAGE = 4 * 1024 * 1024
+
+
+class WebSocketError(Exception):
+    """The websocket could not be opened, or broke, or closed."""
+
+
+class WebSocket:
+    """One client connection: connect(), send_text(), recv_text(), close()."""
+
+    def __init__(self, url: str, headers: dict[str, str] | None = None,
+                 timeout: float = SUPERVISOR_TIMEOUT) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme != "ws" or not parsed.hostname:
+            raise WebSocketError(f"not a ws:// address: {url}")
+        self.host = parsed.hostname
+        self.port = parsed.port or 80
+        self.path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+        self.headers = dict(headers or {})
+        self.timeout = timeout
+        self.sock: socket.socket | None = None
+        self._buf = b""
+
+    def connect(self) -> "WebSocket":
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        except OSError as err:
+            raise WebSocketError(f"could not connect: {err}") from err
+        key = base64.b64encode(os.urandom(16)).decode()
+        host = self.host if self.port == 80 else f"{self.host}:{self.port}"
+        lines = [f"GET {self.path} HTTP/1.1", f"Host: {host}", "Upgrade: websocket",
+                 "Connection: Upgrade", f"Sec-WebSocket-Key: {key}", "Sec-WebSocket-Version: 13"]
+        lines += [f"{k}: {v}" for k, v in self.headers.items()]
+        self._send_raw(("\r\n".join(lines) + "\r\n\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = self._recv_some()
+            head += chunk
+            if len(head) > 65536:
+                raise WebSocketError("the upgrade answer is too long")
+        head, _sep, self._buf = head.partition(b"\r\n\r\n")
+        status_line, *header_lines = head.decode("latin-1").split("\r\n")
+        parts = status_line.split(" ", 2)
+        if len(parts) < 2 or parts[1] != "101":
+            raise WebSocketError(f"the upgrade was refused: {status_line}")
+        answer = {}
+        for line in header_lines:
+            name, _colon, value = line.partition(":")
+            answer[name.strip().lower()] = value.strip()
+        expected = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        if answer.get("sec-websocket-accept") != expected:
+            raise WebSocketError("the upgrade answer has the wrong Sec-WebSocket-Accept")
+        return self
+
+    def _send_raw(self, data: bytes) -> None:
+        if self.sock is None:
+            raise WebSocketError("not connected")
+        try:
+            self.sock.sendall(data)
+        except OSError as err:
+            raise WebSocketError(f"send failed: {err}") from err
+
+    def _recv_some(self) -> bytes:
+        if self.sock is None:
+            raise WebSocketError("not connected")
+        try:
+            chunk = self.sock.recv(65536)
+        except OSError as err:
+            raise WebSocketError(f"receive failed: {err}") from err
+        if not chunk:
+            raise WebSocketError("the connection closed")
+        return chunk
+
+    def _read(self, size: int) -> bytes:
+        while len(self._buf) < size:
+            self._buf += self._recv_some()
+        data, self._buf = self._buf[:size], self._buf[size:]
+        return data
+
+    def send_frame(self, opcode: int, payload: bytes = b"") -> None:
+        """One final frame, masked as a client's must be."""
+        size = len(payload)
+        head = bytes([0x80 | opcode])
+        if size < 126:
+            head += bytes([0x80 | size])
+        elif size < 65536:
+            head += bytes([0x80 | 126]) + struct.pack("!H", size)
+        else:
+            head += bytes([0x80 | 127]) + struct.pack("!Q", size)
+        mask = os.urandom(4)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self._send_raw(head + mask + masked)
+
+    def send_text(self, text: str) -> None:
+        self.send_frame(0x1, text.encode("utf-8"))
+
+    def _read_frame(self) -> tuple[bool, int, bytes]:
+        first, second = self._read(2)
+        size = second & 0x7F
+        if size == 126:
+            size = struct.unpack("!H", self._read(2))[0]
+        elif size == 127:
+            size = struct.unpack("!Q", self._read(8))[0]
+        if size > WS_MAX_MESSAGE:
+            raise WebSocketError("a frame is too large")
+        mask = self._read(4) if second & 0x80 else b""
+        payload = self._read(size)
+        if mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        return bool(first & 0x80), first & 0x0F, payload
+
+    def recv_text(self) -> str:
+        """The next text message; pings are answered on the way."""
+        parts: list[bytes] = []
+        while True:
+            fin, opcode, payload = self._read_frame()
+            if opcode == 0x9:
+                self.send_frame(0xA, payload)
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode == 0x8:
+                try:
+                    self.send_frame(0x8, payload[:2])
+                except WebSocketError:
+                    pass
+                self._shut()
+                raise WebSocketError("the server closed the connection")
+            if opcode in (0x1, 0x2) and parts:
+                raise WebSocketError("a new message began inside another")
+            if opcode == 0x0 and not parts:
+                raise WebSocketError("a continuation frame with no message")
+            parts.append(payload)
+            if sum(len(p) for p in parts) > WS_MAX_MESSAGE:
+                raise WebSocketError("a message is too large")
+            if fin:
+                return b"".join(parts).decode("utf-8", "replace")
+
+    def send_json(self, data: Any) -> None:
+        self.send_text(json.dumps(data))
+
+    def recv_json(self) -> Any:
+        try:
+            return json.loads(self.recv_text())
+        except ValueError as err:
+            raise WebSocketError("a message was not JSON") from err
+
+    def close(self) -> None:
+        """Send close (1000), wait briefly for the answer, shut the socket."""
+        if self.sock is None:
+            return
+        try:
+            self.send_frame(0x8, struct.pack("!H", 1000))
+            self.sock.settimeout(1.0)
+            while True:
+                _fin, opcode, _payload = self._read_frame()
+                if opcode == 0x8:
+                    break
+        except (WebSocketError, OSError, ValueError):
+            pass
+        self._shut()
+
+    def _shut(self) -> None:
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+
+
+def ha_ws_command(url: str, token: str, command: dict[str, Any],
+                  timeout: float = SUPERVISOR_TIMEOUT) -> dict[str, Any]:
+    """Run one Home Assistant websocket command: auth with the token, send
+    the command as id 1, return its result message. Raises WebSocketError
+    when the connection, the auth or the command fails."""
+    ws = WebSocket(url, {"Authorization": f"Bearer {token}"}, timeout).connect()
+    try:
+        hello = ws.recv_json()
+        if not isinstance(hello, dict) or hello.get("type") != "auth_required":
+            raise WebSocketError("Home Assistant did not ask for auth")
+        ws.send_json({"type": "auth", "access_token": token})
+        auth = ws.recv_json()
+        if not isinstance(auth, dict) or auth.get("type") != "auth_ok":
+            raise WebSocketError("Home Assistant refused the auth")
+        ws.send_json({**command, "id": 1})
+        while True:
+            reply = ws.recv_json()
+            if isinstance(reply, dict) and reply.get("id") == 1 and reply.get("type") == "result":
+                break
+        if not reply.get("success"):
+            error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+            raise WebSocketError(f"Home Assistant refused {command.get('type')}: "
+                                 f"{error.get('message') or error.get('code') or 'no reason'}")
+        return reply
+    finally:
+        ws.close()
+
+
 # ── Supervisor and Home Assistant Core ──────────────────────────────────────
 
 class Supervisor:
@@ -1009,6 +1224,26 @@ class Supervisor:
 
     def core(self, method: str, path: str, body: Any = None) -> tuple[int | None, Any]:
         return self.call(method, "/core/api" + path, body)
+
+    def ws_url(self) -> str:
+        """Core's websocket through the Supervisor's proxy."""
+        parsed = urlparse(self.base_url)
+        return f"ws://{parsed.netloc}{parsed.path.rstrip('/')}/core/websocket"
+
+    def set_device_name(self, device_id: str, name: str | None) -> bool:
+        """Set a device's name_by_user in Home Assistant (None clears it),
+        over the websocket API: the only way Core changes its device
+        registry. False, logged, when it did not take."""
+        if not self.token:
+            return False
+        try:
+            ha_ws_command(self.ws_url(), self.token, {
+                "type": "config/device_registry/update",
+                "device_id": device_id, "name_by_user": name})
+        except WebSocketError as err:
+            log(f"Home Assistant did not take the name of device {device_id}: {err}")
+            return False
+        return True
 
     def core_reachable(self) -> bool:
         status, _ = self.core("GET", "/")
@@ -1674,6 +1909,33 @@ def _serialize_thresholds(thresholds: dict[str, dict[str, int]]) -> list[dict[st
             for card in sorted(thresholds) for label, value in sorted(thresholds[card].items())]
 
 
+MAX_NAME = 100  # the longest card or machine name kept
+
+
+def clean_name(raw: Any) -> str:
+    """A name as stored: one line, trimmed, at most MAX_NAME characters."""
+    text = " ".join(str(raw).split()) if isinstance(raw, str) else ""
+    return text[:MAX_NAME].strip()
+
+
+def _normalize_names(raw: Any, key: str) -> dict[str, str]:
+    """Names given in the Control Center from the options: a list of {key,
+    name} (the Supervisor's schema has no free-form maps) as {id: name}.
+    Anything malformed or empty is dropped."""
+    out: dict[str, str] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        ident, name = item.get(key), clean_name(item.get("name"))
+        if isinstance(ident, str) and ident and name:
+            out[ident] = name
+    return out
+
+
+def _serialize_names(names: dict[str, str], key: str) -> list[dict[str, str]]:
+    return [{key: ident, "name": names[ident]} for ident in sorted(names)]
+
+
 def _serialize_host(host: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {"address": host["address"], "port": host["port"]}
     if host.get("password"):
@@ -1757,11 +2019,13 @@ def _drop_ids(state: dict[str, Any], gone: set[str]) -> dict[str, Any] | None:
     """The state without these card ids in the order, the hidden list and
     the app's thresholds; None (nothing to write) when none has them."""
     thresholds = state.get("thresholds") or {}
-    if not any(i in gone for i in state["card_order"] + state["hidden_cards"] + list(thresholds)):
+    if not any(i in gone for i in state["card_order"] + state["hidden_cards"] + list(thresholds)
+               + list(state.get("card_names") or {})):
         return None
     state["card_order"] = [i for i in state["card_order"] if i not in gone]
     state["hidden_cards"] = [i for i in state["hidden_cards"] if i not in gone]
     state["thresholds"] = {k: v for k, v in thresholds.items() if k not in gone}
+    state["card_names"] = {k: v for k, v in (state.get("card_names") or {}).items() if k not in gone}
     return state
 
 
@@ -1775,6 +2039,10 @@ def _drop_cards(state: dict[str, Any], host_key: str, cid: str,
     state["card_order"] = [i for i in state["card_order"] if not gone(i)]
     state["hidden_cards"] = [i for i in state["hidden_cards"] if not gone(i)]
     state["thresholds"] = {k: v for k, v in (state.get("thresholds") or {}).items() if not gone(k)}
+    state["card_names"] = {k: v for k, v in (state.get("card_names") or {}).items() if not gone(k)}
+    if outcome.get("host"):
+        state["host_names"] = {k: v for k, v in (state.get("host_names") or {}).items()
+                               if k != host_key}
     return state
 
 
@@ -1940,6 +2208,10 @@ class HostStore:
                 state[key] = [i for i in state[key] if split_card_id(i)[0] not in dropped]
             state["thresholds"] = {k: v for k, v in state["thresholds"].items()
                                    if split_card_id(k)[0] not in dropped}
+            state["card_names"] = {k: v for k, v in state["card_names"].items()
+                                   if split_card_id(k)[0] not in dropped}
+            state["host_names"] = {k: v for k, v in state["host_names"].items()
+                                   if k not in dropped}
             return state
 
         state = self.write_all(change)
@@ -1949,7 +2221,9 @@ class HostStore:
             log(f"Field agent {key} dropped: every card of it was removed")
         return {**options, "hosts": [_serialize_host(h) for h in state["hosts"]],
                 "card_order": state["card_order"], "hidden_cards": state["hidden_cards"],
-                "thresholds": _serialize_thresholds(state["thresholds"])}
+                "thresholds": _serialize_thresholds(state["thresholds"]),
+                "card_names": _serialize_names(state["card_names"], "card"),
+                "host_names": _serialize_names(state["host_names"], "host")}
 
     def hosts(self) -> list[dict[str, Any]]:
         options = self._repair(self._options())
@@ -2001,30 +2275,38 @@ class HostStore:
         self.last_thresholds = _normalize_thresholds(options.get("thresholds"))
         self._memo_at = time.monotonic()
         return {"hosts": hosts, "card_order": _str_list(options.get("card_order")),
-                "hidden_cards": _str_list(options.get("hidden_cards"))}
+                "hidden_cards": _str_list(options.get("hidden_cards")),
+                "card_names": _normalize_names(options.get("card_names"), "card"),
+                "host_names": _normalize_names(options.get("host_names"), "host")}
 
     def write_all(self, change) -> dict[str, Any]:
-        """One options write for hosts, card_order, hidden_cards and the
-        app's thresholds together.
+        """One options write for hosts, card_order, hidden_cards, the app's
+        thresholds and the names given to cards and machines together.
 
-        change() gets {"hosts", "card_order", "hidden_cards", "thresholds"}
-        (copies; thresholds as {card id: {label: int}}) and returns the new
-        state, or None for nothing to save. Every other option is written
-        back as it was read."""
+        change() gets {"hosts", "card_order", "hidden_cards", "thresholds",
+        "card_names", "host_names"} (copies; thresholds as {card id: {label:
+        int}}, names as {id: name}) and returns the new state, or None for
+        nothing to save. Every other option is written back as it was read."""
         with self.lock:
             options = self._options()
             current = {"hosts": _normalize_hosts(options.get("hosts")),
                        "card_order": _str_list(options.get("card_order")),
                        "hidden_cards": _str_list(options.get("hidden_cards")),
-                       "thresholds": _normalize_thresholds(options.get("thresholds"))}
+                       "thresholds": _normalize_thresholds(options.get("thresholds")),
+                       "card_names": _normalize_names(options.get("card_names"), "card"),
+                       "host_names": _normalize_names(options.get("host_names"), "host")}
             state = change({"hosts": [dict(h) for h in current["hosts"]],
                             "card_order": list(current["card_order"]),
                             "hidden_cards": list(current["hidden_cards"]),
-                            "thresholds": {k: dict(v) for k, v in current["thresholds"].items()}})
+                            "thresholds": {k: dict(v) for k, v in current["thresholds"].items()},
+                            "card_names": dict(current["card_names"]),
+                            "host_names": dict(current["host_names"])})
             if state is None:
                 state = current
             else:
                 state.setdefault("thresholds", current["thresholds"])
+                state.setdefault("card_names", current["card_names"])
+                state.setdefault("host_names", current["host_names"])
                 saved = {**options, "hosts": [_serialize_host(h) for h in state["hosts"]]}
                 for key in ("card_order", "hidden_cards"):
                     if state[key] or key in options:
@@ -2033,6 +2315,11 @@ class HostStore:
                 state["thresholds"] = thresholds
                 if thresholds or "thresholds" in options:
                     saved["thresholds"] = _serialize_thresholds(thresholds)
+                for key, field in (("card_names", "card"), ("host_names", "host")):
+                    names = {k: clean_name(v) for k, v in state[key].items() if clean_name(v)}
+                    state[key] = names
+                    if names or key in options:
+                        saved[key] = _serialize_names(names, field)
                 self._save(saved)
                 log(f"Field agents and cards saved ({len(state['hosts'])} agents stored)")
             self.last_known = state["hosts"]
@@ -2168,6 +2455,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ("PUT", r"/cards/(?P<cid>[^/]+)/thresholds", "_route_thresholds_put"),
         ("POST", r"/cards/(?P<cid>[^/]+)/thresholds/accept", "_route_thresholds_accept"),
         ("POST", r"/cards/(?P<cid>[^/]+)/thresholds/reset", "_route_thresholds_reset"),
+        ("PUT", r"/cards/(?P<cid>[^/]+)/name", "_route_card_name"),
+        ("PUT", r"/hosts/(?P<key>[^/]+)/name", "_route_host_name"),
         ("PATCH", r"/cards/(?P<cid>[^/]+)", "_route_card_patch"),
         ("DELETE", r"/cards/(?P<cid>[^/]+)", "_route_card_delete"),
     ]
@@ -2911,7 +3200,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _route_cards(self, _parsed) -> None:
         state = self.host_store.cards()
-        self._send_json(200, {"order": state["card_order"], "hidden": state["hidden_cards"]})
+        self._send_json(200, {"order": state["card_order"], "hidden": state["hidden_cards"],
+                              "names": state["card_names"], "host_names": state["host_names"]})
 
     def _route_cards_order(self, _parsed) -> None:
         body = self._read_json()
@@ -2960,6 +3250,74 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         state = self.host_store.write_all(change)
         self._send_json(200, {"id": cid, "hidden": hidden, "hidden_cards": state["hidden_cards"]})
+
+    # ── Names: /cards/<id>/name and /hosts/<id>/name ──
+    #
+    # A card's name is kept in the app options (card_names). For a drive or
+    # pool whose device is in Home Assistant it is also written to that
+    # device's name_by_user, which the page shows first when it is set, so a
+    # rename made in Home Assistant shows here on the next refresh.
+
+    @staticmethod
+    def _name_body(body: Any) -> str:
+        name = body.get("name") if isinstance(body, dict) else None
+        if not isinstance(name, str):
+            raise ApiError(400, "bad_request", 'give {"name": "<text>"}, empty for the original')
+        return clean_name(name)
+
+    def _ha_device(self, host_key: str, key: str) -> str | None:
+        """The Home Assistant device id of a card, or None when it has none."""
+        if not self.supervisor.available:
+            return None
+        lookup = self._ha_lookup()
+        if not lookup.get("reachable") or lookup.get("installed") is False:
+            return None
+        target = (lookup.get("targets") or {}).get(host_key) or {}
+        device = (target.get("devices") or {}).get(key)
+        return device if isinstance(device, str) else None
+
+    def _route_card_name(self, _parsed, cid: str) -> None:
+        name = self._name_body(self._read_json())
+        host_key, key = self._check_card_host(cid, self.host_store.cards()["hosts"])
+        if key is None:
+            raise ApiError(404, "not_found", "a machine is renamed at /hosts/<id>/name")
+
+        def change(state: dict[str, Any]) -> dict[str, Any] | None:
+            if state["card_names"].get(cid, "") == name:
+                return None  # already so: no write
+            if name:
+                state["card_names"][cid] = name
+            else:
+                state["card_names"].pop(cid, None)
+            return state
+
+        self.host_store.write_all(change)
+        ha = None
+        device = self._ha_device(host_key, key)
+        if device is not None:
+            ha = "saved" if self.supervisor.set_device_name(device, name or None) else "failed"
+            if ha == "saved":
+                type(self)._ha_cache = None  # the next /ha/devices reads the new name
+        self._send_json(200, {"id": cid, "name": name, "home_assistant": ha})
+
+    def _route_host_name(self, _parsed, key: str) -> None:
+        name = self._name_body(self._read_json())
+        if key in ("self", "replicas"):
+            raise ApiError(409, "fixed_name", "HAOS and REPLICA keep their names")
+
+        def change(state: dict[str, Any]) -> dict[str, Any] | None:
+            if not any(host_id(h["address"], h["port"]) == key for h in state["hosts"]):
+                raise ApiError(404, "not_found", "no such field agent")
+            if state["host_names"].get(key, "") == name:
+                return None
+            if name:
+                state["host_names"][key] = name
+            else:
+                state["host_names"].pop(key, None)
+            return state
+
+        self.host_store.write_all(change)
+        self._send_json(200, {"id": key, "name": name})
 
     def _find_card(self, host_key: str, cid: str) -> dict[str, Any] | None:
         """A card of the last read of its machine; read again when the last
@@ -3452,6 +3810,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         "entry_url": f"{INTEGRATION_URL}#config_entry={quote(entry_id, safe='')}",
                         "state": entry.get("state"),
                         "devices": {},
+                        "names": {},
                     }
             status, devices = sv.call("POST", "/core/api/template",
                                       {"template": DEVICES_TEMPLATE})
@@ -3465,19 +3824,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         target = by_entry.get(entry_id)
                         if target is None:
                             continue
+                        names = {k: device.get(k) if isinstance(device.get(k), str) else None
+                                 for k in ("name", "name_by_user")}
+
+                        def put(key: str) -> None:
+                            target["devices"][key] = device["id"]
+                            target["names"][key] = names
+
                         serial = device.get("serial_number")
                         if isinstance(serial, str) and serial:
-                            target["devices"][serial] = device["id"]
+                            put(serial)
                         prefix = f"{entry_id}_zpool_"
                         for ident in device.get("identifiers") or []:
                             if not (isinstance(ident, list) and len(ident) == 2
                                     and ident[0] == INTEGRATION_DOMAIN):
                                 continue
                             if str(ident[1]).startswith(prefix):
-                                target["devices"][f"pool:{str(ident[1])[len(prefix):]}"] = device["id"]
+                                put(f"pool:{str(ident[1])[len(prefix):]}")
                             elif not serial and not str(ident[1]).startswith(f"{entry_id}_"):
                                 # A drive with no serial is known by its drive id.
-                                target["devices"][f"id:{ident[1]}"] = device["id"]
+                                put(f"id:{ident[1]}")
             else:
                 result["lookup"] = "entries_only"
             result["targets"] = targets
