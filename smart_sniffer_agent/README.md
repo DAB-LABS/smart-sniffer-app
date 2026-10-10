@@ -104,7 +104,7 @@ With the integration installed, an exit icon sits just left of each drive and po
 
 Adding from the page needs the app's Home Assistant API access, which it has by default.
 
-**Adding by hand.** To add a machine in the integration yourself (**Settings → Devices & Services → Add Integration → SMART Sniffer**), open a card's Details: **Connect by hand** gives the host and port to type, each with a copy button. For this machine's own drives the host is the name Home Assistant reaches the app's agent by, and the app's mDNS name is shown too. A field agent that wants a password needs the `token:` line from its config as the token. The page's footer carries the same line for this app's agent.
+**Adding by hand.** To add a machine in the integration yourself (**Settings → Devices & Services → Add Integration → SMART Sniffer**), open a card's Details: **Connect by hand** gives the host and port to type, each with a copy button. For this machine's own drives the host is the name Home Assistant reaches the app's agent by, and the app's mDNS name is shown too. A field agent that wants a password needs the `token:` line from its config as the token. The line at the top of the page gives the same for this app's agent: its host and port and its mDNS name, each with a copy button, and whether it is answering.
 
 ## Configuration
 
