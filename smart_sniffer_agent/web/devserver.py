@@ -26,6 +26,8 @@ Referer.
     HA_LOOKUP       registry | entries_only   device links or entry links
     HA_SELF         1 | 0                     this app's agent in HA (blue or grey icons)
     ADD             ok | error                /ha/add succeeds or answers flow_failed
+    HA_NAME         ok | fail                 a rename reaches Home Assistant's device, or
+                                              Home Assistant does not take it
     NETWORK         supervisor | none | wide  prefill 10.0.10.0/24; null (page falls
                                               back to its own address); 10.0.0.0/16
     SCAN            normal | slow | none      rows arrive over 3 s; over 12 s; nothing
@@ -124,6 +126,7 @@ DEFAULTS = {
     "HA_LOOKUP": "registry",
     "HA_SELF": "1",
     "ADD": "ok",
+    "HA_NAME": "ok",
     "NETWORK": "supervisor",
     "SCAN": "normal",
     "HOSTS": "board",
@@ -957,6 +960,11 @@ class World:
                                "added_at": iso(30 * DAY), "removed": []})
         self.card_order: list[str] = []
         self.hidden_cards: list[str] = []
+        # Names given in the page, and each Home Assistant device's own name
+        # (name_by_user) by device id.
+        self.card_names: dict[str, str] = {}
+        self.host_names: dict[str, str] = {}
+        self.ha_names: dict[str, str] = {}
         self.self_cache: list | None = None
         self.self_last_answer = time.time() - 240
         self.scans: dict[str, dict] = {}
@@ -1404,7 +1412,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method):
         route = self._route()
         head = route.split("/")[0]
-        if head not in ("api", "mock", "app", "evaluate", "ha", "fleet", "replicas", "dev", "cards"):
+        if head not in ("api", "mock", "app", "evaluate", "ha", "fleet", "replicas", "dev", "cards", "hosts"):
             if method != "GET":
                 return self._err(405, "method_not_allowed")
             return self._static(route)
@@ -1440,6 +1448,14 @@ class Handler(BaseHTTPRequestHandler):
             world_for(flags, fresh=True)
             return self._send(200, {"reset": True})
         world = world_for(flags)
+        if head == "dev" and parts[1:] == ["ha-name"] and method == "POST":
+            # A rename made in Home Assistant: {"device": id, "name": text or null}.
+            body = self._body() or {}
+            if body.get("name"):
+                world.ha_names[str(body.get("device"))] = str(body["name"])
+            else:
+                world.ha_names.pop(str(body.get("device")), None)
+            return self._send(200, {"ok": True})
         if head == "app" and parts[1:] == ["info"]:
             return self._app_info(flags, world)
         if head == "api":
@@ -1462,6 +1478,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._mock(method, parts[1:], flags, world)
         if head == "cards":
             return self._cards(method, parts[1:], flags, world)
+        if head == "hosts" and len(parts) == 3 and parts[2] == "name" and method == "PUT":
+            name = (self._body() or {}).get("name")
+            if not isinstance(name, str):
+                return self._err(400, "bad_request")
+            if world.host(parts[1]) is None:
+                return self._err(404, "not_found")
+            name = " ".join(name.split())[:100]
+            if name:
+                world.host_names[parts[1]] = name
+            else:
+                world.host_names.pop(parts[1], None)
+            world.options_writes += 1
+            return self._send(200, {"id": parts[1], "name": name})
         return self._err(404, "not_found")
 
     def _app_info(self, flags, world):
@@ -1628,9 +1657,12 @@ class Handler(BaseHTTPRequestHandler):
             if installed:
                 entries_only = flags["HA_LOOKUP"] == "entries_only"
                 for t, e in world.ha.items():
+                    devices = {} if entries_only else dict(e["devices"])
                     targets[t] = {"entry_id": e["entry_id"],
                                   "entry_url": f"{base}#config_entry={e['entry_id']}",
-                                  "devices": {} if entries_only else dict(e["devices"])}
+                                  "devices": devices,
+                                  "names": {k: {"name": None, "name_by_user": world.ha_names.get(d)}
+                                            for k, d in devices.items()}}
             return self._send(200, {"installed": installed, "reachable": True,
                                     "lookup": "entries_only" if flags["HA_LOOKUP"] == "entries_only" else "registry",
                                     "integration_url": base, "targets": targets})
@@ -1759,7 +1791,8 @@ class Handler(BaseHTTPRequestHandler):
     def _cards(self, method, parts, flags, world):
         """Card order, hidden cards, removal and download, as the proxy has them."""
         if parts == [] and method == "GET":
-            return self._send(200, {"order": world.card_order, "hidden": world.hidden_cards})
+            return self._send(200, {"order": world.card_order, "hidden": world.hidden_cards,
+                                    "names": world.card_names, "host_names": world.host_names})
         if parts == ["order"] and method == "PUT":
             order = (self._body() or {}).get("order")
             if not isinstance(order, list):
@@ -1795,6 +1828,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"id": cid, "hidden": hidden, "hidden_cards": world.hidden_cards})
         response = self._responses(flags, world).get(host_key) or {}
         item = next((c for c in self._card_list(response) if c["card_id"] == cid), None)
+        if len(parts) == 2 and parts[1] == "name" and method == "PUT":
+            name = (self._body() or {}).get("name")
+            if not isinstance(name, str) or not sep:
+                return self._err(400, "bad_request")
+            name = " ".join(name.split())[:100]
+            if name:
+                world.card_names[cid] = name
+            else:
+                world.card_names.pop(cid, None)
+            world.options_writes += 1
+            ha = None
+            entry = world.ha.get(host_key) if flags["HA"] == "installed" else None
+            device = entry and entry["devices"].get(key)
+            if device:
+                ha = "failed" if flags["HA_NAME"] == "fail" else "saved"
+                if ha == "saved":
+                    if name:
+                        world.ha_names[device] = name
+                    else:
+                        world.ha_names.pop(device, None)
+            return self._send(200, {"id": cid, "name": name, "home_assistant": ha})
         if len(parts) >= 2 and parts[1] == "thresholds":
             return self._thresholds(method, parts[2:], flags, world, cid, item)
         if len(parts) == 1 and method == "DELETE":

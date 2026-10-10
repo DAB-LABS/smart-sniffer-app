@@ -24,6 +24,7 @@
   <symbol id="chevron" viewBox="0 0 20 12"><path d="M2 2l8 8 8-8"/></symbol>
   <symbol id="glass" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4.5 4.5"/></symbol>
   <symbol id="tune" viewBox="0 0 16 16"><path d="M2 4h6.5M12.5 4H14M2 8h1.5M7.5 8H14M2 12h7.5M13.5 12h.5"/><circle cx="10.5" cy="4" r="1.7"/><circle cx="5.5" cy="8" r="1.7"/><circle cx="11.5" cy="12" r="1.7"/></symbol>
+  <symbol id="pencil" viewBox="0 0 16 16"><path d="M10.6 2.6l2.8 2.8M3 13l.7-3.4 7.9-7.9 2.7 2.7-7.9 7.9L3 13Z"/></symbol>
   <symbol id="copy" viewBox="0 0 16 16"><rect x="5.2" y="5.2" width="8.3" height="8.3" rx="1"/><path d="M10.8 5.2V3.5a1 1 0 0 0-1-1H3.5a1 1 0 0 0-1 1v6.3a1 1 0 0 0 1 1h1.7"/></symbol>
 </svg>
 
@@ -63,13 +64,19 @@
       <article class="card" :class="cardClass(c)" :data-card="c.id" :aria-label="pill(c) + ', ' + title(c)">
         <div class="c-head">
           <button class="grip" type="button" :aria-label="'Move ' + title(c) + '. Arrow keys move it one place.'" title="Drag to move" @pointerdown="gripDown($event, c)" @keydown="gripKey($event, c)" @contextmenu.prevent><svg aria-hidden="true"><use href="#grip"/></svg></button>
-          <h3 class="c-title" x-text="title(c)"></h3>
+          <div class="c-name">
+            <template x-if="!renaming(c, 'title')"><h3 class="c-title" x-text="title(c)" @dblclick="startRename(c, 'title')"></h3></template>
+            <template x-if="renaming(c, 'title')"><input class="name-in c-title" type="text" maxlength="100" spellcheck="false" autocomplete="off" :aria-label="'Name of ' + baseTitle(c) + '. Enter saves, Esc cancels, empty restores the original.'" :placeholder="baseTitle(c)" x-model="ui.rename.value" @keydown="renameKey($event)" @blur="finishRename(true)"></template>
+            <template x-if="canRename(c) && !renaming(c, 'title')"><button class="pencil" type="button" :aria-label="'Rename ' + title(c)" title="Rename" @click="startRename(c, 'title')"><svg aria-hidden="true"><use href="#pencil"/></svg></button></template>
+          </div>
           <div class="c-tags">
             <span class="exit-slot">
               <template x-if="glyph(c).kind === 'blue'"><a class="exit" :href="glyph(c).href" target="_top" aria-label="Open in Home Assistant" title="Open in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template>
               <template x-if="glyph(c).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking(c) ? 'true' : 'false'" aria-label="Not in Home Assistant yet. Add it" title="Not in Home Assistant yet" @click="askAdd(c)"><svg aria-hidden="true"><use href="#exit"/></svg></button></template>
             </span>
-            <span class="pill" x-text="pill(c)"></span>
+            <template x-if="!renaming(c, 'pill')"><span class="pill" :class="{ 'pill-ed': canRenameHost(c) }" x-text="pill(c)" @dblclick="startRename(c, 'pill')"></span></template>
+            <template x-if="renaming(c, 'pill')"><input class="name-in pill" type="text" :style="'width:calc(' + Math.max(6, String(ui.rename.value || '').length + 1) + 'ch + 14px)'" maxlength="100" spellcheck="false" autocomplete="off" :aria-label="'Name of this machine. Enter saves, Esc cancels, empty restores the original.'" x-model="ui.rename.value" @keydown="renameKey($event)" @blur="finishRename(true)"></template>
+            <template x-if="canRenameHost(c) && !renaming(c, 'pill')"><button class="pencil p-pen" type="button" :aria-label="'Rename the machine ' + machine(c)" title="Rename the machine" @click="startRename(c, 'pill')"><svg aria-hidden="true"><use href="#pencil"/></svg></button></template>
           </div>
         </div>
         <template x-if="asking(c)">
@@ -125,6 +132,7 @@
             </template>
             <template x-if="isOpen(c) && c.kind === 'drive'">
               <div class="details">
+                <template x-if="renamed(c)"><p class="c-model" x-text="modelLine(c)"></p></template>
                 <template x-if="unsupportedNote(c)"><p class="c-note">The agent can see this drive, but it gives no SMART health data to watch.</p></template>
                 <dl class="kv">
                   <div><dt><span class="lb">Data Read</span><template x-if="vol(c.it, 'read')"><small x-text="' (' + volNote(vol(c.it, 'read')) + ')'"></small></template></dt><dd><span class="v" :class="{ na: !vol(c.it, 'read') }" x-text="vol(c.it, 'read') ? tb(vol(c.it, 'read').bytes) : 'not reported'"></span></dd></div>
@@ -189,15 +197,15 @@
                   <div class="table-wrap">
                     <table class="attrs" :class="detailTable(c.it).kind">
                       <thead>
-                        <template x-if="detailTable(c.it).kind === 'ata'"><tr><th class="num c-id">ID</th><th class="nm">Name</th><th class="num">Value</th><th class="num c-worst">Worst</th><th class="num c-thresh">Thresh</th><th class="num c-raw">Raw</th></tr></template>
-                        <template x-if="detailTable(c.it).kind !== 'ata'"><tr><th class="nm">Name</th><th class="num c-raw">Value</th></tr></template>
+                        <template x-if="detailTable(c.it).kind === 'ata'"><tr><th class="num c-id">ID</th><th class="nm">Name</th><th class="num c-val" title="The maker&#39;s health score for this attribute, counting down from new">Value</th><th class="num c-worst" title="The lowest that score has been">Worst</th><th class="num c-thresh" title="The maker&#39;s failure point for that score">Thresh</th><th class="num c-raw" title="The real count or reading. Alerts use this">Raw</th></tr></template>
+                        <template x-if="detailTable(c.it).kind !== 'ata'"><tr><th class="nm">Name</th><th class="num c-raw" title="The real count or reading. Alerts use this">Value</th></tr></template>
                       </thead>
                       <tbody>
                         <template x-for="a in detailTable(c.it).rows" :key="a.key">
                           <tr :class="a.mark">
                             <template x-if="detailTable(c.it).kind === 'ata'"><td class="num c-id" x-text="a.id"></td></template>
                             <td class="nm" :title="a.name"><span class="lb" x-text="a.name"></span><template x-if="a.note"><small x-text="' (' + a.note + ')'"></small></template></td>
-                            <template x-if="detailTable(c.it).kind === 'ata'"><td class="num" x-text="a.value"></td></template>
+                            <template x-if="detailTable(c.it).kind === 'ata'"><td class="num c-val" x-text="a.value"></td></template>
                             <template x-if="detailTable(c.it).kind === 'ata'"><td class="num c-worst" x-text="a.worst"></td></template>
                             <template x-if="detailTable(c.it).kind === 'ata'"><td class="num c-thresh" x-text="a.thresh"></td></template>
                             <td class="num c-raw"><template x-if="a.missing"><span class="na" x-text="a.gap"></span></template><template x-if="!a.missing && !(c.src === 'replicas' && a.edit)"><span x-text="detailTable(c.it).kind === 'ata' ? a.raw : a.value"></span></template><template x-if="!a.missing && c.src === 'replicas' && a.edit"><input class="input raw-in" :value="a.rawValue" inputmode="numeric" :aria-label="'Raw value of ' + a.name" @change="editRaw(c.it, a.edit, a.field, $event.target.value)"></template></td>
@@ -211,6 +219,7 @@
             </template>
             <template x-if="isOpen(c) && c.kind === 'pool'">
               <div class="details">
+                <template x-if="renamed(c)"><p class="c-model" x-text="modelLine(c)"></p></template>
                 <template x-if="connect(c)">
                   <div class="conn" role="group" aria-label="Connect by hand">
                     <span class="conn-h">Connect by hand</span>
@@ -275,17 +284,14 @@
         </template>
 
         <div class="c-spacer"></div>
-        <template x-if="asked(c)">
-          <div class="ask remove" role="group" aria-label="Confirm removal"><span x-text="removeText(c)"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.ask.busy" @click="confirmRemove(c)">Remove</button><button class="btn btn-sm btn-quiet" type="button" @click="ui.ask = null">Cancel</button></span><span class="ask-err" x-show="ui.ask.err" x-text="ui.ask.err"></span></div>
-        </template>
         <div class="c-foot">
           <span class="seen" x-text="lastSeen(c)"></span>
-          <span class="act-note" x-show="ui.note['dl:' + c.id]" x-text="ui.note['dl:' + c.id]"></span>
+          <span class="act-note" x-show="footNote(c)" x-text="footNote(c)"></span>
           <span class="icons">
             <template x-if="canDownload(c)"><button class="icon" type="button" aria-label="Save as replica" title="Save as replica" @click="download(c)"><svg aria-hidden="true"><use href="#download"/></svg></button></template>
             <template x-if="canHide(c) && !isHidden(c)"><button class="icon" type="button" aria-label="Hide this card" title="Hide this card" @click="setHidden(c, true)"><svg aria-hidden="true"><use href="#eye"/></svg></button></template>
             <template x-if="canHide(c) && isHidden(c)"><button class="icon" type="button" aria-label="Hidden. Show this card again" title="Hidden, click to show it again" @click="setHidden(c, false)"><svg aria-hidden="true"><use href="#eye-shut"/></svg></button></template>
-            <template x-if="canRemove(c)"><button class="icon" type="button" :aria-expanded="asked(c) ? 'true' : 'false'" aria-label="Remove this card" title="Remove" @click="askRemove(c)"><svg aria-hidden="true"><use href="#trash"/></svg></button></template>
+            <template x-if="canRemove(c)"><button class="icon trash" :class="{ armed: armed(c) }" type="button" :aria-label="armed(c) ? removeText(c) + ' Press again to remove' : 'Remove this card'" :title="armed(c) ? '' : 'Remove'" :disabled="armed(c) && ui.arm.busy" @click="trashClick(c)" @pointerleave="$event.pointerType === 'mouse' && disarm(c)" @blur="disarm(c)" @keydown.escape="disarm(c)"><svg aria-hidden="true"><use href="#trash"/></svg><span class="rm-word">Remove?</span></button></template>
           </span>
         </div>
       </article>

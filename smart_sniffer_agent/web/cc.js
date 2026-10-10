@@ -34,6 +34,8 @@ const ACCEPT_WORDS = { reallocated: ['reallocated sector', 'reallocated sectors'
   wear: 'wear used at', available_spare: 'available spare at' };
 const COMPARE_WORDS = { gt: 'alert above', ge: 'alert at', lt: 'alert below' };
 const LONG_PRESS_MS = 450;
+const ARM_MS = 4000; // how long the trash's Remove? waits for its second click
+const HA_NAME_FAILED = 'Saved in this app; Home Assistant did not take the name.';
 const enc = encodeURIComponent;
 
 function parseBlock(text) {
@@ -80,13 +82,16 @@ function cc() {
     // source reads again, and the drag in progress.
     order: [],
     hidden: [],
+    // Names given here: card id -> name, field agent id -> name.
+    names: {},
+    hostNames: {},
     gone: {},
     showHidden: false,
     pageErr: '',
     hostsErr: '',
     drag: null,
     dragOrder: null,
-    ui: { open: {}, cols: 1, confirm: null, ask: null, pw: {}, pwState: {}, busy: {}, note: {}, thr: null, copied: '', copiedText: '' },
+    ui: { open: {}, cols: 1, confirm: null, arm: null, rename: null, pw: {}, pwState: {}, busy: {}, note: {}, thr: null, copied: '', copiedText: '' },
     add: {
       open: false, block: '', port: '9099', scan: null, scanId: null, last: null, wide: null, error: '',
       ticks: {}, manualHost: '', manualPort: '9099', manualRows: [], checkMsg: null, checking: false,
@@ -112,7 +117,7 @@ function cc() {
       document.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (this.ui.confirm) this.closeConfirm();
-        if (this.ui.ask) this.ui.ask = null;
+        if (this.ui.arm) this.disarm();
         if (this.ui.thr && this.ui.thr.ask) this.ui.thr.ask = null;
       });
     },
@@ -166,6 +171,10 @@ function cc() {
       if (r.ok && r.data) {
         this.order = r.data.order || [];
         this.hidden = r.data.hidden || [];
+        if (!this.ui.rename) {
+          this.names = r.data.names || {};
+          this.hostNames = r.data.host_names || {};
+        }
         if (!this.hidden.length) this.showHidden = false;
       }
     },
@@ -525,12 +534,112 @@ function cc() {
       if (c.kind === 'filesystem') return 'FILESYSTEM';
       return this.machine(c);
     },
-    title(c) {
+    // The name the card had before anyone renamed it: the model, the pool's
+    // name, the mount point.
+    baseTitle(c) {
       if (c.kind === 'down') return "This app's agent is not answering";
       if (c.kind === 'machine') return this.hostName(c.h);
       if (c.kind === 'filesystem') return c.fs.mountpoint;
       if (c.kind === 'pool') return c.it.pool.name;
       return (c.it.drive && c.it.drive.model) || (c.it.lab && c.it.lab.name) || c.it.id;
+    },
+    // Shown: the Home Assistant device's own name when the user gave it one,
+    // else the name given here, else the original.
+    title(c) {
+      if (c.kind === 'down' || c.kind === 'machine') return this.baseTitle(c);
+      const ha = this.haNames(c);
+      return (ha && ha.name_by_user) || this.names[c.id] || this.baseTitle(c);
+    },
+    renamed(c) {
+      return ['drive', 'pool'].includes(c.kind) && this.title(c) !== this.baseTitle(c);
+    },
+    modelLine(c) {
+      return `${c.kind === 'pool' ? 'Pool' : 'Model'}: ${this.baseTitle(c)}`;
+    },
+
+    // ── Rename in place ─────────────────────────────────────────────
+    // A card's title (drive, pool, filesystem), and a field agent's machine:
+    // its pill, or the title of its card while it has nothing else to show.
+    canRename(c) {
+      return ['drive', 'pool', 'filesystem', 'machine'].includes(c.kind);
+    },
+    canRenameHost(c) {
+      return c.src === 'field' && ['drive', 'machine'].includes(c.kind);
+    },
+    renaming(c, what) {
+      const r = this.ui.rename;
+      return !!(r && r.id === c.id && r.what === what);
+    },
+    startRename(c, what) {
+      if (what === 'title' && !this.canRename(c)) return;
+      if (what === 'pill' && !this.canRenameHost(c)) return;
+      if (this.ui.rename) this.finishRename(true);
+      const host = what === 'pill' || c.kind === 'machine';
+      const value = host ? this.hostName(c.h) : this.title(c);
+      this.ui.rename = { id: c.id, what, host, value, was: value };
+      this.$nextTick(() => {
+        const el = document.querySelector(`article.card[data-card="${CSS.escape(c.id)}"] .name-in`);
+        if (el) { el.focus(); el.select(); }
+      });
+    },
+    renameKey(e) {
+      if (e.key === 'Enter') { e.preventDefault(); this.finishRename(true); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.finishRename(false); }
+    },
+    finishRename(save) {
+      const r = this.ui.rename;
+      if (!r) return;
+      this.ui.rename = null;
+      const name = String(r.value || '').replace(/\s+/g, ' ').trim();
+      if (!save || name === r.was) return;
+      const c = this.allCards.find((x) => x.id === r.id);
+      if (!c) return;
+      if (r.host) this.saveHostName(c.h, name);
+      else this.saveCardName(c, name);
+    },
+    async saveHostName(h, name) {
+      const was = this.hostNames[h.id];
+      if (name) this.hostNames[h.id] = name; else delete this.hostNames[h.id];
+      this.pageErr = '';
+      const r = await this.request(`hosts/${enc(h.id)}/name`, { method: 'PUT', body: { name } });
+      if (!r.ok) {
+        if (was) this.hostNames[h.id] = was; else delete this.hostNames[h.id];
+        this.pageErr = 'That name was not saved. Try again.';
+      }
+    },
+    async saveCardName(c, name) {
+      const was = this.names[c.id];
+      const ha = this.haNames(c);
+      const haWas = ha ? ha.name_by_user : null;
+      if (name) this.names[c.id] = name; else delete this.names[c.id];
+      if (ha) ha.name_by_user = name || null;
+      this.ui.note[`nm:${c.id}`] = '';
+      this.pageErr = '';
+      const r = await this.request(`cards/${enc(c.id)}/name`, { method: 'PUT', body: { name } });
+      if (!r.ok) {
+        if (was) this.names[c.id] = was; else delete this.names[c.id];
+        if (ha) ha.name_by_user = haWas;
+        this.pageErr = 'That name was not saved. Try again.';
+        return;
+      }
+      if (ha && r.data && r.data.home_assistant === 'failed') {
+        ha.name_by_user = haWas;
+        this.ui.note[`nm:${c.id}`] = HA_NAME_FAILED;
+      }
+    },
+    // The names Home Assistant has for a card's device, when it has one.
+    haNames(c) {
+      if (!['drive', 'pool'].includes(c.kind) || this.glyph(c).kind !== 'blue') return null;
+      const t = this.ha && this.ha.targets && this.ha.targets[this.target(c)];
+      const key = this.haKey(c);
+      return (t && t.names && key && t.devices && t.devices[key] && t.names[key]) || null;
+    },
+    haKey(c) {
+      const it = c.it;
+      return c.kind === 'pool' ? `pool:${it.pool.name}` : it.drive && (it.drive.serial || `id:${it.id}`);
+    },
+    footNote(c) {
+      return this.ui.note[`dl:${c.id}`] || this.ui.note[`rm:${c.id}`] || this.ui.note[`nm:${c.id}`] || '';
     },
     // The where line, as parts shown with a gap between them.
     where(c) {
@@ -1053,25 +1162,41 @@ function cc() {
       }
     },
 
-    askRemove(c) {
-      this.ui.confirm = null;
-      this.ui.ask = this.ui.ask && this.ui.ask.id === c.id ? null : { id: c.id, busy: false, err: '' };
+    // The trash: the first click turns it into Remove? in the same place,
+    // the second removes the card. Leaving it, Esc, focus going elsewhere
+    // or ARM_MS put the trash back.
+    armed(c) {
+      return !!(this.ui.arm && this.ui.arm.id === c.id);
     },
-    asked(c) {
-      return !!(this.ui.ask && this.ui.ask.id === c.id);
+    trashClick(c) {
+      if (this.armed(c)) { this.confirmRemove(c); return; }
+      this.disarm();
+      this.ui.confirm = null;
+      const arm = { id: c.id, busy: false, timer: null };
+      arm.timer = setTimeout(() => { if (this.ui.arm && this.ui.arm.id === c.id && !this.ui.arm.busy) this.disarm(); }, ARM_MS);
+      this.ui.arm = arm;
+      this.ui.note[`rm:${c.id}`] = '';
+    },
+    disarm(c) {
+      const a = this.ui.arm;
+      if (!a || a.busy || (c && a.id !== c.id)) return;
+      clearTimeout(a.timer);
+      this.ui.arm = null;
     },
     async confirmRemove(c) {
-      const a = this.ui.ask;
+      const a = this.ui.arm;
       if (!a || a.busy) return;
+      clearTimeout(a.timer);
       a.busy = true;
-      a.err = '';
       const r = await this.request(`cards/${enc(c.id)}`, { method: 'DELETE' });
       a.busy = false;
+      this.ui.arm = null;
       if (!r.ok) {
-        a.err = 'It was not removed. Try again.';
+        const key = `rm:${c.id}`;
+        this.ui.note[key] = 'It was not removed. Try again.';
+        setTimeout(() => { this.ui.note[key] = ''; }, 5000);
         return;
       }
-      this.ui.ask = null;
       this.gone[c.id] = true;
       this.order = this.order.filter((id) => id !== c.id);
       this.hidden = this.hidden.filter((id) => id !== c.id);
@@ -1129,8 +1254,7 @@ function cc() {
       if (!ha || ha.installed !== true || ha.reachable === false) return NONE;
       const t = ha.targets && ha.targets[this.target(c)];
       if (!t) return { kind: 'grey', href: null };
-      const it = c.it;
-      const key = c.kind === 'pool' ? `pool:${it.pool.name}` : it.drive && (it.drive.serial || `id:${it.id}`);
+      const key = this.haKey(c);
       const dev = key && t.devices && t.devices[key];
       if (dev) return { kind: 'blue', href: `/config/devices/device/${dev}` };
       if (ha.lookup === 'entries_only') return { kind: 'blue', href: t.entry_url };
@@ -1148,7 +1272,7 @@ function cc() {
       return 'Add this drive to Home Assistant?';
     },
     askAdd(c) {
-      this.ui.ask = null;
+      this.disarm();
       if (this.ui.confirm && this.ui.confirm.id === c.id) { this.closeConfirm(); return; }
       this.ui.confirm = { id: c.id, target: this.target(c), text: this.askText(c), busy: false, err: '' };
     },
@@ -1198,7 +1322,7 @@ function cc() {
     hostName(h) {
       const d = this.data(h);
       const o = this.optimistic[h.id];
-      return (d && d.agent && d.agent.hostname) || (o && o.hostname) || h.address;
+      return this.hostNames[h.id] || (d && d.agent && d.agent.hostname) || (o && o.hostname) || h.address;
     },
     machineText(c) {
       const h = c.h;

@@ -1,7 +1,8 @@
 /* Control Center styles: one grid of cards (design Rev 4).
    Black, white and grey. Four colour exceptions, muted, defined once below:
    --att   Attention: the word, FAILED, its chevron, the agent dot, the health box's
-           stroke and the labels and values of rows that caused it;
+           stroke and the labels and values of rows that caused it, and the
+           trash's Remove? while it waits for its second click;
    --maybe Maybe: the same places, for warnings;
    --ok    Health OK, its chevron and its health box, and the agent dot;
    --ha    the exit icon of something in Home Assistant, nowhere else.
@@ -118,11 +119,35 @@ p.sec-label { margin: 22px 0 10px; }
   .card:hover .grip, .card:hover .c-foot .icon { opacity: 0.3; }
   .card .grip:active, .card .c-foot .icon:active,
   .card .grip:focus-visible, .card .c-foot .icon:focus-visible, .card .c-foot .icon[aria-expanded="true"] { opacity: 1; }
+  .card .c-foot .icon.armed { opacity: 1; }
 }
 .grip svg { width: 10px; height: 16px; fill: currentColor; }
 .c-title { margin: 0; font-size: 0.98rem; font-weight: 650; line-height: 1.3; overflow-wrap: anywhere;
            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .c-tags { display: flex; align-items: center; gap: 6px; padding-top: 1px; }
+/* Rename in place: a pencil just right of the title (and after a field
+   agent's pill) shows while the pointer is on the card, dimmed like the
+   other controls; on a touch screen it rests faint. Double-click works too.
+   The field takes the title's own font and line, so nothing moves. */
+.c-name { display: flex; align-items: flex-start; gap: 2px; min-width: 0; }
+.c-name .c-title { flex: 0 1 auto; min-width: 0; }
+.pencil { flex: none; background: none; border: 0; padding: 3px; margin: 0 0 0 2px; color: var(--dim); cursor: pointer;
+          line-height: 0; border-radius: 3px; opacity: 0; transition: opacity 0.15s ease; }
+.pencil svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.card:hover .c-name .pencil, .card .c-tags:hover .p-pen { opacity: 0.6; }
+.pencil:hover, .card .pencil:hover, .pencil:focus-visible { opacity: 1; color: var(--paper); }
+.p-pen { margin: 0 -3px 0 -4px; }
+@media (hover: none) {
+  .pencil, .card:hover .c-name .pencil, .card .c-tags:hover .p-pen { opacity: 0.3; }
+  .pencil:active, .pencil:focus-visible { opacity: 1; }
+}
+.name-in { display: block; width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent;
+           color: var(--paper); font: inherit; outline: none; box-shadow: inset 0 -1px 0 var(--grey); }
+.name-in.c-title { font-size: 0.98rem; font-weight: 650; line-height: 1.3; height: 1.3em; font-family: var(--sans); }
+.name-in.pill { width: 14ch; max-width: 160px; color: var(--paper); text-transform: uppercase; box-shadow: none;
+                border: 1px solid var(--grey); padding: 1px 6px; line-height: inherit; }
+.pill-ed { cursor: text; }
+.c-model { margin: 0 0 6px; font-size: 0.74rem; color: var(--dim); overflow-wrap: anywhere; }
 .exit-slot { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .pill { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.04em; color: var(--grey); border: 1px solid var(--rule-2);
         border-radius: 0; padding: 1px 6px; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
@@ -267,11 +292,25 @@ table.attrs td.nm { white-space: normal; overflow-wrap: anywhere; }
 table.attrs td.num, table.attrs th.num { text-align: right; }
 table.attrs tr.crit td { color: var(--att); font-weight: 600; }
 table.attrs tr.warn td { color: var(--maybe); font-weight: 600; }
+/* Value, Worst and Thresh are the maker's normalized score: muted, so Raw
+   (the real count, which the alerts use) is read first. On a flagged row
+   the Value keeps the state colour at a lighter weight. */
+table.attrs td.c-val, table.attrs td.c-worst, table.attrs td.c-thresh,
+table.attrs tr.crit td.c-worst, table.attrs tr.crit td.c-thresh,
+table.attrs tr.warn td.c-worst, table.attrs tr.warn td.c-thresh { color: var(--dim); font-weight: 400; }
+table.attrs tr.crit td.c-val { color: var(--att); font-weight: 400; }
+table.attrs tr.warn td.c-val { color: var(--maybe); font-weight: 400; }
+table.attrs th[title] { cursor: help; }
 /* The note after a name, and a watched reading the drive does not report */
 table.attrs td small, table.attrs tr td .na { font-family: var(--sans); font-size: 0.66rem; color: var(--dim); font-weight: 400; }
 table.attrs td .na { white-space: nowrap; }
 table.attrs .input { padding: 1px 6px; font-size: 0.7rem; }
-table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
+/* A replica's Raw reading reads as plain text until it is used: an
+   underline on hover, the full field only while focused. */
+table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; padding: 0; border: 0; border-radius: 0;
+                      background: transparent; color: inherit; font: inherit; line-height: inherit; cursor: text; }
+table.attrs .raw-in:hover { box-shadow: inset 0 -1px 0 var(--dim); }
+table.attrs .raw-in:focus { background: #000; color: var(--paper); border-radius: 3px; box-shadow: 0 0 0 1px var(--paper); }
 /* A one-column card or a phone: ID, Name, Value and Raw; long raw strings
    wrap too. The Download keeps every column. */
 @container (max-width: 459px) {
@@ -303,6 +342,13 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
 .icon:hover { color: var(--paper); }
 .icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .icon[aria-expanded="true"] { color: var(--paper); }
+/* The trash armed: Remove? in the same place, growing to the left */
+.icon.armed { color: var(--att); border: 1px solid var(--att); padding: 2px 6px; font-family: var(--sans); font-size: 0.72rem;
+              line-height: 16px; height: 22px; white-space: nowrap; position: relative; }
+.icon.armed:hover { color: var(--att); background: rgba(204, 107, 99, 0.12); }
+.icon.trash .rm-word, .icon.trash.armed svg { display: none; }
+.icon.trash.armed .rm-word { display: inline; }
+.card .c-foot .icon.armed { opacity: 1; }
 
 /* Hidden, shown again from the header: faded in place, its closed eye readable */
 .card.is-hidden { border-style: dotted; }
@@ -417,6 +463,9 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; }
 /* Tap targets on touch screens: pad the buttons, not the glyphs */
 @media (pointer: coarse) {
   .icon { padding: 8px; margin: -5px -3px; }
+  .icon.armed { padding: 2px 6px; margin: 0; }
+  .icon.armed::after { content: ""; position: absolute; inset: -9px -4px; }
+  .pencil { padding: 8px; margin: -6px -4px -6px -2px; }
   .grip { padding: 8px 6px; margin: -6px -2px -6px -10px; }
   .exit { padding: 9px; margin: -9px; }
   .chev { padding: 8px 4px; margin-top: -6px; margin-bottom: -6px; }

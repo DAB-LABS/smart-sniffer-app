@@ -168,7 +168,7 @@ COLOUR_AUDIT = """
   const want = { att: 'rgb(204, 107, 99)', maybe: 'rgb(204, 159, 82)', ok: 'rgb(93, 163, 114)', blue: 'rgb(3, 169, 244)' };
   const allowed = {
     att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .hbox.attention, .agent-dot.down, .pw-row.crit .lb, .pw-row.crit .pw-val, '
-      + '.kv > div.crit .lb, .kv > div.crit .v, table.attrs tr.crit'),
+      + '.kv > div.crit .lb, .kv > div.crit .v, table.attrs tr.crit, .c-foot .icon.armed'),
     maybe: (el) => !!el.closest('.h-maybe, .chev.maybe, .hbox.maybe, .pw-row.warn .lb, .pw-row.warn .pw-val, '
       + '.kv > div.warn .lb, .kv > div.warn .v, table.attrs tr.warn'),
     ok: (el) => !!el.closest('.h-ok, .chev.ok, .hbox.ok, .agent-dot.up'),
@@ -487,8 +487,16 @@ def test_details_one_table_with_flags(open_page):
     assert len(names) == len(set(names)), names
     for mark, rgb in (("crit", ATT), ("warn", MAYBE)):
         for row in det.locator(f"tbody tr.{mark}").all():
-            colours = row.evaluate("""r => [...r.cells].map((c) => getComputedStyle(c).color)""")
-            assert set(colours) == {rgb}, (mark, colours)
+            # Name and Raw in the state colour, Value too at a lighter
+            # weight; Worst and Thresh stay muted.
+            cells = row.evaluate("""r => Object.fromEntries([...r.cells].map((c) => [c.className.replace('num ', ''),
+              [getComputedStyle(c).color, getComputedStyle(c).fontWeight]]))""")
+            assert cells["nm"] == [rgb, "600"] and cells["c-raw"] == [rgb, "600"], cells
+            if "c-val" in cells and row.locator("td.c-val").inner_text():
+                assert cells["c-val"] == [rgb, "400"], cells
+            for col in ("c-worst", "c-thresh"):
+                if col in cells:
+                    assert cells[col][0] == "rgb(143, 143, 143)", cells
             assert row.locator("td.nm .lb").evaluate("e => getComputedStyle(e).color") == rgb
             assert row.locator("td.nm small").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
             # The note sits right after the name, never in a number cell.
@@ -734,32 +742,292 @@ def test_hide_rolls_back_on_error(open_page):
     assert p.page.locator(".eye-btn").inner_text().strip() == "0"
 
 
-def test_trash_confirm(open_page):
+def _trash(c):
+    return c.locator(".c-foot .icon.trash")
+
+
+def test_trash_two_clicks(open_page):
     p = open_page()
     usb = by_id(p, NAS_USB)
-    usb.get_by_role("button", name="Remove this card").click()
-    ask = usb.get_by_role("group", name="Confirm removal")
-    assert ask.inner_text().startswith("Remove this drive?")
-    ask.get_by_role("button", name="Cancel").click()
-    assert usb.get_by_role("group", name="Confirm removal").count() == 0
+    trash = _trash(usb)
+    box = trash.bounding_box()
+    trash.click()
+    # The first click: Remove? in the same place, in the Attention colour,
+    # grown to the left (its right edge stays put). Nothing is removed.
+    assert trash.inner_text() == "Remove?"
+    assert "armed" in trash.get_attribute("class")
+    assert trash.get_attribute("aria-label").startswith("Remove this drive?")
+    assert trash.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).borderTopColor, getComputedStyle(e).borderTopWidth]") \
+        == [ATT, ATT, "1px"]
+    armed = trash.bounding_box()
+    assert abs((armed["x"] + armed["width"]) - (box["x"] + box["width"])) < 1.5 and armed["width"] > box["width"]
+    assert usb.get_by_role("group", name="Confirm removal").count() == 0  # no confirm row
     assert not p.api("DELETE", r"/cards/")
-    usb.get_by_role("button", name="Remove this card").click()
-    usb.get_by_role("group", name="Confirm removal").get_by_role("button", name="Remove").click()
+    # Four seconds put the trash back.
+    p.page.wait_for_timeout(4300)
+    assert "armed" not in trash.get_attribute("class") and trash.inner_text() == ""
+    # Esc puts it back.
+    trash.click()
+    p.page.keyboard.press("Escape")
+    assert "armed" not in trash.get_attribute("class")
+    # Moving the pointer away puts it back.
+    trash.click()
+    p.page.mouse.move(5, 5)
+    p.page.wait_for_timeout(100)
+    assert "armed" not in trash.get_attribute("class")
+    # Focus leaving puts it back.
+    trash.click()
+    p.page.keyboard.press("Shift+Tab")
+    p.page.wait_for_timeout(100)
+    assert "armed" not in trash.get_attribute("class")
+    assert not p.api("DELETE", r"/cards/")
+    # Two clicks in the same spot remove the card, only that one.
+    trash.click()
+    trash.click()
     p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_USB}\"]')")
     assert len(p.api("DELETE", r"/cards/")) == 1
-    assert NAS_ATT in card_ids(p)  # only the card clicked
-    # Replica and pool texts.
-    by_id(p, REP_NVME).get_by_role("button", name="Remove this card").click()
-    assert by_id(p, REP_NVME).get_by_role("group", name="Confirm removal").inner_text().startswith("Remove this replica?")
-    by_id(p, NAS_POOL).get_by_role("button", name="Remove this card").click()
-    assert by_id(p, NAS_POOL).get_by_role("group", name="Confirm removal").inner_text().startswith("Remove this pool?")
-    assert by_id(p, REP_NVME).get_by_role("group", name="Confirm removal").count() == 0  # one at a time
-    # The placeholder's trash removes the machine.
+    assert NAS_ATT in card_ids(p)
+    # One armed at a time; a replica and a pool say what they remove.
+    _trash(by_id(p, REP_NVME)).click()
+    assert _trash(by_id(p, REP_NVME)).get_attribute("aria-label").startswith("Remove this replica?")
+    _trash(by_id(p, NAS_POOL)).click()
+    assert _trash(by_id(p, NAS_POOL)).get_attribute("aria-label").startswith("Remove this pool?")
+    assert "armed" not in _trash(by_id(p, REP_NVME)).get_attribute("class")
+    p.page.keyboard.press("Escape")
+    # Keyboard: Enter twice removes the placeholder, and its machine.
+    p.page.mouse.move(2, 2)
     pi = by_id(p, BACKUP_PI)
-    pi.get_by_role("button", name="Remove this card").click()
-    assert pi.get_by_role("group", name="Confirm removal").inner_text().startswith("Remove backup-pi?")
-    pi.get_by_role("group", name="Confirm removal").get_by_role("button", name="Remove").click()
+    _trash(pi).focus()
+    p.page.keyboard.press("Enter")
+    assert _trash(pi).inner_text() == "Remove?"
+    assert _trash(pi).get_attribute("aria-label").startswith("Remove backup-pi?")
+    p.page.keyboard.press("Enter")
     p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{BACKUP_PI}\"]')")
+    # Space twice on a replica.
+    rep = by_id(p, REP_FAILED)
+    _trash(rep).focus()
+    p.page.keyboard.press(" ")
+    p.page.keyboard.press(" ")
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_FAILED}\"]')")
+    assert len(p.api("DELETE", r"/cards/")) == 3
+
+
+def test_trash_two_taps(browser, server):
+    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
+    ctx = browser.new_context(viewport={"width": 390, "height": 900}, has_touch=True, is_mobile=True)
+    page = ctx.new_page()
+    page.goto(server + "/")
+    page.wait_for_selector(f'article.card[data-card="{NAS_USB}"]')
+    try:
+        trash = page.locator(f'article.card[data-card="{NAS_USB}"] .c-foot .icon.trash')
+        trash.scroll_into_view_if_needed()
+        trash.tap()
+        page.wait_for_timeout(200)
+        assert trash.inner_text() == "Remove?"  # a tap's pointer leaving does not disarm it
+        trash.tap()
+        page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_USB}\"]')")
+    finally:
+        ctx.close()
+
+
+# ── Rename in place ──────────────────────────────────────────────────────────
+
+def _head_h(c) -> float:
+    return c.locator(".c-head").bounding_box()["height"]
+
+
+def _font(loc) -> list:
+    return loc.evaluate("e => ['fontSize', 'fontWeight', 'fontFamily', 'lineHeight'].map((k) => getComputedStyle(e)[k])")
+
+
+def test_rename_card_in_place(open_page):
+    p = open_page()
+    c = by_id(p, NAS_MAYBE)
+    title = c.locator("h3.c-title")
+    original = title.inner_text()
+    pen = c.locator(".c-name .pencil")
+    p.page.mouse.move(2, 2)
+    p.page.wait_for_timeout(250)
+    assert pen.evaluate(OPACITY) == 0
+    box = c.locator(".c-vitals").bounding_box()
+    p.page.mouse.move(box["x"] + 4, box["y"] + 4)
+    p.page.wait_for_timeout(250)
+    assert 0.3 <= pen.evaluate(OPACITY) < 1  # shown, dimmed like the other controls
+    # The pencil sits just right of the title.
+    t, b = title.bounding_box(), pen.bounding_box()
+    assert 0 <= b["x"] - (t["x"] + t["width"]) < 8
+    font, height = _font(title), _head_h(c)
+    pen.click()
+    field = c.locator("input.name-in.c-title")
+    assert field.evaluate("e => document.activeElement === e")
+    assert field.input_value() == original
+    assert _font(field) == font and abs(_head_h(c) - height) < 0.5  # same font, nothing moves
+    # Esc cancels.
+    field.fill("Nope")
+    p.page.keyboard.press("Escape")
+    assert title.inner_text() == original and not p.api("PUT", r"/cards/.+/name$")
+    # Double-click the title, Enter saves.
+    title.dblclick()
+    field.fill("Scratch disk")
+    p.page.keyboard.press("Enter")
+    assert title.inner_text() == "Scratch disk"
+    puts = p.api("PUT", r"/cards/.+/name$")
+    assert len(puts) == 1 and json.loads(puts[0][2]) == {"name": "Scratch disk"}
+    assert unquote(puts[0][1]).endswith(f"/cards/{NAS_MAYBE}/name")
+    # The original model moves to a muted Model line in Details.
+    c.locator(".chev").click()
+    model = c.locator(".details .c-model")
+    assert model.inner_text() == f"Model: {original}"
+    assert model.evaluate("e => getComputedStyle(e).color") == DIM
+    c.locator(".chev").click()
+    # It is kept: a reload shows it.
+    p.page.reload()
+    p.page.wait_for_selector(f'article.card[data-card="{NAS_MAYBE}"] h3.c-title')
+    p.page.wait_for_timeout(600)
+    assert title.inner_text() == "Scratch disk"
+    # Clicking away saves; empty restores the original and drops the Model line.
+    pen.click()
+    field.fill("")
+    p.page.locator("header.app-head").click()
+    assert title.inner_text() == original
+    assert json.loads(p.api("PUT", r"/cards/.+/name$")[-1][2]) == {"name": ""}
+    c.locator(".chev").click()
+    assert c.locator(".details .c-model").count() == 0
+
+
+def test_rename_pools_filesystems_and_fixed_pills(open_page):
+    p = open_page()
+    pool = by_id(p, NAS_POOL)
+    pool.locator("h3.c-title").dblclick()
+    pool.locator("input.name-in").fill("Media pool")
+    p.page.keyboard.press("Enter")
+    assert pool.locator("h3.c-title").inner_text() == "Media pool"
+    pool.locator(".chev").click()
+    assert pool.locator(".details .c-model").inner_text() == "Pool: tank"
+    fs = by_id(p, NAS_FS)
+    fs.locator("h3.c-title").dblclick()
+    fs.locator("input.name-in").fill("Scratch")
+    p.page.keyboard.press("Enter")
+    assert fs.locator("h3.c-title").inner_text() == "Scratch"
+    # HAOS, REPLICA, ZFS POOL and FILESYSTEM pills are fixed.
+    for cid in (NVME, REP_NVME, NAS_POOL, NAS_FS):
+        c = by_id(p, cid)
+        assert c.locator(".c-tags .pencil").count() == 0
+        c.locator(".pill").dblclick()
+        assert c.locator("input.name-in").count() == 0
+
+
+def test_rename_machine_pill_follows_on_every_card(open_page):
+    p = open_page()
+    nas_cards = [cid for cid in card_ids(p) if cid.startswith(NAS + "|")]
+    drives = [cid for cid in nas_cards if not cid.split("|")[1].startswith(("pool:", "fs:"))]
+    assert len(drives) >= 4
+    c = by_id(p, drives[0])
+    pill = c.locator(".pill")
+    assert pill.inner_text() == "NAS-01"
+    pill.dblclick()
+    field = c.locator("input.name-in.pill")
+    assert field.input_value() == "nas-01"
+    field.fill("Basement NAS")
+    p.page.keyboard.press("Enter")
+    puts = p.api("PUT", r"/hosts/.+/name$")
+    assert len(puts) == 1 and json.loads(puts[0][2]) == {"name": "Basement NAS"}
+    assert unquote(puts[0][1]).endswith(f"/hosts/{NAS}/name")
+    for cid in drives:
+        assert by_id(p, cid).locator(".pill").inner_text() == "BASEMENT NAS"
+    assert by_id(p, NAS_POOL).locator(".pill").inner_text() == "ZFS POOL"
+    # The pencil after the pill does the same; empty restores the agent's name.
+    c.locator(".c-tags .pencil").click()
+    c.locator("input.name-in.pill").fill("")
+    p.page.keyboard.press("Enter")
+    for cid in drives:
+        assert by_id(p, cid).locator(".pill").inner_text() == "NAS-01"
+    # A machine with nothing to show is renamed from its title.
+    pi = by_id(p, BACKUP_PI)
+    pi.locator("h3.c-title").dblclick()
+    pi.locator("input.name-in").fill("Pi in the garage")
+    p.page.keyboard.press("Enter")
+    assert pi.locator("h3.c-title").inner_text() == "Pi in the garage"
+    assert unquote(p.api("PUT", r"/hosts/.+/name$")[-1][1]).endswith(f"/hosts/{BACKUP_PI}/name")
+
+
+def test_rename_syncs_with_home_assistant(open_page, server):
+    p = open_page()
+    c = by_id(p, NVME)  # in Home Assistant (blue exit icon)
+    assert c.locator("a.exit").count() == 1
+    original = c.locator("h3.c-title").inner_text()
+    c.locator("h3.c-title").dblclick()
+    c.locator("input.name-in").fill("Boot NVMe")
+    p.page.keyboard.press("Enter")
+    p.page.wait_for_timeout(300)
+    assert c.locator("h3.c-title").inner_text() == "Boot NVMe"
+    assert c.locator(".act-note").count() == 0 or not c.locator(".act-note").is_visible()
+    # A rename made in Home Assistant shows on the next refresh, over the app's.
+    ha = json.load(urllib.request.urlopen(f"{server}/ha/devices", timeout=5))
+    device = ha["targets"]["self"]["devices"][NVME.split("|")[1]]
+    assert ha["targets"]["self"]["names"][NVME.split("|")[1]]["name_by_user"] == "Boot NVMe"
+    req = urllib.request.Request(f"{server}/dev/ha-name", method="POST",
+                                 data=json.dumps({"device": device, "name": "Named in HA"}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=5)
+    p.page.get_by_role("button", name="Refresh").click()
+    p.page.wait_for_function(f"""() => document.querySelector('[data-card="{NVME}"] h3.c-title').textContent === 'Named in HA'""")
+    c.locator(".chev").click()
+    assert c.locator(".details .c-model").inner_text() == f"Model: {original}"
+    # A drive not in Home Assistant keeps the name in the app only.
+    assert by_id(p, NAS_USB).locator("button.exit.add").count() == 1
+
+
+def test_rename_home_assistant_refuses(open_page):
+    p = open_page("HA_NAME=fail")
+    c = by_id(p, NVME)
+    c.locator("h3.c-title").dblclick()
+    c.locator("input.name-in").fill("Boot NVMe")
+    p.page.keyboard.press("Enter")
+    note = c.locator(".act-note")
+    note.wait_for(state="visible")
+    assert note.inner_text() == "Saved in this app; Home Assistant did not take the name."
+    assert note.evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE, OK)
+    assert c.locator("h3.c-title").inner_text() == "Boot NVMe"  # the app's name is kept
+    assert len(p.api("PUT", r"/cards/.+/name$")) == 1
+
+
+def test_attribute_headers_explain_value_and_raw(open_page):
+    p = open_page()
+    c = by_id(p, BARRACUDA)
+    c.locator(".chev").click()
+    heads = dict(c.locator("table.attrs thead th").evaluate_all("els => els.map((e) => [e.textContent, e.title])"))
+    assert heads["Value"] == "The maker's health score for this attribute, counting down from new"
+    assert heads["Worst"] == "The lowest that score has been"
+    assert heads["Thresh"] == "The maker's failure point for that score"
+    assert heads["Raw"] == "The real count or reading. Alerts use this"
+    # Value, Worst and Thresh are muted; Raw is not.
+    plain = c.locator("tbody tr:not(.crit):not(.warn)").first
+    for col in ("c-val", "c-worst", "c-thresh"):
+        assert plain.locator(f"td.{col}").evaluate("e => getComputedStyle(e).color") == DIM
+    assert plain.locator("td.c-raw").evaluate("e => getComputedStyle(e).color") == "rgb(189, 189, 189)"
+
+
+def test_replica_raw_reads_as_text_until_focused(open_page):
+    p = open_page()
+    c = by_id(p, REP_FAILED)
+    c.locator(".chev").click()
+    field = c.locator("input.raw-in").first
+    raw_text = field.locator("xpath=..")  # its Raw cell, whose font every Raw cell has
+    look = "e => { const s = getComputedStyle(e); return [s.borderTopWidth, s.borderBottomWidth, s.backgroundColor, s.textAlign, s.fontFamily, s.fontSize, s.boxShadow]; }"
+    p.page.mouse.move(2, 2)
+    rest = field.evaluate(look)
+    text = raw_text.evaluate(look)
+    assert rest[:4] == ["0px", "0px", "rgba(0, 0, 0, 0)", "right"], rest
+    assert rest[4:6] == text[4:6]  # the font of the other Raw cells
+    assert rest[6] == "none"
+    field.hover()
+    p.page.wait_for_timeout(100)
+    assert field.evaluate(look)[6] != "none"  # an underline
+    assert field.evaluate(look)[2] == "rgba(0, 0, 0, 0)"
+    field.focus()
+    focused = field.evaluate(look)
+    assert focused[2] == "rgb(0, 0, 0)" and "241, 241, 241" in focused[6]  # the full field
 
 
 def _scenario(card):
@@ -1805,9 +2073,39 @@ def test_screenshots(open_page):
         usb = by_id(p, NAS_USB)
         usb.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
         _shot(p, "exit-grey-confirm", usb)
-        by_id(p, NAS_MAYBE).get_by_role("button", name="Remove this card").click()
-        _shot(p, "remove-confirm", by_id(p, NAS_MAYBE))
+        _trash(by_id(p, NAS_MAYBE)).click()
+        _shot(p, "remove-armed", by_id(p, NAS_MAYBE))
         p.page.keyboard.press("Escape")
+        # Rename: the pencil on hover, the title as a field, a renamed card
+        # with its Model line, the machine pill as a field.
+        box = by_id(p, NAS_MAYBE).locator(".c-vitals").bounding_box()
+        p.page.mouse.move(box["x"] + 4, box["y"] + 4)
+        p.page.wait_for_timeout(250)
+        _shot(p, "rename-pencil-hover", by_id(p, NAS_MAYBE))
+        by_id(p, NAS_MAYBE).locator("h3.c-title").dblclick()
+        by_id(p, NAS_MAYBE).locator("input.name-in").fill("Scratch disk")
+        _shot(p, "rename-editing", by_id(p, NAS_MAYBE))
+        p.page.keyboard.press("Escape")
+        by_id(p, BARRACUDA).locator("h3.c-title").dblclick()
+        by_id(p, BARRACUDA).locator("input.name-in").fill("Backup SATA")
+        p.page.keyboard.press("Enter")
+        by_id(p, BARRACUDA).locator(".chev").click()
+        p.page.mouse.move(2, 2)
+        _shot(p, "renamed-model-line", by_id(p, BARRACUDA))
+        by_id(p, BARRACUDA).locator(".chev").click()
+        by_id(p, NAS_ATT).locator(".pill").dblclick()
+        by_id(p, NAS_ATT).locator("input.name-in").fill("Basement NAS")
+        _shot(p, "rename-pill-editing", by_id(p, NAS_ATT))
+        p.page.keyboard.press("Escape")
+        rep = by_id(p, REP_FAILED)
+        rep.locator(".chev").click()
+        p.page.mouse.move(2, 2)
+        _shot(p, "replica-table", rep)
+        rep.locator("input.raw-in").nth(1).hover()
+        _shot(p, "replica-table-hover", rep)
+        rep.locator("input.raw-in").nth(2).focus()
+        _shot(p, "replica-table-focused", rep)
+        rep.locator(".chev").click()
         by_id(p, NVME).get_by_role("button", name="Hide this card").click()
         _shot(p, "header-hidden-1", p.page.locator("header.app-head"))
         p.page.locator(".eye-btn").click()
@@ -1838,6 +2136,13 @@ def test_screenshots(open_page):
         _shot(p, "pool-degraded", by_id(p, NAS_POOL))
         p = open_page("HA=not_installed", width)
         _shot(p, "exit-absent", by_id(p, NVME))
+        p = open_page("HA_NAME=fail", width)
+        by_id(p, NVME).locator("h3.c-title").dblclick()
+        by_id(p, NVME).locator("input.name-in").fill("Boot NVMe")
+        p.page.keyboard.press("Enter")
+        by_id(p, NVME).locator(".act-note").wait_for(state="visible")
+        p.page.mouse.move(2, 2)
+        _shot(p, "rename-ha-refused", by_id(p, NVME))
         p = open_page("AGENT=down", width)
         _shot(p, "haos-not-answering", by_id(p, NVME))
         _top(p, "top-agent-down")

@@ -13,6 +13,7 @@ tests of test_proxy.py need (SS_RULES_DIR or SS_MOCK).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -36,6 +37,8 @@ from test_proxy import (  # noqa: E402 -- after the skip
     TOKEN,
     AgentState,
     FakeSupervisor,
+    _device,
+    _entry,
     _free_port,
     _mock_has_replicas,
     _serve,
@@ -230,3 +233,57 @@ def test_check_answers_against_the_proxy(tab, app):
     finally:
         other.shutdown()
         stranger.shutdown()
+
+
+def test_rename_reaches_home_assistant_and_reads_back(tab, app):
+    """A drive in Home Assistant: the page's rename goes through proxy.py's
+    websocket client to the fake Core, and a name set in Home Assistant
+    shows on the next refresh. The machine pill renames every card of it."""
+    info = json.load(urllib.request.urlopen(app.base + "/app/info"))
+    STATE.entries = [_entry("e-agent", f"SMART Sniffer ({info['hostname']}:{info['agent_port']})")]
+    STATE.devices = [_device("dev-haos", "e-agent", serial="HAOS-DISK-1")]
+    STATE.ws_mode, STATE.ws_commands = "ok", []
+    try:
+        tab.load()
+        card = tab.card("self|HAOS-DISK-1")
+        card.locator("a.exit").wait_for(timeout=10000)
+        card.locator("h3.c-title").dblclick()
+        card.locator("input.name-in").fill("Boot disk")
+        tab.page.keyboard.press("Enter")
+        tab.page.wait_for_function("() => document.querySelector('[data-card=\"self|HAOS-DISK-1\"] h3').textContent === 'Boot disk'")
+        tab.page.wait_for_timeout(500)
+        assert STATE.ws_commands and STATE.ws_commands[-1]["name_by_user"] == "Boot disk"
+        assert STATE.devices[0]["name_by_user"] == "Boot disk"
+        assert STATE.options["card_names"] == [{"card": "self|HAOS-DISK-1", "name": "Boot disk"}]
+        assert card.locator(".act-note").is_hidden()
+        # Renamed in Home Assistant: the page shows it after Refresh.
+        STATE.devices[0]["name_by_user"] = "Named in HA"
+        tab.page.get_by_role("button", name="Refresh").click()
+        tab.page.wait_for_function("() => document.querySelector('[data-card=\"self|HAOS-DISK-1\"] h3').textContent === 'Named in HA'")
+        card.locator(".chev").click()
+        assert card.locator(".c-model").inner_text().startswith("Model: ")
+        # Home Assistant refusing: the app keeps the name and says so.
+        STATE.ws_mode = "refuse"
+        STATE.devices[0]["name_by_user"] = None
+        tab.page.get_by_role("button", name="Refresh").click()
+        tab.page.wait_for_function("() => document.querySelector('[data-card=\"self|HAOS-DISK-1\"] h3').textContent === 'Boot disk'")
+        card.locator("h3.c-title").dblclick()
+        card.locator("input.name-in").fill("Second name")
+        tab.page.keyboard.press("Enter")
+        card.locator(".act-note").filter(has_text="Home Assistant did not take the name").wait_for(timeout=5000)
+        assert card.locator("h3.c-title").inner_text() == "Second name"
+        # The machine pill: every card of nas-01 follows.
+        nas = [tab.card(f"{app.nas}|{s}") for s in ("NAS-A", "NAS-B")]
+        nas[0].locator(".pill").dblclick()
+        nas[0].locator("input.name-in").fill("Basement")
+        tab.page.keyboard.press("Enter")
+        tab.page.wait_for_timeout(300)
+        assert [c.locator(".pill").inner_text() for c in nas] == ["BASEMENT", "BASEMENT"]
+        assert STATE.options["host_names"] == [{"host": app.nas, "name": "Basement"}]
+        tab.load()
+        tab.card(f"{app.nas}|NAS-B").locator(".pill").filter(has_text="BASEMENT").wait_for(timeout=10000)
+        assert not tab.errors, tab.errors
+    finally:
+        STATE.entries, STATE.devices, STATE.ws_mode = [], [], "ok"
+        STATE.options.pop("card_names", None)
+        STATE.options.pop("host_names", None)
