@@ -24,7 +24,6 @@
   <symbol id="chevron" viewBox="0 0 20 12"><path d="M2 2l8 8 8-8"/></symbol>
   <symbol id="glass" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4.5 4.5"/></symbol>
   <symbol id="tune" viewBox="0 0 16 16"><path d="M2 4h6.5M12.5 4H14M2 8h1.5M7.5 8H14M2 12h7.5M13.5 12h.5"/><circle cx="10.5" cy="4" r="1.7"/><circle cx="5.5" cy="8" r="1.7"/><circle cx="11.5" cy="12" r="1.7"/></symbol>
-  <symbol id="pencil" viewBox="0 0 16 16"><path d="M10.6 2.6l2.8 2.8M3 13l.7-3.4 7.9-7.9 2.7 2.7-7.9 7.9L3 13Z"/></symbol>
   <symbol id="copy" viewBox="0 0 16 16"><rect x="5.2" y="5.2" width="8.3" height="8.3" rx="1"/><path d="M10.8 5.2V3.5a1 1 0 0 0-1-1H3.5a1 1 0 0 0-1 1v6.3a1 1 0 0 0 1 1h1.7"/></symbol>
 </svg>
 
@@ -65,18 +64,16 @@
         <div class="c-head">
           <button class="grip" type="button" :aria-label="'Move ' + title(c) + '. Arrow keys move it one place.'" title="Drag to move" @pointerdown="gripDown($event, c)" @keydown="gripKey($event, c)" @contextmenu.prevent><svg aria-hidden="true"><use href="#grip"/></svg></button>
           <div class="c-name">
-            <template x-if="!renaming(c, 'title')"><h3 class="c-title" x-text="title(c)" @dblclick="startRename(c, 'title')"></h3></template>
-            <template x-if="renaming(c, 'title')"><input class="name-in c-title" type="text" maxlength="100" spellcheck="false" autocomplete="off" :aria-label="'Name of ' + baseTitle(c) + '. Enter saves, Esc cancels, empty restores the original.'" :placeholder="baseTitle(c)" x-model="ui.rename.value" @keydown="renameKey($event)" @blur="finishRename(true)"></template>
-            <template x-if="canRename(c) && !renaming(c, 'title')"><button class="pencil" type="button" :aria-label="'Rename ' + title(c)" title="Rename" @click="startRename(c, 'title')"><svg aria-hidden="true"><use href="#pencil"/></svg></button></template>
+            <template x-if="!renaming(c, 'title')"><h3 class="c-title"><template x-if="canRename(c)"><span class="t-name" tabindex="0" role="button" :aria-label="title(c) + '. Rename: Enter or F2'" x-text="title(c)" @click="startRename(c, 'title', $event)" @keydown="nameKey($event, c, 'title')"></span></template><template x-if="!canRename(c)"><span x-text="title(c)"></span></template></h3></template>
+            <template x-if="renaming(c, 'title')"><span class="name-box" :style="'min-height:' + ui.rename.h + 'px'"><input class="name-in c-title" type="text" maxlength="100" spellcheck="false" autocomplete="off" :aria-label="'Name of ' + baseTitle(c) + '. Enter saves, Esc cancels, empty restores the original.'" :placeholder="baseTitle(c)" x-model="ui.rename.value" @mousedown="renameDown($event)" @keydown="renameKey($event)" @blur="finishRename(true)"></span></template>
           </div>
           <div class="c-tags">
             <span class="exit-slot">
               <template x-if="glyph(c).kind === 'blue'"><a class="exit" :href="glyph(c).href" target="_top" aria-label="Open in Home Assistant" title="Open in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template>
               <template x-if="glyph(c).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking(c) ? 'true' : 'false'" aria-label="Not in Home Assistant yet. Add it" title="Not in Home Assistant yet" @click="askAdd(c)"><svg aria-hidden="true"><use href="#exit"/></svg></button></template>
             </span>
-            <template x-if="!renaming(c, 'pill')"><span class="pill" :class="{ 'pill-ed': canRenameHost(c) }" x-text="pill(c)" @dblclick="startRename(c, 'pill')"></span></template>
-            <template x-if="renaming(c, 'pill')"><input class="name-in pill" type="text" :style="'width:calc(' + Math.max(6, String(ui.rename.value || '').length + 1) + 'ch + 14px)'" maxlength="100" spellcheck="false" autocomplete="off" :aria-label="'Name of this machine. Enter saves, Esc cancels, empty restores the original.'" x-model="ui.rename.value" @keydown="renameKey($event)" @blur="finishRename(true)"></template>
-            <template x-if="canRenameHost(c) && !renaming(c, 'pill')"><button class="pencil p-pen" type="button" :aria-label="'Rename the machine ' + machine(c)" title="Rename the machine" @click="startRename(c, 'pill')"><svg aria-hidden="true"><use href="#pencil"/></svg></button></template>
+            <template x-if="!renaming(c, 'pill')"><span class="pill" :class="{ 'pill-ed': canRenameHost(c) }" :tabindex="canRenameHost(c) ? 0 : null" :role="canRenameHost(c) ? 'button' : null" :aria-label="canRenameHost(c) ? 'Machine ' + machine(c) + '. Rename: Enter or F2' : null" x-text="pill(c)" @click="startRename(c, 'pill', $event)" @keydown="nameKey($event, c, 'pill')"></span></template>
+            <template x-if="renaming(c, 'pill')"><span class="pill pill-ed pill-edit" :style="'width:' + ui.rename.w + 'px'"><input class="name-in" type="text" maxlength="100" spellcheck="false" autocomplete="off" :aria-label="'Name of this machine. Enter saves, Esc cancels, empty restores the original.'" x-model="ui.rename.value" @mousedown="renameDown($event)" @keydown="renameKey($event)" @blur="finishRename(true)"></span></template>
           </div>
         </div>
         <template x-if="asking(c)">

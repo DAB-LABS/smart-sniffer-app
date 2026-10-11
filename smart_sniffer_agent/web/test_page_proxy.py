@@ -247,7 +247,7 @@ def test_rename_reaches_home_assistant_and_reads_back(tab, app):
         tab.load()
         card = tab.card("self|HAOS-DISK-1")
         card.locator("a.exit").wait_for(timeout=10000)
-        card.locator("h3.c-title").dblclick()
+        card.locator(".t-name").dblclick()
         card.locator("input.name-in").fill("Boot disk")
         tab.page.keyboard.press("Enter")
         tab.page.wait_for_function("() => document.querySelector('[data-card=\"self|HAOS-DISK-1\"] h3').textContent === 'Boot disk'")
@@ -267,7 +267,7 @@ def test_rename_reaches_home_assistant_and_reads_back(tab, app):
         STATE.devices[0]["name_by_user"] = None
         tab.page.get_by_role("button", name="Refresh").click()
         tab.page.wait_for_function("() => document.querySelector('[data-card=\"self|HAOS-DISK-1\"] h3').textContent === 'Boot disk'")
-        card.locator("h3.c-title").dblclick()
+        card.locator(".t-name").dblclick()
         card.locator("input.name-in").fill("Second name")
         tab.page.keyboard.press("Enter")
         card.locator(".act-note").filter(has_text="Home Assistant did not take the name").wait_for(timeout=5000)

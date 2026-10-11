@@ -570,26 +570,53 @@ function cc() {
       const r = this.ui.rename;
       return !!(r && r.id === c.id && r.what === what);
     },
-    startRename(c, what) {
+    // A click or tap on the title or an editable pill opens the field in
+    // the element's own box, so nothing around it moves: the title's field
+    // keeps the title's height, the pill's keeps the pill's width.
+    startRename(c, what, ev) {
       if (what === 'title' && !this.canRename(c)) return;
       if (what === 'pill' && !this.canRenameHost(c)) return;
       if (this.ui.rename) this.finishRename(true);
+      const el = ev && ev.currentTarget;
+      const box = el ? (what === 'title' ? el.closest('.c-title') : el).getBoundingClientRect() : null;
       const host = what === 'pill' || c.kind === 'machine';
       const value = host ? this.hostName(c.h) : this.title(c);
-      this.ui.rename = { id: c.id, what, host, value, was: value };
+      const kb = !!(ev && ev.type === 'keydown');
+      this.ui.rename = { id: c.id, what, host, value, was: value, kb, t0: Date.now(),
+                         h: box ? box.height : 0, w: box ? box.width : 0 };
       this.$nextTick(() => {
-        const el = document.querySelector(`article.card[data-card="${CSS.escape(c.id)}"] .name-in`);
-        if (el) { el.focus(); el.select(); }
+        const f = document.querySelector(`article.card[data-card="${CSS.escape(c.id)}"] .name-in`);
+        if (f) { f.focus(); f.select(); }
       });
     },
-    renameKey(e) {
-      if (e.key === 'Enter') { e.preventDefault(); this.finishRename(true); }
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.finishRename(false); }
+    // Enter or F2 on the focused title or pill starts editing.
+    nameKey(e, c, what) {
+      if (e.key !== 'Enter' && e.key !== 'F2') return;
+      e.preventDefault();
+      this.startRename(c, what, e);
     },
-    finishRename(save) {
+    // The second click of a double-click that opened the field keeps the
+    // whole name selected instead of picking one word.
+    renameDown(e) {
+      const r = this.ui.rename;
+      if (r && e.detail > 1 && Date.now() - r.t0 < 700) { e.preventDefault(); e.target.select(); }
+    },
+    renameKey(e) {
+      if (e.key === 'Enter') { e.preventDefault(); this.finishRename(true, true); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.finishRename(false, true); }
+    },
+    finishRename(save, byKey) {
       const r = this.ui.rename;
       if (!r) return;
       this.ui.rename = null;
+      // Ended from the keyboard: focus goes back to what was renamed.
+      if (byKey && r.kb) {
+        this.$nextTick(() => {
+          const card = document.querySelector(`article.card[data-card="${CSS.escape(r.id)}"]`);
+          const back = card && card.querySelector(r.what === 'pill' ? '.pill-ed' : '.t-name');
+          if (back) back.focus({ preventScroll: true });
+        });
+      }
       const name = String(r.value || '').replace(/\s+/g, ' ').trim();
       if (!save || name === r.was) return;
       const c = this.allCards.find((x) => x.id === r.id);

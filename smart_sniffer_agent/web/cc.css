@@ -16,6 +16,7 @@
   --paper: #f1f1f1;     /* main type */
   --grey: #bdbdbd;      /* secondary type */
   --dim: #8f8f8f;       /* muted type, lowest grey used for text */
+  --edit-line: #9a9a9a; /* dashed hint under a name that can be renamed */
   --ha: #03a9f4;
   --att: #cc6b63;
   --maybe: #cc9f52;
@@ -125,32 +126,41 @@ p.sec-label { margin: 22px 0 10px; }
 .c-title { margin: 0; font-size: 0.98rem; font-weight: 650; line-height: 1.3; overflow-wrap: anywhere;
            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .c-tags { display: flex; align-items: center; gap: 6px; padding-top: 1px; }
-/* Rename in place: a pencil just right of the title (and after a field
-   agent's pill) shows while the pointer is on the card, dimmed like the
-   other controls; on a touch screen it rests faint. Double-click works too.
-   The field takes the title's own font and line, so nothing moves. */
-.c-name { display: flex; align-items: flex-start; gap: 2px; min-width: 0; }
+/* Rename in place, no pencils. The pointer on the name itself (not the
+   card) gives a dashed underline and a text cursor; a click opens a field
+   with the title's own font and line, and a solid line across the title's
+   width. A machine pill a field agent owns turns its border dashed under
+   the pointer and is typed in inside its own box. Fixed pills never
+   change. On a touch screen a tap starts editing; there are no hover
+   states. Keyboard: Tab to the name or pill, Enter or F2. */
+.c-name { display: flex; align-items: flex-start; min-width: 0; }
 .c-name .c-title { flex: 0 1 auto; min-width: 0; }
-.pencil { flex: none; background: none; border: 0; padding: 3px; margin: 0 0 0 2px; color: var(--dim); cursor: pointer;
-          line-height: 0; border-radius: 3px; opacity: 0; transition: opacity 0.15s ease; }
-.pencil svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
-.card:hover .c-name .pencil, .card .c-tags:hover .p-pen { opacity: 0.6; }
-.pencil:hover, .card .pencil:hover, .pencil:focus-visible { opacity: 1; color: var(--paper); }
-.p-pen { margin: 0 -3px 0 -4px; }
-@media (hover: none) {
-  .pencil, .card:hover .c-name .pencil, .card .c-tags:hover .p-pen { opacity: 0.3; }
-  .pencil:active, .pencil:focus-visible { opacity: 1; }
+.t-name { border-radius: 2px; text-decoration: none; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.t-name:focus { outline: none; }
+.t-name:focus-visible { outline: 2px solid var(--paper); outline-offset: 2px; }
+@media (hover: hover) {
+  .t-name:hover { cursor: text; text-decoration: underline dashed var(--edit-line); text-decoration-thickness: 1px; }
+  .pill-ed:hover { cursor: text; border-style: dashed; border-color: var(--edit-line); color: #d9d9d9; }
 }
+.name-box { display: block; flex: 1 1 auto; min-width: 0; }
 .name-in { display: block; width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent;
-           color: var(--paper); font: inherit; outline: none; box-shadow: inset 0 -1px 0 var(--grey); }
-.name-in.c-title { font-size: 0.98rem; font-weight: 650; line-height: 1.3; height: 1.3em; font-family: var(--sans); }
-.name-in.pill { width: 14ch; max-width: 160px; color: var(--paper); text-transform: uppercase; box-shadow: none;
-                border: 1px solid var(--grey); padding: 1px 6px; line-height: inherit; }
-.pill-ed { cursor: text; }
+           color: var(--paper); font: inherit; outline: none; box-shadow: none; caret-color: #fff; }
+.name-in.c-title { font-size: 0.98rem; font-weight: 650; line-height: 1.3; height: 1.3em; font-family: var(--sans);
+                   box-shadow: inset 0 -1px 0 var(--paper); }
+.name-in::selection { background: #3d3d3d; color: #fff; }
+.pill-ed:focus { outline: none; }
+.pill-ed:focus-visible { outline: 2px solid var(--paper); outline-offset: 2px; }
+.pill.pill-edit { border-color: #fff; border-style: solid; background: var(--panel-2); padding: 0 2px; max-width: none; }
+.pill-edit .name-in { height: 100%; text-align: center; font: inherit; letter-spacing: inherit; line-height: inherit;
+                      text-transform: uppercase; color: var(--paper); }
 .c-model { margin: 0 0 6px; font-size: 0.74rem; color: var(--dim); overflow-wrap: anywhere; }
 .exit-slot { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
-.pill { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.04em; color: var(--grey); border: 1px solid var(--rule-2);
-        border-radius: 0; padding: 1px 6px; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+/* Every pill, editable or fixed, has the same box: height, min-width,
+   centred text, flush right in the head, so pills line up across the grid. */
+.pill { display: block; box-sizing: border-box; height: 18px; min-width: 76px; max-width: 140px; padding: 0 6px;
+        font-family: var(--mono); font-size: 0.66rem; line-height: 16px; letter-spacing: 0.04em; text-align: center;
+        color: var(--grey); border: 1px solid var(--rule-2); border-radius: 0;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Exit icon: blue when the device is in Home Assistant (opens it there);
    grey outline when the integration is installed and the device is not in
@@ -465,7 +475,6 @@ table.attrs .raw-in:focus { background: #000; color: var(--paper); border-radius
   .icon { padding: 8px; margin: -5px -3px; }
   .icon.armed { padding: 2px 6px; margin: 0; }
   .icon.armed::after { content: ""; position: absolute; inset: -9px -4px; }
-  .pencil { padding: 8px; margin: -6px -4px -6px -2px; }
   .grip { padding: 8px 6px; margin: -6px -2px -6px -10px; }
   .exit { padding: 9px; margin: -9px; }
   .chev { padding: 8px 4px; margin-top: -6px; margin-bottom: -6px; }

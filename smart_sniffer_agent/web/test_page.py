@@ -840,34 +840,77 @@ def _font(loc) -> list:
     return loc.evaluate("e => ['fontSize', 'fontWeight', 'fontFamily', 'lineHeight'].map((k) => getComputedStyle(e)[k])")
 
 
+_DECO = "e => { const s = getComputedStyle(e); return [s.textDecorationLine, s.textDecorationStyle, s.textDecorationColor]; }"
+_BOXES = """e => ['.exit-slot', '.pill', '.c-where'].map((s) => {
+    const r = e.querySelector(s).getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })"""
+
+
+def _same_boxes(a, b):
+    return all(abs(x - y) <= 1 for ra, rb in zip(a, b) for x, y in zip(ra, rb))
+
+
+def test_rename_has_no_pencils_and_hints_on_the_name_only(open_page):
+    p = open_page()
+    assert p.page.locator(".pencil, use[href='#pencil'], symbol#pencil").count() == 0
+    c = by_id(p, NAS_MAYBE)
+    name = c.locator(".t-name")
+    # The pointer on the card, away from the title: nothing changes.
+    box = c.locator(".c-vitals").bounding_box()
+    p.page.mouse.move(box["x"] + 4, box["y"] + 4)
+    p.page.wait_for_timeout(200)
+    assert name.evaluate(_DECO)[0] == "none"
+    # On the name itself: a dashed underline in #9a9a9a and a text cursor.
+    name.hover()
+    p.page.wait_for_timeout(200)
+    assert name.evaluate(_DECO) == ["underline", "dashed", "rgb(154, 154, 154)"]
+    assert name.evaluate("e => getComputedStyle(e).cursor") == "text"
+    # On an editable pill: dashed border, brighter text, same box.
+    pill = c.locator(".pill")
+    p.page.mouse.move(2, 2)
+    p.page.wait_for_timeout(200)
+    rest = pill.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color]")
+    b0 = pill.bounding_box()
+    pill.hover()
+    p.page.wait_for_timeout(200)
+    hov = pill.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color, getComputedStyle(e).cursor]")
+    assert rest[0] == "solid" and hov[0] == "dashed" and hov[1] != rest[1] and hov[2] == "text"
+    assert pill.bounding_box() == b0
+    # A fixed pill has no hover change.
+    for cid in (NVME, REP_NVME, NAS_POOL, NAS_FS):
+        f = by_id(p, cid).locator(".pill")
+        p.page.mouse.move(2, 2)
+        p.page.wait_for_timeout(150)
+        before = f.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color, getComputedStyle(e).cursor]")
+        f.hover()
+        p.page.wait_for_timeout(150)
+        assert f.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color, getComputedStyle(e).cursor]") == before
+
+
 def test_rename_card_in_place(open_page):
     p = open_page()
     c = by_id(p, NAS_MAYBE)
     title = c.locator("h3.c-title")
     original = title.inner_text()
-    pen = c.locator(".c-name .pencil")
     p.page.mouse.move(2, 2)
-    p.page.wait_for_timeout(250)
-    assert pen.evaluate(OPACITY) == 0
-    box = c.locator(".c-vitals").bounding_box()
-    p.page.mouse.move(box["x"] + 4, box["y"] + 4)
-    p.page.wait_for_timeout(250)
-    assert 0.3 <= pen.evaluate(OPACITY) < 1  # shown, dimmed like the other controls
-    # The pencil sits just right of the title.
-    t, b = title.bounding_box(), pen.bounding_box()
-    assert 0 <= b["x"] - (t["x"] + t["width"]) < 8
-    font, height = _font(title), _head_h(c)
-    pen.click()
+    font, height, rest = _font(title), _head_h(c), c.evaluate(_BOXES)
+    c.locator(".t-name").click()
     field = c.locator("input.name-in.c-title")
     assert field.evaluate("e => document.activeElement === e")
     assert field.input_value() == original
     assert _font(field) == font and abs(_head_h(c) - height) < 0.5  # same font, nothing moves
+    assert _same_boxes(c.evaluate(_BOXES), rest)  # exit icon, pill and the line below stay put
+    # A solid line across the full title width.
+    line = field.evaluate("e => getComputedStyle(e).boxShadow")
+    assert "inset" in line and "-1px" in line
+    assert abs(field.bounding_box()["width"] - c.locator(".c-name").bounding_box()["width"]) <= 1
     # Esc cancels.
     field.fill("Nope")
     p.page.keyboard.press("Escape")
     assert title.inner_text() == original and not p.api("PUT", r"/cards/.+/name$")
-    # Double-click the title, Enter saves.
+    assert _same_boxes(c.evaluate(_BOXES), rest)
+    # Double-click the title: the whole name stays selected; Enter saves.
     title.dblclick()
+    assert field.evaluate("e => e.selectionStart === 0 && e.selectionEnd === e.value.length")
     field.fill("Scratch disk")
     p.page.keyboard.press("Enter")
     assert title.inner_text() == "Scratch disk"
@@ -886,7 +929,7 @@ def test_rename_card_in_place(open_page):
     p.page.wait_for_timeout(600)
     assert title.inner_text() == "Scratch disk"
     # Clicking away saves; empty restores the original and drops the Model line.
-    pen.click()
+    c.locator(".t-name").click()
     field.fill("")
     p.page.locator("header.app-head").click()
     assert title.inner_text() == original
@@ -895,24 +938,119 @@ def test_rename_card_in_place(open_page):
     assert c.locator(".details .c-model").count() == 0
 
 
+def test_rename_pill_in_place_without_moving(open_page):
+    p = open_page()
+    c = by_id(p, NAS_MAYBE)
+    pill = c.locator(".pill")
+    p.page.mouse.move(2, 2)
+    b0, rest = pill.bounding_box(), c.evaluate(_BOXES)
+    pill.click()
+    field = c.locator(".pill-edit input.name-in")
+    assert field.evaluate("e => document.activeElement === e")
+    edit = c.locator(".pill-edit")
+    b1 = edit.bounding_box()
+    assert all(abs(b0[k] - b1[k]) <= 1 for k in ("x", "y", "width", "height"))
+    assert _same_boxes(c.evaluate(_BOXES)[:1], rest[:1]) and _same_boxes(c.evaluate(_BOXES)[2:], rest[2:])
+    assert edit.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).borderTopColor]") == ["solid", "rgb(255, 255, 255)"]
+    assert field.evaluate("e => getComputedStyle(e).textAlign") == "center"
+    assert _font(field)[:3] == _font(edit)[:3]
+    fb = field.bounding_box()
+    assert fb["x"] >= b1["x"] and fb["x"] + fb["width"] <= b1["x"] + b1["width"] + 0.5
+    p.page.keyboard.press("Escape")
+    assert pill.bounding_box() == b0
+
+
+def test_pills_line_up_across_a_row(open_page):
+    p = open_page()
+    rows = p.page.eval_on_selector_all(".grid > article.card", """els => {
+        const rows = {};
+        for (const c of els) {
+            const k = Math.round(c.getBoundingClientRect().top), r = c.getBoundingClientRect(),
+                  q = c.querySelector('.pill').getBoundingClientRect();
+            (rows[k] = rows[k] || []).push([r.right - q.right, q.top - r.top, q.height, c.querySelector('.pill').classList.contains('pill-ed')]);
+        }
+        return Object.values(rows); }""")
+    mixed = 0
+    for row in rows:
+        assert max(x[0] for x in row) - min(x[0] for x in row) <= 1  # same right edge in its card
+        assert max(x[1] for x in row) - min(x[1] for x in row) <= 1  # same top
+        assert len({round(x[2]) for x in row}) == 1  # same height
+        mixed += len({x[3] for x in row}) == 2
+    assert mixed  # at least one row has editable and fixed pills side by side
+    widths = p.page.eval_on_selector_all(".grid .pill", "els => els.map((e) => e.getBoundingClientRect().width)")
+    assert min(widths) >= 75.5
+
+
+def test_rename_by_tap_and_keyboard(browser, server, open_page):
+    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
+    ctx = browser.new_context(viewport={"width": 390, "height": 900}, has_touch=True, is_mobile=True)
+    try:
+        page = ctx.new_page()
+        page.goto(server + "/")
+        page.wait_for_selector(f'article.card[data-card="{NAS_MAYBE}"] .t-name')
+        c = page.locator(f'article.card[data-card="{NAS_MAYBE}"]')
+        assert page.evaluate("matchMedia('(hover: none)').matches")
+        c.locator(".t-name").tap()
+        assert c.locator("input.name-in.c-title").count() == 1
+        page.keyboard.press("Escape")
+        c.locator(".pill").tap()
+        assert c.locator(".pill-edit input.name-in").count() == 1
+        page.keyboard.press("Escape")
+    finally:
+        ctx.close()
+    p = open_page()
+    c = by_id(p, NAS_MAYBE)
+    name = c.locator(".t-name")
+    name.focus()
+    p.page.keyboard.press("Enter")
+    field = c.locator("input.name-in.c-title")
+    assert field.evaluate("e => document.activeElement === e")
+    p.page.keyboard.press("Escape")
+    assert name.evaluate("e => document.activeElement === e")  # focus comes back
+    p.page.keyboard.press("F2")
+    assert field.count() == 1
+    p.page.keyboard.press("Escape")
+    # Tab reaches the editable pill; Enter edits it. A fixed pill is not a stop.
+    pill = c.locator(".pill")
+    assert pill.get_attribute("tabindex") == "0"
+    assert by_id(p, NVME).locator(".pill").get_attribute("tabindex") is None
+    pill.focus()
+    p.page.keyboard.press("Enter")
+    assert c.locator(".pill-edit input.name-in").count() == 1
+    p.page.keyboard.press("Escape")
+    # A mouse click shows no focus ring; keyboard focus does.
+    p.page.mouse.move(2, 2)
+    p.page.locator("header.app-head").click()
+    name.click()
+    p.page.wait_for_function("() => document.activeElement && document.activeElement.matches('input.name-in')")
+    p.page.keyboard.press("Escape")
+    assert name.evaluate("e => getComputedStyle(e).outlineStyle") == "none"
+    p.page.locator("header.app-head").click()
+    name.focus()
+    p.page.keyboard.press("Shift+Tab")
+    p.page.keyboard.press("Tab")
+    assert name.evaluate("e => document.activeElement === e && e.matches(':focus-visible')")
+    assert name.evaluate("e => getComputedStyle(e).outlineStyle") == "solid"
+
+
 def test_rename_pools_filesystems_and_fixed_pills(open_page):
     p = open_page()
     pool = by_id(p, NAS_POOL)
-    pool.locator("h3.c-title").dblclick()
+    pool.locator(".t-name").dblclick()
     pool.locator("input.name-in").fill("Media pool")
     p.page.keyboard.press("Enter")
     assert pool.locator("h3.c-title").inner_text() == "Media pool"
     pool.locator(".chev").click()
     assert pool.locator(".details .c-model").inner_text() == "Pool: tank"
     fs = by_id(p, NAS_FS)
-    fs.locator("h3.c-title").dblclick()
+    fs.locator(".t-name").dblclick()
     fs.locator("input.name-in").fill("Scratch")
     p.page.keyboard.press("Enter")
     assert fs.locator("h3.c-title").inner_text() == "Scratch"
     # HAOS, REPLICA, ZFS POOL and FILESYSTEM pills are fixed.
     for cid in (NVME, REP_NVME, NAS_POOL, NAS_FS):
         c = by_id(p, cid)
-        assert c.locator(".c-tags .pencil").count() == 0
+        assert c.locator(".pill").get_attribute("tabindex") is None
         c.locator(".pill").dblclick()
         assert c.locator("input.name-in").count() == 0
 
@@ -926,7 +1064,7 @@ def test_rename_machine_pill_follows_on_every_card(open_page):
     pill = c.locator(".pill")
     assert pill.inner_text() == "NAS-01"
     pill.dblclick()
-    field = c.locator("input.name-in.pill")
+    field = c.locator(".pill-edit input.name-in")
     assert field.input_value() == "nas-01"
     field.fill("Basement NAS")
     p.page.keyboard.press("Enter")
@@ -936,15 +1074,15 @@ def test_rename_machine_pill_follows_on_every_card(open_page):
     for cid in drives:
         assert by_id(p, cid).locator(".pill").inner_text() == "BASEMENT NAS"
     assert by_id(p, NAS_POOL).locator(".pill").inner_text() == "ZFS POOL"
-    # The pencil after the pill does the same; empty restores the agent's name.
-    c.locator(".c-tags .pencil").click()
-    c.locator("input.name-in.pill").fill("")
+    # A single click does the same; empty restores the agent's name.
+    c.locator(".pill").click()
+    c.locator(".pill-edit input.name-in").fill("")
     p.page.keyboard.press("Enter")
     for cid in drives:
         assert by_id(p, cid).locator(".pill").inner_text() == "NAS-01"
     # A machine with nothing to show is renamed from its title.
     pi = by_id(p, BACKUP_PI)
-    pi.locator("h3.c-title").dblclick()
+    pi.locator(".t-name").dblclick()
     pi.locator("input.name-in").fill("Pi in the garage")
     p.page.keyboard.press("Enter")
     assert pi.locator("h3.c-title").inner_text() == "Pi in the garage"
@@ -956,7 +1094,7 @@ def test_rename_syncs_with_home_assistant(open_page, server):
     c = by_id(p, NVME)  # in Home Assistant (blue exit icon)
     assert c.locator("a.exit").count() == 1
     original = c.locator("h3.c-title").inner_text()
-    c.locator("h3.c-title").dblclick()
+    c.locator(".t-name").dblclick()
     c.locator("input.name-in").fill("Boot NVMe")
     p.page.keyboard.press("Enter")
     p.page.wait_for_timeout(300)
@@ -981,7 +1119,7 @@ def test_rename_syncs_with_home_assistant(open_page, server):
 def test_rename_home_assistant_refuses(open_page):
     p = open_page("HA_NAME=fail")
     c = by_id(p, NVME)
-    c.locator("h3.c-title").dblclick()
+    c.locator(".t-name").dblclick()
     c.locator("input.name-in").fill("Boot NVMe")
     p.page.keyboard.press("Enter")
     note = c.locator(".act-note")
@@ -2076,27 +2214,30 @@ def test_screenshots(open_page):
         _trash(by_id(p, NAS_MAYBE)).click()
         _shot(p, "remove-armed", by_id(p, NAS_MAYBE))
         p.page.keyboard.press("Escape")
-        # Rename: the pencil on hover, the title as a field, a renamed card
-        # with its Model line, the machine pill as a field.
-        box = by_id(p, NAS_MAYBE).locator(".c-vitals").bounding_box()
-        p.page.mouse.move(box["x"] + 4, box["y"] + 4)
-        p.page.wait_for_timeout(250)
-        _shot(p, "rename-pencil-hover", by_id(p, NAS_MAYBE))
-        by_id(p, NAS_MAYBE).locator("h3.c-title").dblclick()
-        by_id(p, NAS_MAYBE).locator("input.name-in").fill("Scratch disk")
-        _shot(p, "rename-editing", by_id(p, NAS_MAYBE))
+        # Rename, as the approved mockup: at rest, pointer on the title,
+        # editing the title, pointer on the machine pill, editing the pill.
+        m = by_id(p, NAS_MAYBE)
+        p.page.mouse.move(2, 2)
+        p.page.evaluate("document.activeElement && document.activeElement.blur()")
+        _shot(p, "rename-1-rest", m)
+        m.locator(".t-name").hover()
+        _shot(p, "rename-2-title-hover", m)
+        m.locator(".t-name").click()
+        _shot(p, "rename-3-title-editing", m)
         p.page.keyboard.press("Escape")
-        by_id(p, BARRACUDA).locator("h3.c-title").dblclick()
+        m.locator(".pill").hover()
+        _shot(p, "rename-4-pill-hover", m)
+        m.locator(".pill").click()
+        _shot(p, "rename-5-pill-editing", m)
+        p.page.keyboard.press("Escape")
+        p.page.mouse.move(2, 2)
+        by_id(p, BARRACUDA).locator(".t-name").dblclick()
         by_id(p, BARRACUDA).locator("input.name-in").fill("Backup SATA")
         p.page.keyboard.press("Enter")
         by_id(p, BARRACUDA).locator(".chev").click()
         p.page.mouse.move(2, 2)
         _shot(p, "renamed-model-line", by_id(p, BARRACUDA))
         by_id(p, BARRACUDA).locator(".chev").click()
-        by_id(p, NAS_ATT).locator(".pill").dblclick()
-        by_id(p, NAS_ATT).locator("input.name-in").fill("Basement NAS")
-        _shot(p, "rename-pill-editing", by_id(p, NAS_ATT))
-        p.page.keyboard.press("Escape")
         rep = by_id(p, REP_FAILED)
         rep.locator(".chev").click()
         p.page.mouse.move(2, 2)
@@ -2137,7 +2278,7 @@ def test_screenshots(open_page):
         p = open_page("HA=not_installed", width)
         _shot(p, "exit-absent", by_id(p, NVME))
         p = open_page("HA_NAME=fail", width)
-        by_id(p, NVME).locator("h3.c-title").dblclick()
+        by_id(p, NVME).locator(".t-name").dblclick()
         by_id(p, NVME).locator("input.name-in").fill("Boot NVMe")
         p.page.keyboard.press("Enter")
         by_id(p, NVME).locator(".act-note").wait_for(state="visible")
