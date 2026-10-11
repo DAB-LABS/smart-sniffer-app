@@ -111,7 +111,7 @@
               <template x-if="health(c) === 'ok'"><span class="h-ok">Health OK</span></template>
               <template x-if="health(c) === 'unknown'"><span class="h-unk"><span class="ghost-dot" aria-hidden="true"></span>Health not known</span></template>
               <template x-if="isOpen(c) && canTune(c)">
-                <button class="tune" type="button" :aria-pressed="thrEditing(c) ? 'true' : 'false'" :aria-label="thrEditing(c) ? 'Stop editing thresholds' : 'Edit thresholds'" title="Thresholds" @mousedown.prevent="$el.blur()" @click="toggleThr(c)"><svg aria-hidden="true"><use href="#adjust"/></svg></button>
+                <button class="tune" type="button" :aria-pressed="thrEditing(c) ? 'true' : 'false'" :aria-busy="thrWaiting(c) ? 'true' : null" :style="thrWaiting(c) ? 'opacity: 0.5' : null" :aria-label="thrEditing(c) ? 'Stop editing thresholds' : 'Edit thresholds'" title="Thresholds" @mousedown.prevent="$el.blur()" @click="toggleThr(c)"><svg aria-hidden="true"><use href="#adjust"/></svg></button>
               </template>
               <template x-if="hasDetails(c)">
                 <button class="chev" :class="health(c)" type="button" :aria-expanded="isOpen(c) ? 'true' : 'false'" :aria-label="isOpen(c) ? 'Hide details' : 'Details'" title="Details" @mousedown.prevent="$el.blur()" @click="toggleOpen(c)"><svg aria-hidden="true"><use href="#chevron"/></svg></button>
@@ -154,9 +154,8 @@
                 <!-- One table: the attributes (or the NVMe health log, or the
                      watched rows), flagged rows in the state colour, notes muted
                      after the name. -->
-                <template x-if="thrEditing(c)">
+                <template x-if="thrShown(c)">
                   <div class="thr" role="group" aria-label="Thresholds">
-                    <template x-if="thrS.loading"><p class="c-note">Reading the thresholds.</p></template>
                     <template x-if="thrRows(c).length">
                       <div class="table-wrap">
                         <table class="attrs thr-t">
@@ -188,7 +187,7 @@
                     </div>
                   </div>
                 </template>
-                <template x-if="!thrEditing(c) && detailTable(c.it).rows.length">
+                <template x-if="!thrShown(c) && detailTable(c.it).rows.length">
                   <div class="table-wrap">
                     <table class="attrs" :class="detailTable(c.it).kind">
                       <thead>

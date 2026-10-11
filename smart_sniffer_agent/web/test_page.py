@@ -1796,6 +1796,50 @@ def test_page_polls_only_its_own_reads(open_page):
 
 # ── Thresholds ───────────────────────────────────────────────────────────────
 
+# Watches every card but one and the grid while that card goes in and out of
+# threshold edit mode: an element added to or removed from another card, a
+# style or class change on one, a change to the grid's children, or a busy
+# mark or the page's error line anywhere outside the card is recorded.
+# Text-only changes (the cards' "seen" clocks) are allowed.
+WATCH_OTHERS = """(cid) => {
+  const grid = document.querySelector('.grid');
+  const mine = grid.querySelector(`[data-card="${CSS.escape(cid)}"]`);
+  const seen = window.__seen = [];
+  const kids = [...grid.children];
+  const els = (list) => [...list].filter((n) => n.nodeType === 1).length;
+  const obs = [];
+  kids.filter((e) => e !== mine && e.dataset && e.dataset.card).forEach((e) => {
+    const o = new MutationObserver((ms) => ms.forEach((m) => {
+      if (m.type === 'childList' && (els(m.addedNodes) || els(m.removedNodes))) seen.push(`subtree ${e.dataset.card}`);
+      if (m.type === 'attributes' && m.target === e) seen.push(`${m.attributeName} ${e.dataset.card}`);
+    }));
+    o.observe(e, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+    obs.push(o);
+  });
+  const g = new MutationObserver((ms) => ms.forEach(() => seen.push('grid children')));
+  g.observe(grid, { childList: true });
+  obs.push(g);
+  let on = true;
+  const frame = () => {
+    if (!on) return;
+    const busy = [...document.querySelectorAll('[aria-busy="true"]')].filter((e) => !mine.contains(e));
+    if (busy.length) seen.push('busy outside the card');
+    const err = document.querySelector('.page-err');
+    if (err && err.offsetParent) seen.push('page error line');
+    if (!mine.querySelector('table.attrs')) seen.push('the card lost its table');
+    requestAnimationFrame(frame);
+  };
+  frame();
+  window.__stop = () => {
+    on = false;
+    obs.forEach((o) => o.disconnect());
+    const now = [...grid.children];
+    if (now.length !== kids.length || now.some((e, i) => e !== kids[i])) seen.push('grid children');
+    return seen;
+  };
+}"""
+
+
 def _edit(p: Page, cid: str):
     c = by_id(p, cid)
     if c.locator(".tune").count() == 0:
@@ -1885,6 +1929,57 @@ def test_threshold_edit_mode(open_page):
     p = open_page("HA_SELF=0")
     c = _edit(p, BARRACUDA)
     assert c.locator(".thr-where").inner_text() == "Saved in this app"
+
+
+def test_threshold_edit_touches_only_its_card(open_page):
+    """Opening a drive's Details reads its thresholds in the background, so
+    edit mode opens with no request and no wait; going in and out of it
+    changes nothing on any other card, the grid or the page."""
+    p = open_page()
+    gets = lambda: len(p.api("GET", r"/thresholds$"))  # noqa: E731
+    assert gets() == 0
+    c = by_id(p, BARRACUDA)
+    c.locator(".chev").click()
+    p.page.wait_for_function(f"() => Alpine.$data(document.body).thrCache[{json.dumps(BARRACUDA)}]?.data")
+    assert gets() == 1
+    p.page.evaluate(WATCH_OTHERS, BARRACUDA)
+    c.get_by_role("button", name="Edit thresholds").click()
+    # In edit mode at once: the table is there before anything could be read.
+    assert c.locator("table.thr-t").count() == 1
+    assert c.locator(".tune").get_attribute("aria-busy") is None
+    p.page.wait_for_timeout(200)
+    c.get_by_role("button", name="Stop editing thresholds").click()
+    assert c.locator("table.thr-t").count() == 0
+    p.page.wait_for_timeout(300)
+    assert p.page.evaluate("window.__stop()") == []
+    assert gets() == 1
+    # Not read yet (the background read failed): edit mode reads them, the
+    # card keeps its table meanwhile, the tune button shows the wait, and
+    # still nothing else changes.
+    p = open_page()
+    gets = lambda: len(p.api("GET", r"/thresholds$"))  # noqa: E731
+    thr = re.compile(r".*/cards/[^/]+/thresholds$")
+    p.page.route(thr, lambda r: r.abort() if r.request.method == "GET" else r.fallback())
+    c = by_id(p, BARRACUDA)
+    c.locator(".chev").click()
+    p.page.wait_for_function(f"() => Alpine.$data(document.body).thrCache[{json.dumps(BARRACUDA)}]?.err")
+    p.page.unroute(thr)
+    held = []
+    p.page.route(thr, lambda r: held.append(r))
+    p.page.evaluate(WATCH_OTHERS, BARRACUDA)
+    c.get_by_role("button", name="Edit thresholds").click()
+    p.page.wait_for_function("() => document.querySelector('.tune[aria-busy=\"true\"]')")
+    assert c.locator("table.attrs:not(.thr-t)").count() == 1 and c.locator("table.thr-t").count() == 0
+    assert c.locator(".tune").evaluate("e => getComputedStyle(e).opacity") == "0.5"
+    p.page.wait_for_timeout(200)
+    for r in held:
+        r.fallback()
+    c.locator("table.thr-t").wait_for()
+    assert c.locator(".tune").get_attribute("aria-busy") is None
+    c.get_by_role("button", name="Stop editing thresholds").click()
+    p.page.wait_for_timeout(300)
+    assert p.page.evaluate("window.__stop()") == []
+    assert gets() == 2
 
 
 PAPER = "rgb(241, 241, 241)"

@@ -118,6 +118,49 @@ def app(static_dir):
     STATE.reset()
 
 
+# Watches every card but one and the grid while that card goes in and out of
+# threshold edit mode: an element added to or removed from another card, a
+# style or class change on one, a change to the grid's children, or a busy
+# mark or the page's error line anywhere outside the card is recorded.
+# Text-only changes (the cards' "seen" clocks) are allowed.
+WATCH_OTHERS = """(cid) => {
+  const grid = document.querySelector('.grid');
+  const mine = grid.querySelector(`[data-card="${CSS.escape(cid)}"]`);
+  const seen = window.__seen = [];
+  const kids = [...grid.children];
+  const els = (list) => [...list].filter((n) => n.nodeType === 1).length;
+  const obs = [];
+  kids.filter((e) => e !== mine && e.dataset && e.dataset.card).forEach((e) => {
+    const o = new MutationObserver((ms) => ms.forEach((m) => {
+      if (m.type === 'childList' && (els(m.addedNodes) || els(m.removedNodes))) seen.push(`subtree ${e.dataset.card}`);
+      if (m.type === 'attributes' && m.target === e) seen.push(`${m.attributeName} ${e.dataset.card}`);
+    }));
+    o.observe(e, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+    obs.push(o);
+  });
+  const g = new MutationObserver((ms) => ms.forEach(() => seen.push('grid children')));
+  g.observe(grid, { childList: true });
+  obs.push(g);
+  let on = true;
+  const frame = () => {
+    if (!on) return;
+    const busy = [...document.querySelectorAll('[aria-busy="true"]')].filter((e) => !mine.contains(e));
+    if (busy.length) seen.push('busy outside the card');
+    const err = document.querySelector('.page-err');
+    if (err && err.offsetParent) seen.push('page error line');
+    if (!mine.querySelector('table.attrs')) seen.push('the card lost its table');
+    requestAnimationFrame(frame);
+  };
+  frame();
+  window.__stop = () => {
+    on = false;
+    obs.forEach((o) => o.disconnect());
+    const now = [...grid.children];
+    if (now.length !== kids.length || now.some((e, i) => e !== kids[i])) seen.push('grid children');
+    return seen;
+  };
+}"""
+
 class Tab:
     """One browser profile on the proxy, with the page's errors and failed
     requests collected."""
@@ -334,3 +377,37 @@ def test_threshold_accept_fills_and_save_writes(tab, app):
     finally:
         SELF.drives = drives
         STATE.options.pop("thresholds", None)
+
+
+def test_threshold_edit_touches_only_its_card(tab, app):
+    """Against the real proxy: the thresholds are read when Details opens,
+    edit mode then makes no request, and going in and out of it leaves every
+    other card, the grid and the page as they were."""
+    drives = SELF.drives
+    SELF.drives = [simple_drive("sda", "HAOS-DISK-1", {"Reallocated_Sector_Ct": 7})]
+    gets: list[str] = []
+    tab.page.on("request", lambda r: "/thresholds" in r.url and r.method == "GET" and gets.append(r.url))
+    try:
+        tab.load()
+        cid = "self|HAOS-DISK-1"
+        card = tab.card(cid)
+        card.locator(".h-att").wait_for(timeout=10000)
+        for serial in ("NAS-A", "NAS-B"):
+            tab.card(f"{app.nas}|{serial}").wait_for(timeout=10000)
+        assert gets == []
+        card.locator(".chev").click()
+        tab.page.wait_for_function(f"() => Alpine.$data(document.body).thrCache[{json.dumps(cid)}]?.data",
+                                   timeout=10000)
+        assert len(gets) == 1
+        tab.page.evaluate(WATCH_OTHERS, cid)
+        card.get_by_role("button", name="Edit thresholds").click()
+        assert card.locator("table.thr-t").count() == 1
+        tab.page.wait_for_timeout(200)
+        card.get_by_role("button", name="Stop editing thresholds").click()
+        assert card.locator("table.thr-t").count() == 0
+        tab.page.wait_for_timeout(300)
+        assert tab.page.evaluate("window.__stop()") == []
+        assert len(gets) == 1
+        assert not tab.errors, tab.errors
+    finally:
+        SELF.drives = drives

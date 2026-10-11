@@ -45,8 +45,13 @@ function block24(octets) {
 
 function cc() {
   // Row heights while a card is open, kept off the reactive state: each
-  // open card's closed height at the card width it was measured at.
-  const rows = { closedH: {}, busy: false, queued: false };
+  // open card's closed height at the card width it was measured at, and
+  // each closed card's content height when its row was last pinned.
+  const rows = { closedH: {}, sig: {}, busy: false, queued: false, full: false, check: new Set() };
+  // Thresholds reads in flight, by card id, and a count per card that a
+  // save moves on, so a read begun before the save is not kept.
+  const thrReads = new Map();
+  const thrSeq = new Map();
   return {
     info: null,
     self: null,
@@ -84,6 +89,8 @@ function cc() {
     drag: null,
     dragOrder: null,
     ui: { open: {}, cols: 1, confirm: null, arm: null, rename: null, pw: {}, pwState: {}, busy: {}, note: {}, thr: null, copied: '', copiedText: '' },
+    // Each drive's thresholds as last read, by card id: { data, err }.
+    thrCache: {},
     add: {
       open: false, block: '', port: '9099', scan: null, scanId: null, last: null, wide: null, error: '',
       ticks: {}, manualHost: '', manualPort: '9099', manualRows: [], checkMsg: null, checking: false,
@@ -420,16 +427,48 @@ function cc() {
     // beside it shrinks or grows. Rows with no card open stretch as usual.
     // Rows are read from the page (cards that share a top), so this holds
     // at any column count, after a drag and after a resize.
+    // Every row is pinned again only when the cards themselves change (added,
+    // removed, moved, opened, closed) or the grid's width does. A change
+    // inside an open card leaves its row's pins as they are; one inside a
+    // closed card pins its row again, and only when the card's size changed.
     watchRows() {
       const grid = document.querySelector('.grid');
       if (!grid) return;
-      const later = () => {
+      const later = (full, cards) => {
+        if (full) rows.full = true;
+        (cards || []).forEach((e) => rows.check.add(e));
         if (rows.queued) return;
         rows.queued = true;
-        requestAnimationFrame(() => { rows.queued = false; this.pinRows(); });
+        requestAnimationFrame(() => {
+          const all = rows.full;
+          const check = [...rows.check];
+          rows.queued = false;
+          rows.full = false;
+          rows.check.clear();
+          if (all) this.pinRows();
+          else this.checkRows(check);
+        });
       };
-      if (window.ResizeObserver) new ResizeObserver(later).observe(grid);
-      new MutationObserver(later).observe(grid, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+      let width = null;
+      if (window.ResizeObserver) {
+        new ResizeObserver(() => {
+          const w = this.cardW(grid);
+          if (w !== width) { width = w; later(true); } else later(false, this.gridItems());
+        }).observe(grid);
+      }
+      const cardOf = (n) => {
+        const e = n.nodeType === 1 ? n : n.parentElement;
+        return e && e.closest ? e.closest('.grid > [data-card]') : null;
+      };
+      new MutationObserver((ms) => {
+        const cards = new Set();
+        for (const m of ms) {
+          if (m.target === grid || (m.type === 'attributes' && m.target.parentElement === grid)) { later(true); return; }
+          const card = cardOf(m.target);
+          if (card && !card.classList.contains('open')) cards.add(card);
+        }
+        if (cards.size) later(false, [...cards]);
+      }).observe(grid, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
     },
     gridItems() {
       const grid = document.querySelector('.grid');
@@ -459,7 +498,12 @@ function cc() {
         this.remeasure();
         return;
       }
-      // Natural heights first (all writes, then all reads), then the rows.
+      this.pinGroup(items);
+    },
+    // The rows of these cards, pinned: natural heights first (all writes,
+    // then all reads), then each row.
+    pinGroup(items) {
+      const isOpen = (e) => e.classList.contains('open');
       items.forEach((e) => { e.style.height = ''; e.style.alignSelf = 'start'; });
       const got = items.map((e) => ({
         e, open: isOpen(e), top: Math.round(e.offsetTop),
@@ -477,6 +521,39 @@ function cc() {
           if (g.open) { g.e.style.alignSelf = ''; return; }
           g.e.style.height = h + 'px';
         });
+      });
+      got.forEach((g) => { if (!g.open) rows.sig[g.e.dataset.card] = this.contentH(g.e); });
+    },
+    // A card's content height, read without touching its style: what its
+    // children take, the stretching spacer left out. It changes only when
+    // the card's own size would.
+    contentH(e) {
+      let h = 0;
+      for (const k of e.children) {
+        if (k.tagName === 'TEMPLATE' || k.classList.contains('c-spacer')) continue;
+        h += k.getBoundingClientRect().height;
+      }
+      return Math.round(h * 2) / 2;
+    },
+    // Closed cards whose content changed: their rows are pinned again, only
+    // where one of them changed size and the row has an open card.
+    checkRows(cards) {
+      if (rows.busy) return;
+      const items = this.gridItems();
+      const isOpen = (e) => e.classList.contains('open');
+      if (!items.some(isOpen)) return;
+      if (items.some((e) => isOpen(e) && !this.knownClosed(e))) { this.remeasure(); return; }
+      const tops = new Set();
+      cards.forEach((e) => {
+        if (!e.isConnected || isOpen(e) || !e.getClientRects().length) return;
+        const h = this.contentH(e);
+        if (rows.sig[e.dataset.card] === h) return;
+        rows.sig[e.dataset.card] = h;
+        tops.add(Math.round(e.offsetTop));
+      });
+      tops.forEach((top) => {
+        const row = items.filter((e) => Math.round(e.offsetTop) === top);
+        if (row.some(isOpen)) this.pinGroup(row);
       });
     },
     knownClosed(e) {
@@ -739,6 +816,8 @@ function cc() {
       }
       this.ui.open[c.id] = !this.ui.open[c.id];
       if (!this.ui.open[c.id] && this.thrEditing(c)) this.ui.thr = null;
+      // Read its thresholds now, so edit mode opens with them at hand.
+      if (this.ui.open[c.id] && this.canTune(c)) this.thrRead(c);
     },
 
     // The problem window: every flagged row, no paging.
@@ -902,15 +981,44 @@ function cc() {
     thrEditing(c) {
       return !!(this.ui.thr && this.ui.thr.id === c.id);
     },
-    async toggleThr(c) {
+    // Edit mode shows in place of the card's table once the thresholds are
+    // at hand; while they are still being read the table stays and only the
+    // tune button shows it is waiting.
+    thrShown(c) {
+      return this.thrEditing(c) && !this.ui.thr.loading;
+    },
+    thrWaiting(c) {
+      return this.thrEditing(c) && this.ui.thr.loading;
+    },
+    // Read a drive's thresholds into its own cache entry; one read at a time
+    // per card. Nothing else on the page changes.
+    thrRead(c) {
+      if (thrReads.has(c.id)) return thrReads.get(c.id);
+      const id = c.id;
+      const seq = thrSeq.get(id) || 0;
+      const read = this.request(`cards/${enc(id)}/thresholds`).then((r) => {
+        if (thrReads.get(id) === read) thrReads.delete(id);
+        const entry = this.thrCache[id] || (this.thrCache[id] = { data: null, err: '' });
+        if ((thrSeq.get(id) || 0) !== seq) return entry;
+        if (r.ok && r.data) { entry.data = r.data; entry.err = ''; } else entry.err = 'The thresholds could not be read. Try again.';
+        const t = this.ui.thr;
+        if (t && t.id === id && t.loading) {
+          t.loading = false;
+          if (entry.err) t.err = entry.err;
+          else this.thrLoad(t, entry.data);
+        }
+        return entry;
+      });
+      thrReads.set(id, read);
+      return read;
+    },
+    toggleThr(c) {
       if (this.thrEditing(c)) { this.ui.thr = null; return; }
-      this.ui.thr = { id: c.id, loading: true, data: null, values: {}, busy: false, err: '' };
-      const t = this.ui.thr;  // the reactive copy, so the page follows its changes
-      const r = await this.request(`cards/${enc(c.id)}/thresholds`);
-      if (this.ui.thr !== t) return;
-      t.loading = false;
-      if (!r.ok || !r.data) { t.err = 'The thresholds could not be read. Try again.'; return; }
-      this.thrLoad(t, r.data);
+      const entry = this.thrCache[c.id];
+      const ready = !!(entry && entry.data);
+      this.ui.thr = { id: c.id, loading: !ready, data: null, values: {}, busy: false, err: '' };
+      if (ready) this.thrLoad(this.ui.thr, entry.data);
+      else this.thrRead(c);
     },
     thrLoad(t, data) {
       t.data = data;
@@ -969,9 +1077,16 @@ function cc() {
         return;
       }
       this.ui.thr = null;
+      thrSeq.set(c.id, (thrSeq.get(c.id) || 0) + 1);
+      thrReads.delete(c.id);
+      const entry = this.thrCache[c.id] || (this.thrCache[c.id] = { data: null, err: '' });
+      entry.data = r.data;
+      entry.err = '';
       if (c.src === 'self') await this.loadSelf();
       else if (c.src === 'replicas') await this.loadReplicas();
       else await this.loadHost(c.h.id);
+      // The drive judged again: its readings in the thresholds too.
+      if (this.isOpen(c)) this.thrRead(c);
     },
     thrSave(c) {
       const t = this.ui.thr;
