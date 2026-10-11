@@ -490,18 +490,21 @@ table.attrs .raw-in:focus { background: #000; color: var(--paper); border-radius
 .tune { margin-left: auto; background: none; border: 0; padding: 4px 3px; cursor: pointer; line-height: 0; color: var(--dim); border-radius: 3px; }
 .tune:hover, .tune[aria-pressed="true"] { color: var(--paper); }
 .tune:focus:not(:focus-visible) { outline: none; }
-.tune svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
+/* The owner's two sliders, filled. 14 px is 85% of the chevron button's
+   16.3 px height and under the 15 px glyph before, so it reads below the
+   chevron. */
+.tune svg { width: 14px; height: 14px; fill: currentColor; stroke: none; }
 .tune ~ .chev { margin-left: -6px; }  /* 8 px from the tune button, not the line's 14 */
 .thr { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 table.attrs .thr-in { width: 72px; max-width: 72px; text-align: right; }
 table.attrs tr td.def { color: var(--dim); font-weight: 400; }
 .thr-where { margin: 0; font-size: 0.72rem; color: var(--dim); }
 .thr-err { margin: 0; font-size: 0.78rem; color: var(--paper); }
-.thr-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-/* Accept and Reset left; Cancel then Save right, Save hard right, also
-   when the row wraps. The pending note sits right on the line above. */
-.thr-l, .thr-r { display: inline-flex; gap: 6px; }
-.thr-r { margin-left: auto; }
+/* Two rows, both right-aligned: Accept and Reset above, Cancel then Save
+   below with Save hard right, also when a row wraps. The pending note
+   sits right on the line above. */
+.thr-btns { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.thr-l, .thr-r { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 100%; }
 .thr-foot { display: flex; align-items: baseline; gap: 10px; }
 .thr-pending { margin-left: auto; font-size: 0.72rem; color: var(--dim); }
 /* A field changed but not saved: its text bold, in the main type. */

@@ -1831,6 +1831,17 @@ def test_threshold_notes_at_rest(open_page):
     tune = ok.locator(".tune").bounding_box()
     chev = ok.locator(".chev").bounding_box()
     assert 0 < chev["x"] - (tune["x"] + tune["width"]) < 16 and abs(tune["y"] + tune["height"] / 2 - chev["y"] - chev["height"] / 2) < 3
+    # Its glyph is the two sliders, filled, smaller than the chevron's button.
+    assert ok.locator(".tune svg use").get_attribute("href") == "#adjust"
+    sym = p.page.locator("symbol#adjust")
+    assert sym.get_attribute("viewBox") == "0 0 512 512" and sym.locator("path").count() == 2
+    glyph = ok.locator(".tune svg").bounding_box()
+    assert glyph["height"] < chev["height"] - 1 and glyph["width"] < chev["width"]
+    assert 0.8 <= glyph["height"] / chev["height"] <= 0.9
+    assert ok.locator(".tune svg").evaluate("e => getComputedStyle(e).fill") == ok.locator(".tune").evaluate("e => getComputedStyle(e).color")
+    # Closed again: no glyph.
+    ok.locator(".chev").click()
+    assert ok.locator(".tune").count() == 0
     assert_colours(p)
 
 
@@ -1893,13 +1904,18 @@ def _no_threshold_writes(p: Page) -> bool:
 def test_threshold_buttons_and_pending(open_page):
     p = open_page()
     c = _edit(p, BARRACUDA)
-    # Accept and Reset on the left; Cancel then Save on the right, Save last.
+    # Accept and Reset on a row above; Cancel then Save below; all right-aligned,
+    # Save the rightmost and lowest.
     boxes = [b.bounding_box() for b in c.locator(".thr-btns button").all()]
     row = c.locator(".thr-btns").bounding_box()
-    assert max(b["x"] + b["width"] for b in boxes) == boxes[-1]["x"] + boxes[-1]["width"]
-    assert abs(row["x"] + row["width"] - boxes[-1]["x"] - boxes[-1]["width"]) < 1
-    assert boxes[2]["x"] + boxes[2]["width"] < boxes[3]["x"] and abs(boxes[2]["y"] - boxes[3]["y"]) < 1
-    assert boxes[0]["x"] < boxes[1]["x"] and abs(boxes[0]["x"] - row["x"]) < 1
+    right = row["x"] + row["width"]
+    acc, rst, can, sav = boxes
+    assert abs(acc["y"] - rst["y"]) < 1 and acc["x"] + acc["width"] < rst["x"]
+    assert abs(can["y"] - sav["y"]) < 1 and can["x"] + can["width"] < sav["x"]
+    assert rst["y"] + rst["height"] <= can["y"]
+    assert abs(right - rst["x"] - rst["width"]) < 1 and abs(right - sav["x"] - sav["width"]) < 1
+    assert max(b["x"] + b["width"] for b in boxes) == sav["x"] + sav["width"]
+    assert max(b["y"] for b in boxes) == sav["y"] and acc["x"] > row["x"]
     # The pending note is on the line above the buttons, at the right.
     note_box = c.locator(".thr-foot").bounding_box()
     assert note_box["y"] + note_box["height"] <= row["y"]
