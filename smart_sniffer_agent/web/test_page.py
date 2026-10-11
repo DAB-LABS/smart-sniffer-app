@@ -1847,7 +1847,8 @@ def test_threshold_edit_mode(open_page):
     assert c.locator(".thr-where").inner_text() == "Saved in Home Assistant"
     assert c.locator("table.attrs:not(.thr-t)").count() == 0  # the edit table takes the table's place
     assert [b.inner_text() for b in c.locator(".thr-btns button").all()] == [
-        "Save", "Accept current readings", "Reset to defaults", "Cancel"]
+        "Accept current readings", "Reset to defaults", "Cancel", "Save"]
+    assert c.locator(".thr-pending").inner_text() == ""
     assert_colours(p)
     assert_no_dashes(p)
     # A value that is not a whole number is refused on the page.
@@ -1875,40 +1876,119 @@ def test_threshold_edit_mode(open_page):
     assert c.locator(".thr-where").inner_text() == "Saved in this app"
 
 
-def test_threshold_accept_confirm(open_page):
+PAPER = "rgb(241, 241, 241)"
+
+
+def _pending(c) -> list:
+    """The labels of the fields marked changed but not saved."""
+    return c.locator("table.thr-t tbody tr").evaluate_all("""rows => rows
+        .filter((r) => r.querySelector('input').classList.contains('pending'))
+        .map((r) => r.querySelector('.lb').textContent)""")
+
+
+def _no_threshold_writes(p: Page) -> bool:
+    return not [r for r in p.requests if r[0] != "GET" and "/thresholds" in r[1]]
+
+
+def test_threshold_buttons_and_pending(open_page):
     p = open_page()
     c = _edit(p, BARRACUDA)
-    c.get_by_role("button", name="Accept current readings").click()
-    ask = c.get_by_role("group", name="Confirm accept")
-    assert ask.inner_text().startswith(
-        "Accept 24 reallocated sectors and 3 pending sectors as normal for this drive?")
-    ask.get_by_role("button", name="Cancel").click()
-    assert c.get_by_role("group", name="Confirm accept").count() == 0
-    assert not p.api("POST", r"/thresholds/accept$")
-    c.get_by_role("button", name="Accept current readings").click()
-    c.get_by_role("group", name="Confirm accept").get_by_role("button", name="Accept").click()
-    p.page.wait_for_selector(f'[data-card="{BARRACUDA}"] .h-ok')
-    assert len(p.api("POST", r"/thresholds/accept$")) == 1
-    # Nothing flagged now: nothing to accept.
+    # Accept and Reset on the left; Cancel then Save on the right, Save last.
+    boxes = [b.bounding_box() for b in c.locator(".thr-btns button").all()]
+    row = c.locator(".thr-btns").bounding_box()
+    assert max(b["x"] + b["width"] for b in boxes) == boxes[-1]["x"] + boxes[-1]["width"]
+    assert abs(row["x"] + row["width"] - boxes[-1]["x"] - boxes[-1]["width"]) < 1
+    assert boxes[2]["x"] + boxes[2]["width"] < boxes[3]["x"] and abs(boxes[2]["y"] - boxes[3]["y"]) < 1
+    assert boxes[0]["x"] < boxes[1]["x"] and abs(boxes[0]["x"] - row["x"]) < 1
+    # The pending note is on the line above the buttons, at the right.
+    note_box = c.locator(".thr-foot").bounding_box()
+    assert note_box["y"] + note_box["height"] <= row["y"]
+    assert c.locator(".thr-pending").inner_text() == "" and _pending(c) == []
+    # A typed change is pending: bold, in the main type, and the muted line.
+    field = c.get_by_label("Threshold of Reallocated sectors, alert above")
+    plain = field.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).fontWeight]")
+    field.fill("30")
+    assert _pending(c) == ["Reallocated sectors"]
+    assert field.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).fontWeight]") == [PAPER, "700"]
+    assert plain[1] != "700"
+    note = c.locator(".thr-pending")
+    assert note.inner_text() == "Not saved yet"
+    assert note.evaluate("e => getComputedStyle(e).color") == DIM
+    assert_colours(p)
+    # Typed back to the saved value: nothing pending.
+    field.fill("0")
+    assert _pending(c) == [] and note.inner_text() == ""
+    assert _no_threshold_writes(p)
+
+
+def test_threshold_accept_fills_the_fields(open_page):
+    p = open_page()
+    # One more label flagged, a wear gauge ("alert at"): accepting it takes
+    # the reading plus one, as the proxy's accept would store.
+    def wear(route):
+        body = route.fetch().json()
+        for lab in body["labels"]:
+            if lab["label"] == "SSD Wear Percent Used":
+                lab.update(reading=95, flagged=True)
+        route.fulfill(json=body)
+    p.page.route(re.compile(r".*/cards/[^/]+/thresholds$"), lambda r: wear(r) if r.request.method == "GET" else r.fallback())
     c = _edit(p, BARRACUDA)
+    before = {r[0]: r[2] for r in _edit_rows(c)}
+    c.get_by_role("button", name="Accept current readings").click()
+    rows = {r[0]: r[2] for r in _edit_rows(c)}
+    filled = {"Reallocated sectors": "24", "Pending sectors": "3", "Wear used": "96"}
+    assert before["Wear used"] == "90" and {k: rows[k] for k in filled} == filled
+    assert {k: v for k, v in rows.items() if k not in filled} == {k: v for k, v in before.items() if k not in filled}
+    # No request and no confirm; the fields are pending.
+    p.page.wait_for_timeout(300)
+    assert _no_threshold_writes(p)
+    assert c.locator(".ask").count() == 0 and c.get_by_role("group", name="Confirm accept").count() == 0
+    assert sorted(_pending(c)) == sorted(filled)
+    assert c.locator(".thr-pending").inner_text() == "Not saved yet"
+    assert_no_dashes(p)
+    # Save sends them all in one PUT, and the card is judged again.
+    p.page.unroute(re.compile(r".*/cards/[^/]+/thresholds$"))
+    c.get_by_role("button", name="Save", exact=True).click()
+    p.page.wait_for_selector(f'[data-card="{BARRACUDA}"] .h-ok')
+    puts = p.api("PUT", r"/thresholds$")
+    assert len(puts) == 1
+    sent = json.loads(puts[0][2])["values"]
+    assert sent["Reallocated Sector Count"] == 24 and sent["Current Pending Sector Count"] == 3
+    assert sent["SSD Wear Percent Used"] == 96 and sent["Command Timeout"] == 100
+    assert not p.api("POST", r"/thresholds/(accept|reset)$")
+    # Saved: nothing pending when edited again, and nothing left to accept.
+    c = _edit(p, BARRACUDA)
+    assert _pending(c) == [] and c.locator(".thr-pending").inner_text() == ""
     assert c.get_by_role("button", name="Accept current readings").is_disabled()
     c = _edit(p, NVME)
     assert c.get_by_role("button", name="Accept current readings").is_disabled()
 
 
-def test_threshold_reset_confirm(open_page):
+def test_threshold_reset_fills_defaults(open_page):
     p = open_page()
     c = _edit(p, NAS_ACCEPTED)
     assert ["Reallocated sectors", "2", "4", "0", ""] == _edit_rows(c)[0]
     c.get_by_role("button", name="Reset to defaults").click()
-    ask = c.get_by_role("group", name="Confirm reset")
-    assert ask.inner_text().startswith("Put every threshold of this drive back to its default?")
-    p.page.keyboard.press("Escape")
-    assert c.get_by_role("group", name="Confirm reset").count() == 0
+    rows = _edit_rows(c)
+    assert all(r[2] == r[3] for r in rows), rows  # every field its default
+    assert _pending(c) == ["Reallocated sectors"]
+    assert c.locator(".thr-pending").inner_text() == "Not saved yet"
+    p.page.wait_for_timeout(300)
+    assert _no_threshold_writes(p)
+    assert c.locator(".ask").count() == 0 and c.get_by_role("group", name="Confirm reset").count() == 0
+    # Cancel discards: edit mode closes, nothing sent, the saved value back.
+    c.get_by_role("button", name="Cancel").click()
+    assert c.locator("table.thr-t").count() == 0
+    assert _no_threshold_writes(p)
+    c = _edit(p, NAS_ACCEPTED)
+    assert _edit_rows(c)[0][2] == "4" and _pending(c) == []
+    # Reset, then Save: one PUT with the defaults, and the card flags again.
     c.get_by_role("button", name="Reset to defaults").click()
-    c.get_by_role("group", name="Confirm reset").get_by_role("button", name="Reset").click()
+    c.get_by_role("button", name="Save", exact=True).click()
     p.page.wait_for_selector(f'[data-card="{NAS_ACCEPTED}"] .h-att')
-    assert len(p.api("POST", r"/thresholds/reset$")) == 1
+    puts = p.api("PUT", r"/thresholds$")
+    assert len(puts) == 1 and json.loads(puts[0][2])["values"]["Reallocated Sector Count"] == 0
+    assert not p.api("POST", r"/thresholds/(accept|reset)$")
 
 
 def _conn(c) -> list:
@@ -2270,7 +2350,7 @@ def test_screenshots(open_page):
         c = _edit(p, BARRACUDA)
         _shot(p, "threshold-edit", c)
         c.get_by_role("button", name="Accept current readings").click()
-        _shot(p, "threshold-accept-confirm", c)
+        _shot(p, "threshold-accept-pending", c)
         _shot(p, "footer", p.page.locator("footer.app-foot"))
         _shot(p, "agent-line", p.page.locator(".agent-line"))
         p = open_page("POOL=degraded", width)

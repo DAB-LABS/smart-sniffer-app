@@ -166,7 +166,7 @@
                               <tr :class="thrMark(c, l)">
                                 <td class="nm"><span class="lb" x-text="l.name"></span><template x-if="l.compare !== 'gt'"><small x-text="' (' + thrWord(l) + ')'"></small></template></td>
                                 <td class="num" x-text="thrReading(l)"></td>
-                                <td class="num"><input class="input thr-in" inputmode="numeric" autocomplete="off" :value="thrS.values[l.label]" :aria-label="'Threshold of ' + l.name + ', ' + thrWord(l)" @input="thrSet(l.label, $event.target.value)" @keydown.enter="thrSave(c)"></td>
+                                <td class="num"><input class="input thr-in" :class="thrPending(l) && 'pending'" inputmode="numeric" autocomplete="off" :value="thrS.values[l.label]" :aria-label="'Threshold of ' + l.name + ', ' + thrWord(l)" @input="thrSet(l.label, $event.target.value)" @keydown.enter="thrSave(c)"></td>
                                 <td class="num def" x-text="l.default + (l.unit || '')"></td>
                               </tr>
                             </template>
@@ -174,19 +174,17 @@
                         </table>
                       </div>
                     </template>
-                    <template x-if="thrS.data"><p class="thr-where" x-text="thrWhere()"></p></template>
-                    <template x-if="thrS.ask === 'accept'">
-                      <div class="ask" role="group" aria-label="Confirm accept"><span x-text="thrAcceptText(c)"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="thrS.busy" @click="thrAccept(c)">Accept</button><button class="btn btn-sm btn-quiet" type="button" @click="thrAsk(null)">Cancel</button></span></div>
-                    </template>
-                    <template x-if="thrS.ask === 'reset'">
-                      <div class="ask" role="group" aria-label="Confirm reset"><span>Put every threshold of this drive back to its default?</span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="thrS.busy" @click="thrReset(c)">Reset</button><button class="btn btn-sm btn-quiet" type="button" @click="thrAsk(null)">Cancel</button></span></div>
-                    </template>
+                    <template x-if="thrS.data"><div class="thr-foot"><p class="thr-where" x-text="thrWhere()"></p><span class="thr-pending" x-text="thrAnyPending(c) ? 'Not saved yet' : ''"></span></div></template>
                     <p class="thr-err" role="alert" x-show="thrS.err" x-text="thrS.err"></p>
                     <div class="thr-btns">
-                      <button class="btn btn-sm btn-primary" type="button" :disabled="!thrS.data || thrS.busy" @click="thrSave(c)">Save</button>
-                      <button class="btn btn-sm" type="button" :aria-expanded="thrS.ask === 'accept' ? 'true' : 'false'" :disabled="!thrS.data || thrS.busy || !thrFlagged(c).length" @click="thrAsk('accept')">Accept current readings</button>
-                      <button class="btn btn-sm" type="button" :aria-expanded="thrS.ask === 'reset' ? 'true' : 'false'" :disabled="!thrS.data || thrS.busy" @click="thrAsk('reset')">Reset to defaults</button>
-                      <button class="btn btn-sm btn-quiet" type="button" @click="ui.thr = null">Cancel</button>
+                      <span class="thr-l">
+                        <button class="btn btn-sm" type="button" :disabled="!thrS.data || thrS.busy || !thrFlagged(c).length" @click="thrAccept(c)">Accept current readings</button>
+                        <button class="btn btn-sm" type="button" :disabled="!thrS.data || thrS.busy" @click="thrReset()">Reset to defaults</button>
+                      </span>
+                      <span class="thr-r">
+                        <button class="btn btn-sm btn-quiet" type="button" @click="ui.thr = null">Cancel</button>
+                        <button class="btn btn-sm btn-primary" type="button" :disabled="!thrS.data || thrS.busy" @click="thrSave(c)">Save</button>
+                      </span>
                     </div>
                   </div>
                 </template>

@@ -24,14 +24,6 @@ const WEAR_NAMES = ['Wear_Leveling_Count', 'Media_Wearout_Indicator', 'SSD_Life_
 const NVME_FIELDS = { critical_warning: 'critical_warning', media_errors: 'media_errors',
   available_spare: 'available_spare', wear: 'percentage_used' };
 const NONE = { kind: 'none', href: null };
-// How the accept question names each reading: [one, many] for a count, or
-// the words before a percentage for a gauge.
-const ACCEPT_WORDS = { reallocated: ['reallocated sector', 'reallocated sectors'], pending: ['pending sector', 'pending sectors'],
-  offline_unc: ['offline uncorrectable sector', 'offline uncorrectable sectors'],
-  reported_unc: ['reported uncorrectable error', 'reported uncorrectable errors'],
-  cmd_timeout: ['command timeout', 'command timeouts'], realloc_events: ['reallocation event', 'reallocation events'],
-  spin_retries: ['spin retry', 'spin retries'], media_errors: ['media error', 'media errors'],
-  wear: 'wear used at', available_spare: 'available spare at' };
 const COMPARE_WORDS = { gt: 'alert above', ge: 'alert at', lt: 'alert below' };
 const LONG_PRESS_MS = 450;
 const ARM_MS = 4000; // how long the trash's Remove? waits for its second click
@@ -118,7 +110,6 @@ function cc() {
         if (e.key !== 'Escape') return;
         if (this.ui.confirm) this.closeConfirm();
         if (this.ui.arm) this.disarm();
-        if (this.ui.thr && this.ui.thr.ask) this.ui.thr.ask = null;
       });
     },
 
@@ -903,7 +894,7 @@ function cc() {
     },
     // The edit state, never null, for the template's bindings.
     get thrS() {
-      return this.ui.thr || { values: {}, data: null, ask: null, busy: false, err: '', loading: false };
+      return this.ui.thr || { values: {}, data: null, busy: false, err: '', loading: false };
     },
     thrSet(label, value) {
       if (this.ui.thr) this.ui.thr.values[label] = value;
@@ -913,7 +904,7 @@ function cc() {
     },
     async toggleThr(c) {
       if (this.thrEditing(c)) { this.ui.thr = null; return; }
-      this.ui.thr = { id: c.id, loading: true, data: null, values: {}, ask: null, busy: false, err: '' };
+      this.ui.thr = { id: c.id, loading: true, data: null, values: {}, busy: false, err: '' };
       const t = this.ui.thr;  // the reactive copy, so the page follows its changes
       const r = await this.request(`cards/${enc(c.id)}/thresholds`);
       if (this.ui.thr !== t) return;
@@ -956,21 +947,13 @@ function cc() {
     thrFlagged(c) {
       return this.thrRows(c).filter((l) => l.flagged);
     },
-    // "Accept 24 reallocated sectors and 3 pending sectors as normal for this drive?"
-    thrAcceptText(c) {
-      const parts = this.thrFlagged(c).map((l) => {
-        const w = ACCEPT_WORDS[l.row];
-        if (typeof w === 'string') return `${w} ${l.reading}${l.unit || ''}`;
-        if (Array.isArray(w)) return `${this.num(l.reading)} ${l.reading === 1 ? w[0] : w[1]}`;
-        return `${l.name} at ${this.num(l.reading)}${l.unit || ''}`;
-      });
-      const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0] || '';
-      return `Accept ${list} as normal for this drive?`;
+    // A field whose text is not the value saved: changed here, not yet sent.
+    thrPending(l) {
+      const t = this.ui.thr;
+      return !!(t && t.data && String(t.values[l.label] ?? '').trim() !== String(l.value));
     },
-    thrAsk(kind) {
-      if (!this.ui.thr) return;
-      this.ui.thr.ask = kind && this.ui.thr.ask !== kind ? kind : null;
-      this.ui.thr.err = '';
+    thrAnyPending(c) {
+      return this.thrRows(c).some((l) => this.thrPending(l));
     },
     async thrSend(c, method, path, body) {
       const t = this.ui.thr;
@@ -1001,11 +984,23 @@ function cc() {
       }
       this.thrSend(c, 'PUT', '', { values });
     },
+    // Accept and Reset only fill the fields; Save is what writes. Accept
+    // gives each flagged reading's field the value the proxy's accept
+    // would store: the reading, or one more for an "alert at" threshold.
     thrAccept(c) {
-      this.thrSend(c, 'POST', '/accept', {});
+      const t = this.ui.thr;
+      if (!t || !t.data || t.busy) return;
+      t.err = '';
+      this.thrFlagged(c).forEach((l) => {
+        const reading = Number(l.reading);
+        t.values[l.label] = String(l.compare === 'ge' ? reading + 1 : reading);
+      });
     },
-    thrReset(c) {
-      this.thrSend(c, 'POST', '/reset', {});
+    thrReset() {
+      const t = this.ui.thr;
+      if (!t || !t.data || t.busy) return;
+      t.err = '';
+      (t.data.labels || []).forEach((l) => { t.values[l.label] = String(l.default); });
     },
 
     // ── Connect by hand ─────────────────────────────────────────────

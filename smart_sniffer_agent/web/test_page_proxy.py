@@ -287,3 +287,50 @@ def test_rename_reaches_home_assistant_and_reads_back(tab, app):
         STATE.entries, STATE.devices, STATE.ws_mode = [], [], "ok"
         STATE.options.pop("card_names", None)
         STATE.options.pop("host_names", None)
+
+
+def test_threshold_accept_fills_and_save_writes(tab, app):
+    """Against the real proxy: Accept current readings only fills the
+    fields with what the proxy's accept would store, no request; Save is the
+    one write, a PUT, and the card is judged with it."""
+    drives = SELF.drives
+    SELF.drives = [simple_drive("sda", "HAOS-DISK-1", {"Reallocated_Sector_Ct": 7, "Current_Pending_Sector": 2})]
+    sent: list[tuple[str, str, str | None]] = []
+    tab.page.on("request", lambda r: "/thresholds" in r.url and sent.append((r.method, r.url, r.post_data)))
+    try:
+        tab.load()
+        card = tab.card("self|HAOS-DISK-1")
+        card.locator(".h-att").wait_for(timeout=10000)
+        card.locator(".chev").click()
+        card.get_by_role("button", name="Edit thresholds").click()
+        card.locator("table.thr-t").wait_for(timeout=10000)
+        field = {"Reallocated sectors": card.get_by_label("Threshold of Reallocated sectors, alert above"),
+                 "Pending sectors": card.get_by_label("Threshold of Pending sectors, alert above")}
+        assert [f.input_value() for f in field.values()] == ["0", "0"]
+        card.get_by_role("button", name="Accept current readings").click()
+        assert [f.input_value() for f in field.values()] == ["7", "2"]
+        assert card.locator(".thr-pending").inner_text() == "Not saved yet"
+        assert card.locator(".ask").count() == 0
+        tab.page.wait_for_timeout(300)
+        assert [s for s in sent if s[0] != "GET"] == []
+        # Reset only fills the defaults; still nothing sent.
+        card.get_by_role("button", name="Reset to defaults").click()
+        assert [f.input_value() for f in field.values()] == ["0", "0"]
+        assert card.locator(".thr-pending").inner_text() == ""
+        card.get_by_role("button", name="Accept current readings").click()
+        assert [s for s in sent if s[0] != "GET"] == []
+        # Save: one PUT with every field, and the card is OK now.
+        assert card.locator(".thr-btns button").last.inner_text() == "Save"
+        card.get_by_role("button", name="Save", exact=True).click()
+        card.locator(".h-ok").wait_for(timeout=10000)
+        writes = [s for s in sent if s[0] != "GET"]
+        assert len(writes) == 1 and writes[0][0] == "PUT" and writes[0][1].endswith("/thresholds")
+        values = json.loads(writes[0][2])["values"]
+        assert values["Reallocated Sector Count"] == 7 and values["Current Pending Sector Count"] == 2
+        assert {(o["label"], o["value"]) for o in STATE.options["thresholds"]} == {
+            ("Reallocated Sector Count", 7), ("Current Pending Sector Count", 2)}
+        assert card.locator("table.thr-t").count() == 0
+        assert not tab.errors, tab.errors
+    finally:
+        SELF.drives = drives
+        STATE.options.pop("thresholds", None)

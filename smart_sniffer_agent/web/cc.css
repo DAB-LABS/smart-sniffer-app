@@ -497,9 +497,15 @@ table.attrs .thr-in { width: 72px; max-width: 72px; text-align: right; }
 table.attrs tr td.def { color: var(--dim); font-weight: 400; }
 .thr-where { margin: 0; font-size: 0.72rem; color: var(--dim); }
 .thr-err { margin: 0; font-size: 0.78rem; color: var(--paper); }
-.thr-btns { display: flex; flex-wrap: wrap; gap: 6px; }
-.thr-btns .btn-quiet { margin-left: auto; }
-.thr .ask { margin: 0; }
+.thr-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* Accept and Reset left; Cancel then Save right, Save hard right, also
+   when the row wraps. The pending note sits right on the line above. */
+.thr-l, .thr-r { display: inline-flex; gap: 6px; }
+.thr-r { margin-left: auto; }
+.thr-foot { display: flex; align-items: baseline; gap: 10px; }
+.thr-pending { margin-left: auto; font-size: 0.72rem; color: var(--dim); }
+/* A field changed but not saved: its text bold, in the main type. */
+table.attrs .thr-in.pending { color: var(--paper); font-weight: 700; }
 
 /* Connect by hand: what to type into the integration, each value with a
    small copy button; quiet, in the summary area above the table. */
