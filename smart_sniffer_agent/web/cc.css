@@ -487,14 +487,20 @@ table.attrs .raw-in:focus { background: #000; color: var(--paper); border-radius
 /* Thresholds, edited in an open Details box. The tune button sits by the
    chevron; the edit table takes the attribute table's place, its inputs
    in the threshold column and the default muted. No colours of its own. */
-.tune { margin-left: auto; background: none; border: 0; padding: 4px 3px; cursor: pointer; line-height: 0; color: var(--dim); border-radius: 3px; }
-.tune:hover, .tune[aria-pressed="true"] { color: var(--paper); }
+.tune { margin-left: auto; margin-block: -6px; background: none; border: 0; padding: 6px 4.4px 6px 7.6px; cursor: pointer; line-height: 0; color: var(--dim); border-radius: 3px; }
+/* The bright look is edit mode's alone, bound to aria-pressed. Hover gets a
+   lesser grey and only where a pointer can hover, so a click or tap that
+   leaves edit mode does not leave the glyph looking on. */
+.tune[aria-pressed="true"] { color: var(--paper); }
+@media (hover: hover) { .tune[aria-pressed="false"]:hover { color: var(--grey); } }
+/* The page's outline for keyboard focus only, never after a click */
 .tune:focus:not(:focus-visible) { outline: none; }
-/* The owner's two sliders, filled. 14 px is 85% of the chevron button's
-   16.3 px height and under the 15 px glyph before, so it reads below the
-   chevron. */
-.tune svg { width: 14px; height: 14px; fill: currentColor; stroke: none; }
-.tune ~ .chev { margin-left: -6px; }  /* 8 px from the tune button, not the line's 14 */
+/* The owner's two sliders, filled, 12.6 px: 90% of the 14 px before. The
+   padding makes a 24.6 px square to tap; the negative block margins keep
+   the line's height, and the narrower right padding sets the glyph 4.4 px
+   from the chevron's button, about half its width nearer than before. */
+.tune svg { width: 12.6px; height: 12.6px; fill: currentColor; stroke: none; }
+.tune ~ .chev { margin-left: -14px; }  /* the tune button meets the chevron's */
 .thr { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 table.attrs .thr-in { width: 72px; max-width: 72px; text-align: right; }
 table.attrs tr td.def { color: var(--dim); font-weight: 400; }

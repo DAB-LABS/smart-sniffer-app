@@ -1874,19 +1874,82 @@ def test_threshold_notes_at_rest(open_page):
     assert by_id(p, NVME).locator(".tune").count() == 0
     tune = ok.locator(".tune").bounding_box()
     chev = ok.locator(".chev").bounding_box()
-    assert 0 < chev["x"] - (tune["x"] + tune["width"]) < 16 and abs(tune["y"] + tune["height"] / 2 - chev["y"] - chev["height"] / 2) < 3
+    assert 0 <= chev["x"] - (tune["x"] + tune["width"]) < 16 and abs(tune["y"] + tune["height"] / 2 - chev["y"] - chev["height"] / 2) < 3
     # Its glyph is the two sliders, filled, smaller than the chevron's button.
     assert ok.locator(".tune svg use").get_attribute("href") == "#adjust"
     sym = p.page.locator("symbol#adjust")
     assert sym.get_attribute("viewBox") == "0 0 512 512" and sym.locator("path").count() == 2
     glyph = ok.locator(".tune svg").bounding_box()
     assert glyph["height"] < chev["height"] - 1 and glyph["width"] < chev["width"]
-    assert 0.8 <= glyph["height"] / chev["height"] <= 0.9
+    assert 0.72 <= glyph["height"] / chev["height"] <= 0.82
     assert ok.locator(".tune svg").evaluate("e => getComputedStyle(e).fill") == ok.locator(".tune").evaluate("e => getComputedStyle(e).color")
     # Closed again: no glyph.
     ok.locator(".chev").click()
     assert ok.locator(".tune").count() == 0
     assert_colours(p)
+
+
+def test_tune_glyph_size_place_and_rest(open_page):
+    """The sliders glyph is 12.6 px, about half its width nearer the chevron
+    than the 14 px glyph was, vertically centred on it, with a tap target of
+    at least 24 px; leaving edit mode by any route puts it back at rest."""
+    p = open_page()
+    c = by_id(p, BARRACUDA)
+    c.locator(".chev").click()
+    p.page.wait_for_timeout(300)  # the chevron's turn
+    glyph = c.locator(".tune svg").bounding_box()
+    chev = c.locator(".chev svg").bounding_box()
+    tune = c.locator(".tune").bounding_box()
+    assert abs(glyph["width"] - 12.6) < 0.5 and abs(glyph["height"] - 12.6) < 0.5
+    assert tune["width"] >= 24 and tune["height"] >= 24
+    assert abs(glyph["y"] + glyph["height"] / 2 - chev["y"] - chev["height"] / 2) < 1
+    # Before: the 14 px glyph's centre 27 px from the chevron's (12 px gap).
+    centres = chev["x"] + chev["width"] / 2 - glyph["x"] - glyph["width"] / 2
+    gap = chev["x"] - glyph["x"] - glyph["width"]
+    assert 19.5 <= centres <= 21.5 and 5 <= gap <= 8
+    tune_l = c.locator(".tune")
+
+    def rest():
+        return tune_l.evaluate("""e => { const s = getComputedStyle(e);
+            return [e.getAttribute('aria-pressed'), e.className, s.color, s.backgroundColor, s.outlineStyle]; }""")
+
+    p.page.mouse.move(0, 0)
+    at_rest = rest()
+    assert at_rest == ["false", "tune", DIM, "rgba(0, 0, 0, 0)", "none"]
+
+    def back(route):
+        p.page.mouse.move(0, 0)
+        assert rest() == at_rest, route
+        assert not p.page.evaluate("Alpine.$data(document.body).ui.thr"), route
+
+    # The glyph again: still under the pointer it is not the edit look.
+    _edit(p, BARRACUDA)
+    assert tune_l.get_attribute("aria-pressed") == "true"
+    assert tune_l.evaluate("e => getComputedStyle(e).color") == PAPER
+    tune_l.click()
+    assert tune_l.get_attribute("aria-pressed") == "false"
+    assert tune_l.evaluate("e => getComputedStyle(e).color") != PAPER
+    back("glyph")
+    _edit(p, BARRACUDA)
+    c.get_by_role("button", name="Cancel").click()
+    back("cancel")
+    _edit(p, BARRACUDA)
+    c.get_by_role("button", name="Save", exact=True).click()
+    p.page.wait_for_selector(f'[data-card="{BARRACUDA}"] table.thr-t', state="detached")
+    p.page.wait_for_timeout(300)
+    back("save")
+    _edit(p, BARRACUDA)
+    c.locator(".chev").click()
+    assert c.locator(".tune").count() == 0
+    c.locator(".chev").click()
+    p.page.wait_for_timeout(300)
+    back("close")
+    # A keyboard Tab still shows the ring; a click leaves none.
+    tune_l.focus()
+    p.page.keyboard.press("Shift+Tab")
+    p.page.keyboard.press("Tab")
+    assert p.page.evaluate("document.activeElement.classList.contains('tune')")
+    assert tune_l.evaluate("e => e.matches(':focus-visible') && getComputedStyle(e).outlineStyle") == "solid"
 
 
 def test_threshold_edit_mode(open_page):
