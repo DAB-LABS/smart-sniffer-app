@@ -158,6 +158,8 @@ class FakeState:
         self.ws_commands: list[dict[str, Any]] = []
         self.ws_pongs: list[bytes] = []
         self.ws_closed_cleanly: list[bool] = []
+        self.ws_error: dict[str, Any] = {"code": "not_found", "message": "Device not found"}
+        self.entry_delete_status = 200  # else Core refuses to delete an entry
 
 
 STATE = FakeState()
@@ -236,6 +238,9 @@ class FakeSupervisor(BaseHTTPRequestHandler):
             _json_reply(self, 200, STATE.entries)
         elif core.startswith("/config/config_entries/entry/") and method == "DELETE":
             entry_id = core.rsplit("/", 1)[1]
+            if STATE.entry_delete_status != 200:
+                _json_reply(self, STATE.entry_delete_status, {"message": "Config entry not found."})
+                return
             STATE.entries = [e for e in STATE.entries if e["entry_id"] != entry_id]
             _json_reply(self, 200, {"require_restart": False})
         elif core == "/config/config_entries/flow" and method == "POST":
@@ -384,15 +389,19 @@ def _fake_core_websocket(handler: BaseHTTPRequestHandler) -> None:
     STATE.ws_commands.append(command)
     if command.get("type") == "test/echo":
         reply = {"id": command["id"], "type": "result", "success": True, "result": command.get("data")}
-    elif STATE.ws_mode == "refuse" or command.get("type") != "config/device_registry/update":
-        reply = {"id": command["id"], "type": "result", "success": False,
-                 "error": {"code": "not_found", "message": "Device not found"}}
+    elif STATE.ws_mode == "refuse" or command.get("type") not in (
+            "config/device_registry/update", "config/device_registry/remove_config_entry"):
+        reply = {"id": command["id"], "type": "result", "success": False, "error": STATE.ws_error}
+    elif command["type"] == "config/device_registry/remove_config_entry":
+        reply = {"id": command["id"], "type": "result", "success": True, "result": None}
+        STATE.devices = [d for d in STATE.devices or [] if d["id"] != command["device_id"]]
     else:
+        changes = {k: command[k] for k in ("name_by_user", "disabled_by") if k in command}
         reply = {"id": command["id"], "type": "result", "success": True,
-                 "result": {"id": command["device_id"], "name_by_user": command["name_by_user"]}}
+                 "result": {"id": command["device_id"], **changes}}
         for device in STATE.devices or []:
             if device["id"] == command["device_id"]:
-                device["name_by_user"] = command["name_by_user"]
+                device.update(changes)
     # An event for another subscription first, then the result in two frames.
     send({"id": 99, "type": "event", "event": {}})
     text = json.dumps(reply).encode()
@@ -1881,7 +1890,7 @@ def test_ha_devices_core_down(proxy):
     assert status == 200
     assert body == {"installed": None, "reachable": False, "lookup": None,
                     "integration_url": "/config/integrations/integration/smart_sniffer",
-                    "targets": {}}
+                    "targets": {}, "ha_removal": {}}
 
 
 def test_ha_devices_not_installed(proxy):
@@ -1919,6 +1928,7 @@ def test_ha_devices_registry(proxy):
         "devices": {"S5GXNF0R412233A": "dev-self", "id:dev-sda": "dev-qemu"},
         "names": {"S5GXNF0R412233A": {"name": "S5GXNF0R412233A", "name_by_user": None},
                   "id:dev-sda": {"name": "QEMU", "name_by_user": None}},
+        "identifiers": {"id:dev-sda": "dev-sda"},
     }
     assert body["targets"]["replicas"]["entry_id"] == "e-lab"
     assert body["targets"]["10.0.10.20:9099"]["devices"] == {
@@ -3208,3 +3218,165 @@ def test_names_leave_with_their_cards(proxy, field):
     proxy.request("DELETE", f"/cards/{quote(f'{key}|NUC-2', safe='')}")
     assert STATE.options["card_names"] == [{"card": "self|SER-A", "name": "Mine"}]
     assert STATE.options["host_names"] == []
+
+
+# ── The trash in Home Assistant: /ha/devices ha_removal, DELETE ?ha= ────────
+
+def _drive_device(device_id: str, entry_id: str, serial: str, drive_id: str) -> dict[str, Any]:
+    """A drive's device as the integration registers it: its identifier is
+    the agent's drive id."""
+    return {"id": device_id, "name": serial, "serial_number": serial,
+            "identifiers": [["smart_sniffer", drive_id]], "config_entries": [entry_id]}
+
+
+def test_ha_removal_mode(mod):
+    target = {"entry_id": "e1", "devices": {"S1": "d1", "S2": "d2", "pool:tank": "dp", "pool:old": "do"},
+              "identifiers": {"S1": "sda", "S2": "ata-OLD"}}
+    read = {"status": "ok", "stale": False, "pools_status": "ok", "items": [
+        {"type": "drive", "id": "sda"}, {"type": "pool", "id": "pool.tank", "pool": {"name": "tank"}}]}
+    mode = mod.ha_removal_mode
+    assert mode("drive", "S1", target, read, False) == "disable"  # still reported
+    assert mode("drive", "S2", target, read, False) == "delete"  # its id is no longer reported
+    assert mode("drive", "S1", target, read, True) == "entry"  # the machine's last card
+    assert mode("drive", "S9", target, read, False) is None  # not in Home Assistant
+    assert mode("drive", "S9", target, read, True) is None
+    assert mode("drive", "S1", None, read, True) is None  # the machine has no entry
+    assert mode("filesystem", "fs:x", target, read, False) is None
+    assert mode("pool", "pool:tank", target, read, False) == "disable"
+    assert mode("pool", "pool:old", target, read, False) == "delete"
+    assert mode("pool", "pool:old", target, {**read, "pools_status": "failed"}, False) == "disable"
+    # An agent not answering: the integration deletes nothing, so disable.
+    assert mode("drive", "S2", target, {**read, "status": "unreachable", "stale": True}, False) == "disable"
+    # A device whose drive id is not known is never offered a delete.
+    assert mode("drive", "S3", {**target, "devices": {"S3": "d3"}}, read, False) == "disable"
+    # Entries only (Core's device list unreadable): the entry, on the last card.
+    bare = {"entry_id": "e1", "devices": {}, "identifiers": {}}
+    assert mode("drive", "S1", bare, read, True, True) == "entry"
+    assert mode("drive", "S1", bare, read, False, True) is None
+
+
+def _field_in_ha(proxy, field, devices: list[dict[str, Any]]) -> str:
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    STATE.entries = [_entry("e-field", f"SMART Sniffer (127.0.0.2:{field})"),
+                     _entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{proxy.agent_port})")]
+    STATE.devices = devices
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "ok"
+    return key
+
+
+@needs_rules
+def test_ha_devices_ha_removal(proxy, field):
+    FIELD["127.0.0.2"].drives = [simple_drive("sda", "NUC-1"), simple_drive("sdb", "NUC-2"),
+                                 simple_drive("sdc", "NUC-3")]
+    FIELD["127.0.0.2"].pools = [{"name": "tank", "state": "ONLINE", "problem_vdevs": []}]
+    key = _field_in_ha(proxy, field, [
+        _drive_device("dev-1", "e-field", "NUC-1", "sda"),
+        _drive_device("dev-2", "e-field", "NUC-2", "ata-OLD-NUC-2"),  # an id the agent no longer reports
+        _device("dev-pool", "e-field", pool="tank"),
+        _drive_device("dev-self", "e-agent", "SER-A", "nvme0"),
+    ])
+    _, body = proxy.get("/ha/devices")
+    # NUC-3 has no device (a grey icon); HAOS cards have no trash.
+    assert body["ha_removal"] == {f"{key}|NUC-1": "disable", f"{key}|NUC-2": "delete",
+                                  f"{key}|pool:tank": "disable"}
+    # Removed here only, all but one: the one left is the machine's last card.
+    for gone in ("NUC-2", "NUC-3", "pool:tank"):
+        assert proxy.request("DELETE", f"/cards/{quote(f'{key}|{gone}', safe='')}")[0] == 200
+    _, body = proxy.get("/ha/devices")
+    assert body["ha_removal"] == {f"{key}|NUC-1": "entry"}
+    # Hidden still counts as shown.
+    FIELD["127.0.0.2"].drives = [simple_drive("sda", "NUC-1"), simple_drive("sdd", "NUC-4")]
+    STATE.options["hidden_cards"] = [f"{key}|NUC-4"]
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    assert proxy.get("/ha/devices")[1]["ha_removal"] == {f"{key}|NUC-1": "disable"}
+
+
+def _delete(proxy, cid: str, ha: str | None) -> tuple[int, Any]:
+    return proxy.request("DELETE", f"/cards/{quote(cid, safe='')}" + (f"?ha={ha}" if ha else ""))
+
+
+@needs_rules
+def test_card_delete_ha_disable(proxy, field):
+    key = _field_in_ha(proxy, field, [_drive_device("dev-1", "e-field", "NUC-1", "sda"),
+                                      _drive_device("dev-2", "e-field", "NUC-2", "sdb")])
+    status, body = _delete(proxy, f"{key}|NUC-1", "disable")
+    assert status == 200 and body == {"removed": f"{key}|NUC-1", "host_removed": False,
+                                      "home_assistant": "disabled", "ha_error": None}
+    assert STATE.ws_commands == [{"type": "config/device_registry/update", "device_id": "dev-1",
+                                  "disabled_by": "user", "id": 1}]
+    assert STATE.options["hosts"][0]["removed"] == ["NUC-1"]
+    # Home Assistant refusing keeps the page removal and says why.
+    STATE.options["hosts"][0]["removed"] = []
+    STATE.ws_mode = "refuse"
+    STATE.ws_error = {"code": "home_assistant_error", "message": "Device is busy."}
+    status, body = _delete(proxy, f"{key}|NUC-1", "disable")
+    assert status == 200 and body["home_assistant"] == "failed" and body["ha_error"] == "Device is busy"
+    assert STATE.options["hosts"][0]["removed"] == ["NUC-1"]
+    STATE.ws_mode = "down"
+    status, body = _delete(proxy, f"{key}|NUC-2", "disable")
+    assert body["home_assistant"] == "failed" and body["ha_error"] and body["host_removed"] is True
+    assert not any(c[0] == "DELETE" for c in STATE.calls if "config_entries" in c[1])
+
+
+@needs_rules
+def test_card_delete_ha_delete(proxy, field):
+    key = _field_in_ha(proxy, field, [_drive_device("dev-1", "e-field", "NUC-1", "sda"),
+                                      _drive_device("dev-2", "e-field", "NUC-2", "ata-OLD")])
+    status, body = _delete(proxy, f"{key}|NUC-2", "delete")
+    assert status == 200 and body["home_assistant"] == "deleted" and body["ha_error"] is None
+    assert STATE.ws_commands == [{"type": "config/device_registry/remove_config_entry",
+                                  "device_id": "dev-2", "config_entry_id": "e-field", "id": 1}]
+    assert [d["id"] for d in STATE.devices] == ["dev-1"]
+    # The integration's own check refuses: its reason reaches the page.
+    STATE.ws_mode = "refuse"
+    STATE.ws_error = {"code": "home_assistant_error",
+                      "message": "office-nuc still reports this drive. Remove the drive first."}
+    status, body = _delete(proxy, f"{key}|NUC-1", "delete")
+    assert status == 200 and body["home_assistant"] == "failed"
+    assert body["ha_error"] == "office-nuc still reports this drive. Remove the drive first"
+    assert body["host_removed"] is True  # the page removal stands
+
+
+@needs_rules
+def test_card_delete_ha_entry(proxy, field):
+    key = _field_in_ha(proxy, field, [_drive_device("dev-1", "e-field", "NUC-1", "sda"),
+                                      _drive_device("dev-2", "e-field", "NUC-2", "sdb")])
+    # Not the last card: the entry is left alone.
+    status, body = _delete(proxy, f"{key}|NUC-1", "entry")
+    assert status == 200 and body["home_assistant"] == "failed"
+    assert body["ha_error"] == "other cards of this machine are still on the page"
+    assert [e["entry_id"] for e in STATE.entries] == ["e-field", "e-agent"]
+    # The last card: the machine leaves the page and its entry Home Assistant.
+    status, body = _delete(proxy, f"{key}|NUC-2", "entry")
+    assert body == {"removed": f"{key}|NUC-2", "host_removed": True,
+                    "home_assistant": "deleted", "ha_error": None}
+    assert ("DELETE", "/core/api/config/config_entries/entry/e-field", None) in STATE.calls
+    assert [e["entry_id"] for e in STATE.entries] == ["e-agent"]
+    assert not STATE.ws_commands
+
+
+@needs_rules
+def test_card_delete_ha_entry_refused_and_bad_requests(proxy, field):
+    FIELD["127.0.0.2"].drives = [simple_drive("sda", "NUC-1")]
+    key = _field_in_ha(proxy, field, [_drive_device("dev-1", "e-field", "NUC-1", "sda")])
+    assert _delete(proxy, f"{key}|NUC-1", "everything")[0] == 400
+    assert STATE.options["hosts"][0].get("removed", []) == []  # nothing removed
+    assert _delete(proxy, "self|SER-A", "disable")[0] == 409
+    STATE.entry_delete_status = 404
+    status, body = _delete(proxy, f"{key}|NUC-1", "entry")
+    assert status == 200 and body["host_removed"] is True
+    assert body["home_assistant"] == "failed" and body["ha_error"] == "Config entry not found"
+
+
+@needs_rules
+def test_card_delete_ha_not_in_home_assistant(proxy, field):
+    key = _field_in_ha(proxy, field, [])
+    status, body = _delete(proxy, f"{key}|NUC-1", "disable")
+    assert status == 200 and body["home_assistant"] == "failed"
+    assert body["ha_error"] == "the card has no device in Home Assistant"
+    STATE.entries = []
+    status, body = _delete(proxy, f"{key}|NUC-2", "delete")
+    assert body["ha_error"] == "the card is not in Home Assistant" and body["host_removed"] is True
+    assert not STATE.ws_commands

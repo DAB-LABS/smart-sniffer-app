@@ -28,6 +28,8 @@ Referer.
     ADD             ok | error                /ha/add succeeds or answers flow_failed
     HA_NAME         ok | fail                 a rename reaches Home Assistant's device, or
                                               Home Assistant does not take it
+    HA_REMOVE       ok | fail                 the trash's Home Assistant half (disable,
+                                              delete, entry) is taken, or refused
     NETWORK         supervisor | none | wide  prefill 10.0.10.0/24; null (page falls
                                               back to its own address); 10.0.0.0/16
     SCAN            normal | slow | none      rows arrive over 3 s; over 12 s; nothing
@@ -58,7 +60,9 @@ problem rows, one Maybe, one not judged; disk space at 82%, 91% and 97%; a
 raidz1 pool tank with three datasets; a filesystem on /dev/md1 that belongs
 to no drive; in Home Assistant except its two newest drives, and two of
 those carry thresholds set there: sdc at Attention with 8 reallocated
-sectors over its 5, sdd with 2 accepted under its 4), studio-mac (not
+sectors over its 5, sdd with 2 accepted under its 4; sdb's device there
+has a drive id the agent no longer reports, so its trash offers a delete,
+the rest a disable), studio-mac (not
 answering, last answer 3 h ago), backup-pi (wants a password, it is
 fieldpass).
 
@@ -127,6 +131,7 @@ DEFAULTS = {
     "HA_SELF": "1",
     "ADD": "ok",
     "HA_NAME": "ok",
+    "HA_REMOVE": "ok",
     "NETWORK": "supervisor",
     "SCAN": "normal",
     "HOSTS": "board",
@@ -983,6 +988,9 @@ class World:
         self.app_thresholds: dict[str, dict] = {}
         # Home Assistant: target -> {"entry_id", "devices": {serial or pool:<name>: device id}}
         self.ha: dict[str, dict] = {}
+        # Cards whose Home Assistant device carries a drive id the agent no
+        # longer reports (an older scheme), so it can be deleted there.
+        self.ha_gone: set[str] = set()
         if flags["HA"] == "installed":
             if flags["HA_SELF"] == "1":
                 self.ha["self"] = self._entry("01J9AGENT", self_drives(flags), [])
@@ -997,6 +1005,8 @@ class World:
                 # Two of them carry thresholds set in Home Assistant: sdc at 8
                 # reallocated sectors over its 5, sdd at 2 within its 4.
                 self.int_thresholds["10.0.10.20:9099|ZA1B2C3D"] = {"Reallocated Sector Count": 5}
+                # sdb's device was registered under an id the agent no longer reports.
+                self.ha_gone.add("10.0.10.20:9099|VK0FGHIJ")
                 self.int_thresholds["10.0.10.20:9099|ZA1B2C3E"] = {"Reallocated Sector Count": 4}
 
     @staticmethod
@@ -1341,8 +1351,13 @@ def sep_ok(card_id: str) -> bool:
 
 def flags_for(handler) -> dict[str, str]:
     flags = {k: os.environ.get(k, v) for k, v in DEFAULTS.items()}
-    for source in (urlparse(handler.headers.get("Referer", "")).query, urlparse(handler.path).query):
+    sources = ((urlparse(handler.headers.get("Referer", "")).query, False),
+               (urlparse(handler.path).query, True))
+    for source, own in sources:
         for k, v in parse_qs(source).items():
+            # A route's own lowercase parameter (DELETE /cards/<id>?ha=) is no switch.
+            if own and k.islower():
+                continue
             if k.upper() in DEFAULTS and v:
                 flags[k.upper()] = v[0]
     return flags
@@ -1665,7 +1680,8 @@ class Handler(BaseHTTPRequestHandler):
                                             for k, d in devices.items()}}
             return self._send(200, {"installed": installed, "reachable": True,
                                     "lookup": "entries_only" if flags["HA_LOOKUP"] == "entries_only" else "registry",
-                                    "integration_url": base, "targets": targets})
+                                    "integration_url": base, "targets": targets,
+                                    "ha_removal": self._ha_removals(flags, world) if installed else {}})
         if parts == ["add"] and method == "POST":
             target = str((self._body() or {}).get("target", ""))
             if target not in ("self", "replicas") and world.host(target) is None:
@@ -1778,6 +1794,48 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"removed": parts[0]})
         return self._err(404, "not_found")
 
+    def _ha_removals(self, flags, world) -> dict:
+        """Card id -> what the trash can do in Home Assistant, as the proxy
+        works it out: "entry" on a machine's last card, "delete" for a drive
+        whose device the agent no longer reports (world.ha_gone), "disable"
+        for the rest of its cards in Home Assistant. HAOS cards have none."""
+        out = {}
+        entries_only = flags["HA_LOOKUP"] == "entries_only"
+        responses = self._responses(flags, world)
+        for t, e in world.ha.items():
+            if t == "self" or t not in responses:
+                continue
+            response = responses[t]
+            cards = self._card_list(response)
+            counted = [c for c in cards if t != "replicas" or c["type"] in ("drive", "pool")]
+            for c in cards:
+                if c["type"] not in ("drive", "pool"):
+                    continue
+                cid = c["card_id"]
+                device = cid.partition("|")[2] in e["devices"]
+                if not device and not entries_only:
+                    continue
+                if len(counted) == 1 and c is counted[0]:
+                    out[cid] = "entry"
+                elif device:
+                    gone = cid in world.ha_gone and response.get("status") == "ok"
+                    out[cid] = "delete" if gone else "disable"
+        return out
+
+    def _ha_remove(self, flags, world, ha: str, host_key: str, key: str) -> dict:
+        """The Home Assistant half of a removal, after the card left the page."""
+        entry = world.ha.get(host_key) if flags["HA"] == "installed" else None
+        if entry is None:
+            return {"home_assistant": "failed", "ha_error": "the card is not in Home Assistant"}
+        if flags["HA_REMOVE"] == "fail":
+            return {"home_assistant": "failed",
+                    "ha_error": "Unable to remove device: the agent still reports this drive"}
+        if ha == "entry":
+            del world.ha[host_key]
+        elif ha == "delete":
+            entry["devices"].pop(key, None)
+        return {"home_assistant": "disabled" if ha == "disable" else "deleted", "ha_error": None}
+
     def _responses(self, flags, world) -> dict:
         out = {"self": self_response(flags, world), "replicas": replicas_response(flags, world)}
         for h in world.hosts:
@@ -1854,6 +1912,9 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 1 and method == "DELETE":
             if host_key == "self":
                 return self._err(409, "cannot_remove", "A drive of this machine can be hidden, not removed.")
+            ha = (parse_qs(urlparse(self.path).query).get("ha") or [None])[0]
+            if ha is not None and ha not in ("delete", "disable", "entry"):
+                return self._err(400, "bad_request")
             host_removed = False
             if host_key == "replicas":
                 rec = world.replica(item["id"]) if item else None
@@ -1873,7 +1934,10 @@ class Handler(BaseHTTPRequestHandler):
             world.card_order = [i for i in world.card_order if i not in gone]
             world.hidden_cards = [i for i in world.hidden_cards if i not in gone]
             world.options_writes += 1
-            return self._send(200, {"removed": cid, "host_removed": host_removed})
+            answer = {"removed": cid, "host_removed": host_removed}
+            if ha is not None:
+                answer.update(self._ha_remove(flags, world, ha, host_key, key))
+            return self._send(200, answer)
         if len(parts) == 2 and parts[1] == "file" and method == "GET":
             if item is None or item["type"] == "filesystem":
                 return self._err(404, "not_found")

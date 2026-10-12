@@ -15,7 +15,8 @@ It also answers the Control Center's own routes:
   GET, POST /fleet/hosts         the field agents stored in the app options;
   PATCH, DELETE /fleet/hosts/<id>  password, hidden, removal
   GET  /fleet/hosts/<id>/drives  one judged read of self, replicas or a host
-  GET  /ha/devices               entries and device pages in Home Assistant
+  GET  /ha/devices               entries and device pages in Home Assistant,
+                                 and what the trash can do there per card
   POST /ha/add                   add self, the replicas or a host to it
   GET, POST /replicas            replica files: the list, an upload
   POST /replicas/add             add replica cards from files
@@ -29,7 +30,10 @@ It also answers the Control Center's own routes:
                                  drive or pool in Home Assistant takes it
                                  as its device name (websocket API)
   PUT  /hosts/<id>/name          name a field agent's machine
-  DELETE /cards/<id>             remove one card (not a drive of this machine)
+  DELETE /cards/<id>             remove one card (not a drive of this machine);
+                                 ?ha=disable, delete or entry also disables or
+                                 deletes its device in Home Assistant, or
+                                 deletes its machine's entry (last card)
   GET  /cards/<id>/file          one card as a JSON file
   GET, PUT /cards/<id>/thresholds  a drive's thresholds, from Home Assistant
                                  when the drive is in it, else the app's own;
@@ -76,7 +80,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import ModuleType
 from typing import Any, Callable
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 # Ensure .js and .css MIME types are correct
 mimetypes.add_type("application/javascript", ".js")
@@ -971,7 +975,12 @@ WS_MAX_MESSAGE = 4 * 1024 * 1024
 
 
 class WebSocketError(Exception):
-    """The websocket could not be opened, or broke, or closed."""
+    """The websocket could not be opened, or broke, or closed. ``reason`` is
+    Home Assistant's own message when it refused a command, else the error."""
+
+    def __init__(self, message: str, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason or message
 
 
 class WebSocket:
@@ -1158,8 +1167,8 @@ def ha_ws_command(url: str, token: str, command: dict[str, Any],
                 break
         if not reply.get("success"):
             error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
-            raise WebSocketError(f"Home Assistant refused {command.get('type')}: "
-                                 f"{error.get('message') or error.get('code') or 'no reason'}")
+            reason = str(error.get("message") or error.get("code") or "no reason")
+            raise WebSocketError(f"Home Assistant refused {command.get('type')}: {reason}", reason)
         return reply
     finally:
         ws.close()
@@ -1244,6 +1253,30 @@ class Supervisor:
             log(f"Home Assistant did not take the name of device {device_id}: {err}")
             return False
         return True
+
+    def registry_command(self, command: dict[str, Any]) -> str | None:
+        """One device registry command over the websocket API. None when Home
+        Assistant took it, else the reason it gave (or why it was not asked)."""
+        if not self.token:
+            return "the app has no Supervisor token"
+        try:
+            ha_ws_command(self.ws_url(), self.token, command)
+        except WebSocketError as err:
+            log(f"Home Assistant did not take {command.get('type')} for device "
+                f"{command.get('device_id')}: {err}")
+            return err.reason
+        return None
+
+    def delete_entry(self, entry_id: str) -> str | None:
+        """Delete a config entry, which takes its devices and entities. None
+        when Home Assistant did, else the reason."""
+        status, body = self.core("DELETE", f"/config/config_entries/entry/{quote(entry_id, safe='')}")
+        if status == 200:
+            return None
+        message = body.get("message") if isinstance(body, dict) else None
+        reason = str(message) if message else (f"HTTP {status}" if status else "it did not answer")
+        log(f"Home Assistant did not delete entry {entry_id}: {reason}")
+        return reason
 
     def core_reachable(self) -> bool:
         status, _ = self.core("GET", "/")
@@ -2093,6 +2126,52 @@ def every_card_removed(host: dict[str, Any], response: Any) -> bool:
     own card, so it is not one of these."""
     keys = card_keys(host_id(host["address"], host["port"]), response)
     return bool(keys) and keys <= set(host.get("removed") or [])
+
+
+# What the trash can do in Home Assistant besides removing a card from the
+# page, as the integration's device_removal.py rules allow it:
+#   "entry"    the machine's last card: its whole config entry is deleted,
+#              which takes every device and entity of it;
+#   "delete"   the agent no longer reports the drive or pool, so the
+#              integration lets its device be deleted;
+#   "disable"  the agent still reports it (or is not reporting at all, when
+#              the integration deletes nothing): the device is disabled,
+#              which stops its entities and keeps their history.
+HA_REMOVAL_MODES = ("delete", "disable", "entry")
+
+
+def ha_removal_mode(item_type: Any, card_key: str, target: dict[str, Any] | None,
+                    response: Any, last: bool, entries_only: bool = False) -> str | None:
+    """The Home Assistant removal for one card, or None when the card is not
+    in Home Assistant (no exit icon, or a grey one).
+
+    ``response`` is the machine's last read as the agent sent it, cards
+    removed with the trash included: what the agent reports. ``last`` is
+    whether this card is the machine's last one on the page. With
+    ``entries_only`` Core's device list could not be read, so only the
+    entry is known."""
+    if target is None or item_type not in ("drive", "pool"):
+        return None
+    device = (target.get("devices") or {}).get(card_key)
+    if device is None and not entries_only:
+        return None
+    if last:
+        return "entry"
+    if device is None:
+        return None
+    if not isinstance(response, dict) or response.get("status") != "ok" or response.get("stale"):
+        return "disable"
+    items = [i for i in response.get("items") or [] if isinstance(i, dict)]
+    if item_type == "pool":
+        if response.get("pools_status") != "ok":
+            return "disable"
+        names = {str((i.get("pool") or {}).get("name")) for i in items if i.get("type") == "pool"}
+        return "disable" if card_key[len("pool:"):] in names else "delete"
+    identifier = (target.get("identifiers") or {}).get(card_key)
+    if identifier is None:
+        return "disable"  # the device's drive id is not known: never offer a delete
+    reported = {str(i.get("id")) for i in items if i.get("type") == "drive"}
+    return "disable" if identifier in reported else "delete"
 
 
 # Options of older versions, removed at start when the Supervisor does not
@@ -3331,11 +3410,57 @@ class ProxyHandler(BaseHTTPRequestHandler):
                           if c["card_id"] == cid), None)
         return found
 
-    def _route_card_delete(self, _parsed, cid: str) -> None:
+    def _route_card_delete(self, parsed, cid: str) -> None:
+        ha = (parse_qs(parsed.query).get("ha") or [None])[0]
+        if ha is not None and ha not in HA_REMOVAL_MODES:
+            raise ApiError(400, "bad_request", "ha must be delete, disable or entry")
         host_key, key = self._check_card_host(cid, self.host_store.cards()["hosts"])
         if host_key == "self":
             raise ApiError(409, "cannot_remove", "A drive of this machine can be hidden, not removed.")
-        host_removed = False
+        # What Home Assistant has of the card is read before the page removal,
+        # which can take the machine (and its last read) with it.
+        ha_target = None
+        if ha is not None and self.supervisor.available:
+            lookup = self._ha_lookup()
+            if lookup.get("reachable") and lookup.get("installed") is not False:
+                ha_target = (lookup.get("targets") or {}).get(host_key)
+        answer = self._remove_card(host_key, key, cid)
+        machine_gone = bool(answer.pop("machine_gone", False))
+        if ha is not None:
+            reason = self._ha_remove(ha, ha_target, key, machine_gone)
+            answer["home_assistant"] = "failed" if reason else ("disabled" if ha == "disable" else "deleted")
+            answer["ha_error"] = reason
+        self._send_json(200, answer)
+
+    def _ha_remove(self, mode: str, target: dict[str, Any] | None, key: str | None,
+                   machine_gone: bool) -> str | None:
+        """After a card left the page: the Home Assistant side the page asked
+        for. None when done, else the reason, as Home Assistant gave it."""
+        if target is None:
+            return "the card is not in Home Assistant"
+        if mode == "entry":
+            if not machine_gone:
+                return "other cards of this machine are still on the page"
+            reason = self.supervisor.delete_entry(str(target["entry_id"]))
+        else:
+            device = (target.get("devices") or {}).get(key or "")
+            if not isinstance(device, str):
+                return "the card has no device in Home Assistant"
+            if mode == "disable":
+                command = {"type": "config/device_registry/update", "device_id": device,
+                           "disabled_by": "user"}
+            else:
+                command = {"type": "config/device_registry/remove_config_entry",
+                           "device_id": device, "config_entry_id": target["entry_id"]}
+            reason = self.supervisor.registry_command(command)
+        if reason is None:
+            type(self)._ha_cache = None  # the next /ha/devices reads the change
+            return None
+        return reason.strip().rstrip(".") or "no reason given"
+
+    def _remove_card(self, host_key: str, key: str | None, cid: str) -> dict[str, Any]:
+        """Take a card off the page. The answer, with machine_gone (taken out
+        before it is sent) true when nothing of its machine is left."""
         if host_key == "replicas":
             item = self._find_card("replicas", cid)
             if item is None or item.get("type") == "filesystem":
@@ -3343,44 +3468,43 @@ class ProxyHandler(BaseHTTPRequestHandler):
             reply = self._mock_or_down("DELETE", self._replica_path(str(item["id"])))
             if reply.status != 200:
                 raise ApiError(404, "not_found", "no such replica")
-            gone = {cid}
-        else:
+            # A replica's id leaves the order and the hidden list, if it was there.
+            self.host_store.write_all(lambda state: _drop_ids(state, {cid}))
+            response = self.cache.get("replicas").get("response")
+            left = [c for c in card_list(response) if c.get("type") in ("drive", "pool")
+                    and c["card_id"] != cid] if isinstance(response, dict) else []
+            return {"removed": cid, "host_removed": False, "machine_gone": not left}
+        response = self.cache.get(host_key).get("response")
+        if key is not None and key not in card_keys(host_key, response):
+            # The last read does not have this card (or there is none):
+            # read the machine, so every card it has is counted.
+            target, _host = self._target(host_key)
+            self._read_agent(host_key, *target)
             response = self.cache.get(host_key).get("response")
-            if key is not None and key not in card_keys(host_key, response):
-                # The last read does not have this card (or there is none):
-                # read the machine, so every card it has is counted.
-                target, _host = self._target(host_key)
-                self._read_agent(host_key, *target)
-                response = self.cache.get(host_key).get("response")
-            outcome: dict[str, Any] = {}
+        outcome: dict[str, Any] = {}
 
-            def change_host(state: dict[str, Any]) -> dict[str, Any]:
-                host = next((h for h in state["hosts"]
-                             if host_id(h["address"], h["port"]) == host_key), None)
-                if host is None:
-                    raise ApiError(404, "not_found", "no such field agent")
-                if key is not None and key not in host["removed"]:
-                    host["removed"].append(key)
-                # The last card of a machine takes the machine with it:
-                # drives, pools and FILESYSTEM cards all count, hidden or
-                # not, and those removed before are gone.
-                outcome["host"] = key is None or every_card_removed(host, response)
-                if outcome["host"]:
-                    state["hosts"] = [h for h in state["hosts"] if h is not host]
-                return state
+        def change_host(state: dict[str, Any]) -> dict[str, Any]:
+            host = next((h for h in state["hosts"]
+                         if host_id(h["address"], h["port"]) == host_key), None)
+            if host is None:
+                raise ApiError(404, "not_found", "no such field agent")
+            if key is not None and key not in host["removed"]:
+                host["removed"].append(key)
+            # The last card of a machine takes the machine with it:
+            # drives, pools and FILESYSTEM cards all count, hidden or
+            # not, and those removed before are gone.
+            outcome["host"] = key is None or every_card_removed(host, response)
+            if outcome["host"]:
+                state["hosts"] = [h for h in state["hosts"] if h is not host]
+            return state
 
-            gone = {cid}
-            self.host_store.write_all(lambda state: _drop_cards(change_host(state), host_key,
-                                                                cid, outcome))
-            host_removed = bool(outcome.get("host"))
-            if host_removed:
-                self.cache.drop(host_key)
-                log(f"Field agent {host_key} removed with its last card")
-            self._send_json(200, {"removed": cid, "host_removed": host_removed})
-            return
-        # A replica's id leaves the order and the hidden list, if it was there.
-        self.host_store.write_all(lambda state: _drop_ids(state, gone))
-        self._send_json(200, {"removed": cid, "host_removed": host_removed})
+        self.host_store.write_all(lambda state: _drop_cards(change_host(state), host_key,
+                                                            cid, outcome))
+        host_removed = bool(outcome.get("host"))
+        if host_removed:
+            self.cache.drop(host_key)
+            log(f"Field agent {host_key} removed with its last card")
+        return {"removed": cid, "host_removed": host_removed, "machine_gone": host_removed}
 
     def _route_card_file(self, _parsed, cid: str) -> None:
         host_key, key = self._check_card_host(cid, self.host_store.hosts_quick())
@@ -3811,6 +3935,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         "state": entry.get("state"),
                         "devices": {},
                         "names": {},
+                        "identifiers": {},
                     }
             status, devices = sv.call("POST", "/core/api/template",
                                       {"template": DEVICES_TEMPLATE})
@@ -3831,10 +3956,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             target["devices"][key] = device["id"]
                             target["names"][key] = names
 
+                        prefix = f"{entry_id}_zpool_"
+                        ours = [str(i[1]) for i in device.get("identifiers") or []
+                                if isinstance(i, list) and len(i) == 2
+                                and i[0] == INTEGRATION_DOMAIN]
+                        # A drive device's identifier is the agent's drive id;
+                        # the agent, Disk Usage and pool devices carry the
+                        # entry id in theirs.
+                        drive_ident = next((i for i in ours if not i.startswith(f"{entry_id}_")), None)
                         serial = device.get("serial_number")
                         if isinstance(serial, str) and serial:
                             put(serial)
-                        prefix = f"{entry_id}_zpool_"
+                            if drive_ident is not None:
+                                target["identifiers"][serial] = drive_ident
                         for ident in device.get("identifiers") or []:
                             if not (isinstance(ident, list) and len(ident) == 2
                                     and ident[0] == INTEGRATION_DOMAIN):
@@ -3844,6 +3978,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             elif not serial and not str(ident[1]).startswith(f"{entry_id}_"):
                                 # A drive with no serial is known by its drive id.
                                 put(f"id:{ident[1]}")
+                                target["identifiers"][f"id:{ident[1]}"] = str(ident[1])
             else:
                 result["lookup"] = "entries_only"
             result["targets"] = targets
@@ -3851,7 +3986,40 @@ class ProxyHandler(BaseHTTPRequestHandler):
         return result
 
     def _route_ha_devices(self, _parsed) -> None:
-        self._send_json(200, self._ha_lookup())
+        lookup = self._ha_lookup()
+        self._send_json(200, {**lookup, "ha_removal": self._ha_removals(lookup)})
+
+    def _ha_removals(self, lookup: dict[str, Any]) -> dict[str, str]:
+        """Card id -> what the trash can do in Home Assistant (see
+        ha_removal_mode), for every card of a machine with an entry; cards
+        not in Home Assistant are left out. Worked out on each request, as
+        the last card of a machine changes with every removal. HAOS cards
+        have no trash, so none of theirs is here."""
+        out: dict[str, str] = {}
+        if not lookup.get("reachable") or lookup.get("installed") is False:
+            return out
+        entries_only = lookup.get("lookup") == "entries_only"
+        hosts = {host_id(h["address"], h["port"]): h for h in self.host_store.hosts_quick()}
+        for key, target in (lookup.get("targets") or {}).items():
+            if key == "self" or (key != "replicas" and key not in hosts):
+                continue
+            response = self.cache.get(key).get("response")
+            if not isinstance(response, dict):
+                continue
+            shown = response if key == "replicas" else \
+                without_removed(response, hosts[key].get("removed") or [])
+            cards = card_list(shown)
+            # A replica's FILESYSTEM card has no trash; a machine's counts,
+            # as removing the last card takes the machine. Hidden cards
+            # count as shown, as they do for that.
+            counted = [c for c in cards if key != "replicas" or c.get("type") in ("drive", "pool")]
+            for card in cards:
+                card_key = split_card_id(card["card_id"])[1] or ""
+                mode = ha_removal_mode(card.get("type"), card_key, target, response,
+                                       len(counted) == 1 and card is counted[0], entries_only)
+                if mode is not None:
+                    out[card["card_id"]] = mode
+        return out
 
     # ── /ha/add ──
 
