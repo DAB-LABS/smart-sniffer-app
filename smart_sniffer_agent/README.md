@@ -20,7 +20,7 @@ SMART Sniffer has three parts:
 - **The Agent**: the same agent, installed on your other machines (a NAS, a Proxmox host, a workstation or a Mac). The app calls these field agents. See the [SMART Sniffer documentation](https://github.com/DAB-LABS/smart-sniffer) to install it.
 - **The Integration**: turns drive data into Home Assistant entities, sensors and alerts. Optional for the app.
 
-The verdict on the page (Attention, Maybe, Health OK) is the integration's own: the app is built with the integration's rule modules, so the page and Home Assistant always agree. The line under the cards names the integration release the rules came from.
+The verdict on the page (Attention, Maybe, Health OK) is the integration's own: the app is built with the integration's rule modules, so the page and Home Assistant always agree. The page header names the integration release the rules came from (**rules**).
 
 ## Getting Started
 
@@ -120,6 +120,8 @@ Adding from the page needs the app's Home Assistant API access, which it has by 
 | Card Order | _(empty)_ | The order of the cards. Set by dragging them in the Control Center. |
 | Hidden Cards | _(empty)_ | Cards hidden with the eye in the Control Center. |
 | Thresholds | _(empty)_ | Alert thresholds of drives that are not in Home Assistant, one line per card and counter. Set from a drive's Details. |
+| Card Names | _(empty)_ | Names given to cards in the Control Center. A drive or pool in Home Assistant also takes the name as its device name. |
+| Machine Names | _(empty)_ | Names given to field agents' machines in the Control Center. |
 
 Changing the Agent Port, Bearer Token or Scan Interval needs an app restart, as before. The Control Center reads the Field Agents list each time it loads it, so changes to that list need no restart.
 

@@ -101,6 +101,8 @@ See [DOCS.md](smart_sniffer_agent/DOCS.md) for the details, including how to put
 | Card Order | _(empty)_ | The order of the cards. Set by dragging them in the Control Center. |
 | Hidden Cards | _(empty)_ | Cards hidden with the eye in the Control Center. |
 | Thresholds | _(empty)_ | Alert thresholds of drives that are not in Home Assistant. Set from a drive's Details. |
+| Card Names | _(empty)_ | Names given to cards in the Control Center. A drive or pool in Home Assistant also takes the name as its device name. |
+| Machine Names | _(empty)_ | Names given to field agents' machines in the Control Center. |
 
 ## Security & Permissions
 
