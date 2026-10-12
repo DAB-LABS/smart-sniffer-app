@@ -790,8 +790,8 @@ def test_trash_two_clicks(open_page):
     # One armed at a time; a replica and a pool say what they remove.
     _trash(by_id(p, REP_NVME)).click()
     assert _trash(by_id(p, REP_NVME)).get_attribute("aria-label").startswith("Remove this replica?")
-    _trash(by_id(p, NAS_POOL)).click()
-    assert _trash(by_id(p, NAS_POOL)).get_attribute("aria-label").startswith("Remove this pool?")
+    _trash(by_id(p, REP_POOL)).click()
+    assert _trash(by_id(p, REP_POOL)).get_attribute("aria-label").startswith("Remove this replica?")
     assert "armed" not in _trash(by_id(p, REP_NVME)).get_attribute("class")
     p.page.keyboard.press("Escape")
     # Keyboard: Enter twice removes the placeholder, and its machine.
@@ -810,6 +810,126 @@ def test_trash_two_clicks(open_page):
     p.page.keyboard.press(" ")
     p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_FAILED}\"]')")
     assert len(p.api("DELETE", r"/cards/")) == 3
+    # A pool not in Home Assistant says what it removes.
+    q = open_page("HA=not_installed")
+    _trash(by_id(q, NAS_POOL)).click()
+    assert _trash(by_id(q, NAS_POOL)).get_attribute("aria-label").startswith("Remove this pool?")
+
+
+def _ha_btn(c):
+    return c.locator(".c-foot .icon.rm-ha")
+
+
+def test_trash_in_home_assistant_arms_two_buttons(open_page):
+    p = open_page()
+    att = by_id(p, NAS_ATT)  # blue, still reported by its agent
+    trash = _trash(att)
+    box = trash.bounding_box()
+    trash.click()
+    group = att.get_by_role("group", name="Remove this drive?")
+    assert group.count() == 1
+    ha = _ha_btn(att)
+    assert trash.inner_text() == "Remove here" and ha.inner_text() == "Remove here + disable entities"
+    assert trash.get_attribute("aria-label") == "Remove here, from this page only"
+    # Both in the Attention colour, the same style; Remove here where the
+    # trash was, the Home Assistant button to its left: the pair grows left.
+    style = "e => ['color', 'borderTopColor', 'borderTopWidth', 'fontSize', 'height'].map((k) => getComputedStyle(e)[k])"
+    assert trash.evaluate(style) == ha.evaluate(style)
+    assert trash.evaluate(style)[:3] == [ATT, ATT, "1px"]
+    t, h = trash.bounding_box(), ha.bounding_box()
+    assert abs((t["x"] + t["width"]) - (box["x"] + box["width"])) < 1.5
+    assert h["x"] + h["width"] <= t["x"] and abs(h["y"] - t["y"]) < 1
+    assert not p.api("DELETE", r"/cards/")
+    # The time out puts the trash back.
+    p.page.wait_for_timeout(4300)
+    assert _ha_btn(att).count() == 0 and "armed" not in trash.get_attribute("class")
+    # Esc puts it back, from either button.
+    trash.click()
+    _ha_btn(att).focus()
+    p.page.keyboard.press("Escape")
+    assert _ha_btn(att).count() == 0 and "armed" not in trash.get_attribute("class")
+    # The pointer moving between the two keeps them; leaving puts the trash back.
+    trash.click()
+    hb = _ha_btn(att).bounding_box()
+    p.page.mouse.move(hb["x"] + 5, hb["y"] + 5)
+    p.page.wait_for_timeout(100)
+    assert _ha_btn(att).count() == 1
+    p.page.mouse.move(5, 5)
+    p.page.wait_for_timeout(100)
+    assert _ha_btn(att).count() == 0
+    # Focus moving from one to the other keeps them; leaving both does not.
+    trash.focus()
+    p.page.keyboard.press("Enter")
+    p.page.keyboard.press("Shift+Tab")
+    p.page.wait_for_timeout(100)
+    assert _ha_btn(att).count() == 1 and p.page.evaluate("document.activeElement.classList.contains('rm-ha')")
+    p.page.keyboard.press("Shift+Tab")
+    p.page.wait_for_timeout(100)
+    assert _ha_btn(att).count() == 0 and "armed" not in trash.get_attribute("class")
+    # A drive its agent no longer reports can be deleted there.
+    p.page.mouse.move(2, 2)
+    _trash(by_id(p, NAS_MAYBE)).click()
+    assert _ha_btn(by_id(p, NAS_MAYBE)).inner_text() == "Remove here + delete entities"
+    assert _ha_btn(att).count() == 0  # one armed at a time
+    p.page.keyboard.press("Escape")
+    # A grey card (not in Home Assistant) keeps the single Remove?.
+    usb = by_id(p, NAS_USB)
+    _trash(usb).click()
+    assert _trash(usb).inner_text() == "Remove?" and _ha_btn(usb).count() == 0
+    assert usb.get_by_role("group").count() == 0
+    p.page.keyboard.press("Escape")
+    assert not p.api("DELETE", r"/cards/")
+
+
+def _toast(p: Page):
+    return p.page.locator(".toast")
+
+
+def test_trash_in_home_assistant_removes_and_says_so(open_page):
+    p = open_page()
+    # Disable: off the page, and a short message for four seconds.
+    _trash(by_id(p, NAS_ATT)).click()
+    _ha_btn(by_id(p, NAS_ATT)).click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_ATT}\"]')")
+    dels = p.api("DELETE", r"/cards/")
+    assert len(dels) == 1 and unquote(dels[0][1]).endswith(f"/cards/{NAS_ATT}?ha=disable")
+    toast = _toast(p)
+    assert toast.inner_text() == "Disabled in Home Assistant. It cannot be deleted while the agent still sees the drive."
+    assert toast.evaluate("e => getComputedStyle(e).color") != ATT
+    p.page.wait_for_timeout(4300)
+    assert not toast.is_visible()
+    # Delete.
+    _trash(by_id(p, NAS_MAYBE)).click()
+    _ha_btn(by_id(p, NAS_MAYBE)).click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_MAYBE}\"]')")
+    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith("?ha=delete")
+    assert toast.inner_text() == "Deleted from Home Assistant."
+    # Remove here: the page only, no message.
+    p.page.wait_for_timeout(4300)
+    _trash(by_id(p, NAS_POOL)).click()
+    _trash(by_id(p, NAS_POOL)).click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_POOL}\"]')")
+    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith(f"/cards/{NAS_POOL}")
+    assert not toast.is_visible()
+
+
+def test_trash_in_home_assistant_last_card_and_refusal(open_page):
+    p = open_page("HA_REMOVE=fail")
+    # The machine's last card: its entry goes, the button says delete.
+    with urllib.request.urlopen(f"{p.base}/ha/devices?HA_REMOVE=fail", timeout=5) as resp:
+        data = json.loads(resp.read())
+    data["ha_removal"][NAS_ACCEPTED] = "entry"
+    p.page.route("**/ha/devices", lambda route: route.fulfill(json=data))
+    p.page.evaluate("() => { Alpine.$data(document.body).loadHa(); }")
+    p.page.wait_for_timeout(300)
+    _trash(by_id(p, NAS_ACCEPTED)).click()
+    assert _ha_btn(by_id(p, NAS_ACCEPTED)).inner_text() == "Remove here + delete entities"
+    _ha_btn(by_id(p, NAS_ACCEPTED)).click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_ACCEPTED}\"]')")
+    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith("?ha=entry")
+    # Home Assistant refused: the card stays off the page, and the reason shows.
+    assert _toast(p).inner_text() == ("Removed here. Home Assistant did not take the change: "
+                                      "Unable to remove device: the agent still reports this drive.")
 
 
 def test_trash_two_taps(browser, server):

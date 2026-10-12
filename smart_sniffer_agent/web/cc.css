@@ -2,7 +2,8 @@
    Black, white and grey. Four colour exceptions, muted, defined once below:
    --att   Attention: the word, FAILED, its chevron, the agent dot, the health box's
            stroke and the labels and values of rows that caused it, and the
-           trash's Remove? while it waits for its second click;
+           trash's Remove? (and Remove here, with its Home Assistant twin) while
+           it waits for its second click;
    --maybe Maybe: the same places, for warnings;
    --ok    Health OK, its chevron and its health box, and the agent dot;
    --ha    the exit icon of something in Home Assistant, nowhere else.
@@ -358,6 +359,20 @@ table.attrs .raw-in:focus { background: #000; color: var(--paper); border-radius
 .icon.armed:hover { color: var(--att); background: rgba(204, 107, 99, 0.12); }
 .icon.trash .rm-word, .icon.trash.armed svg { display: none; }
 .icon.trash.armed .rm-word { display: inline; }
+/* In Home Assistant: Remove here where the trash was, and to its left the
+   button that also acts there; the pair grows to the left */
+.rm-set, .rm-pair { display: inline-flex; gap: 4px; }
+/* The pair is laid over the foot, not in it, so nothing moves under the
+   pointer: Remove here stays where the trash was, and on a narrow card the
+   Home Assistant button goes on the line above. */
+.rm-set.pair { position: relative; width: 22px; height: 22px; }
+.rm-set.pair .rm-pair { position: absolute; right: 0; bottom: 0; z-index: 3; width: max-content;
+  max-width: min(420px, calc(100vw - 64px)); flex-wrap: wrap-reverse; justify-content: flex-end;
+  row-gap: 6px; padding-left: 8px; background: var(--panel); }
+/* A removal's Home Assistant message, muted, for a few seconds */
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 40; margin: 0;
+         max-width: min(560px, calc(100vw - 32px)); padding: 8px 14px; border: 1px solid var(--rule-2); border-radius: 4px;
+         background: var(--panel-2); color: var(--grey); font-size: 0.82rem; }
 .card .c-foot .icon.armed { opacity: 1; }
 
 /* Hidden, shown again from the header: faded in place, its closed eye readable */

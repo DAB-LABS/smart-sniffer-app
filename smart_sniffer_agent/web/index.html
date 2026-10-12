@@ -53,6 +53,7 @@
   </template>
   <p class="sec-label sec-drives">DRIVES:</p>
   <p class="page-err" x-show="pageErr || hostsErr" x-text="pageErr || hostsErr" role="alert"></p>
+  <p class="toast" x-show="ui.toast" x-text="ui.toast" role="status"></p>
   <template x-if="selfEmpty">
     <p class="empty-line">This machine's agent reports no readable drives. If the <a :href="appPage('logs')" target="_top">Mission Log</a> says DRIVE ACCESS BLOCKED, turn off Protection Mode on the <a :href="appPage('info')" target="_top">app's info page</a> and restart the app.</p>
   </template>
@@ -285,7 +286,7 @@
             <template x-if="canDownload(c)"><button class="icon" type="button" aria-label="Save as replica" title="Save as replica" @click="download(c)"><svg aria-hidden="true"><use href="#download"/></svg></button></template>
             <template x-if="canHide(c) && !isHidden(c)"><button class="icon" type="button" aria-label="Hide this card" title="Hide this card" @click="setHidden(c, true)"><svg aria-hidden="true"><use href="#eye"/></svg></button></template>
             <template x-if="canHide(c) && isHidden(c)"><button class="icon" type="button" aria-label="Hidden. Show this card again" title="Hidden, click to show it again" @click="setHidden(c, false)"><svg aria-hidden="true"><use href="#eye-shut"/></svg></button></template>
-            <template x-if="canRemove(c)"><button class="icon trash" :class="{ armed: armed(c) }" type="button" :aria-label="armed(c) ? removeText(c) + ' Press again to remove' : 'Remove this card'" :title="armed(c) ? '' : 'Remove'" :disabled="armed(c) && ui.arm.busy" @click="trashClick(c)" @pointerleave="$event.pointerType === 'mouse' && disarm(c)" @blur="disarm(c)" @keydown.escape="disarm(c)"><svg aria-hidden="true"><use href="#trash"/></svg><span class="rm-word">Remove?</span></button></template>
+            <template x-if="canRemove(c)"><span class="rm-set" :class="{ pair: armedHa(c) }" :role="armedHa(c) ? 'group' : null" :aria-label="armedHa(c) ? removeText(c) : null" @pointerleave="$event.pointerType === 'mouse' && disarm(c)" @focusout="rmFocusOut(c, $event)" @keydown.escape="disarm(c)"><span class="rm-pair"><template x-if="armedHa(c)"><button class="icon armed rm-ha" type="button" :disabled="ui.arm.busy" @click="confirmRemove(c, ui.arm.ha)" x-text="haRemoveText()"></button></template><button class="icon trash" :class="{ armed: armed(c) }" type="button" :aria-label="armedHa(c) ? 'Remove here, from this page only' : armed(c) ? removeText(c) + ' Press again to remove' : 'Remove this card'" :title="armed(c) ? '' : 'Remove'" :disabled="armed(c) && ui.arm.busy" @click="trashClick(c)"><svg aria-hidden="true"><use href="#trash"/></svg><span class="rm-word" x-text="armedHa(c) ? 'Remove here' : 'Remove?'">Remove?</span></button></span></span></template>
           </span>
         </div>
       </article>

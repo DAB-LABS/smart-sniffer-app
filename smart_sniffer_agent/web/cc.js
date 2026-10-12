@@ -27,6 +27,7 @@ const NONE = { kind: 'none', href: null };
 const COMPARE_WORDS = { gt: 'alert above', ge: 'alert at', lt: 'alert below' };
 const LONG_PRESS_MS = 450;
 const ARM_MS = 4000; // how long the trash's Remove? waits for its second click
+const TOAST_MS = 4000; // how long a removal's Home Assistant message shows
 const HA_NAME_FAILED = 'Saved in this app; Home Assistant did not take the name.';
 const enc = encodeURIComponent;
 
@@ -72,6 +73,7 @@ function cc() {
     optimistic: {},
     ha: null,
     haTimers: [],
+    toastTimer: null,
     scanTimer: null,
     scanPolling: false,
     now: Date.now(),
@@ -88,7 +90,7 @@ function cc() {
     hostsErr: '',
     drag: null,
     dragOrder: null,
-    ui: { open: {}, cols: 1, confirm: null, arm: null, rename: null, pw: {}, pwState: {}, busy: {}, note: {}, thr: null, copied: '', copiedText: '' },
+    ui: { open: {}, cols: 1, confirm: null, arm: null, rename: null, pw: {}, pwState: {}, busy: {}, note: {}, thr: null, copied: '', copiedText: '', toast: '' },
     // Each drive's thresholds as last read, by card id: { data, err }.
     thrCache: {},
     add: {
@@ -1300,16 +1302,31 @@ function cc() {
     },
 
     // The trash: the first click turns it into Remove? in the same place,
-    // the second removes the card. Leaving it, Esc, focus going elsewhere
-    // or ARM_MS put the trash back.
+    // the second removes the card. A card in Home Assistant (blue exit
+    // icon) arms two buttons instead, growing left: Remove here, and the
+    // same with what Home Assistant can do (ha_removal from /ha/devices:
+    // delete its device or the machine's entry, or disable its device).
+    // Leaving them, Esc, focus going elsewhere or ARM_MS put the trash back.
     armed(c) {
       return !!(this.ui.arm && this.ui.arm.id === c.id);
     },
+    haRemoval(c) {
+      if (this.glyph(c).kind !== 'blue') return null;
+      const mode = this.ha && this.ha.ha_removal && this.ha.ha_removal[c.id];
+      return ['delete', 'disable', 'entry'].includes(mode) ? mode : null;
+    },
+    armedHa(c) {
+      return this.armed(c) && !!this.ui.arm.ha;
+    },
+    haRemoveText() {
+      const a = this.ui.arm;
+      return a && a.ha === 'disable' ? 'Remove here + disable entities' : 'Remove here + delete entities';
+    },
     trashClick(c) {
-      if (this.armed(c)) { this.confirmRemove(c); return; }
+      if (this.armed(c)) { this.confirmRemove(c, null); return; }
       this.disarm();
       this.ui.confirm = null;
-      const arm = { id: c.id, busy: false, timer: null };
+      const arm = { id: c.id, busy: false, timer: null, ha: this.haRemoval(c) };
       arm.timer = setTimeout(() => { if (this.ui.arm && this.ui.arm.id === c.id && !this.ui.arm.busy) this.disarm(); }, ARM_MS);
       this.ui.arm = arm;
       this.ui.note[`rm:${c.id}`] = '';
@@ -1320,12 +1337,31 @@ function cc() {
       clearTimeout(a.timer);
       this.ui.arm = null;
     },
-    async confirmRemove(c) {
+    // Focus moving between the two armed buttons keeps them armed.
+    rmFocusOut(c, e) {
+      if (e.currentTarget.contains(e.relatedTarget)) return;
+      this.disarm(c);
+    },
+    showToast(text) {
+      clearTimeout(this.toastTimer);
+      this.ui.toast = text;
+      this.toastTimer = setTimeout(() => { this.ui.toast = ''; }, TOAST_MS);
+    },
+    haRemovedText(c, data) {
+      if (data && data.home_assistant === 'disabled') {
+        return `Disabled in Home Assistant. It cannot be deleted while the agent still sees the ${c.kind === 'pool' ? 'pool' : 'drive'}.`;
+      }
+      if (data && data.home_assistant === 'deleted') return 'Deleted from Home Assistant.';
+      const reason = String((data && data.ha_error) || 'no answer').replace(/[.\s]+$/, '');
+      return `Removed here. Home Assistant did not take the change: ${reason}.`;
+    },
+    async confirmRemove(c, ha) {
       const a = this.ui.arm;
       if (!a || a.busy) return;
       clearTimeout(a.timer);
       a.busy = true;
-      const r = await this.request(`cards/${enc(c.id)}`, { method: 'DELETE' });
+      const path = `cards/${enc(c.id)}` + (ha ? `?ha=${enc(ha)}` : '');
+      const r = await this.request(path, { method: 'DELETE' });
       a.busy = false;
       this.ui.arm = null;
       if (!r.ok) {
@@ -1337,6 +1373,7 @@ function cc() {
       this.gone[c.id] = true;
       this.order = this.order.filter((id) => id !== c.id);
       this.hidden = this.hidden.filter((id) => id !== c.id);
+      if (ha) this.showToast(this.haRemovedText(c, r.data));
       if (c.src === 'replicas') {
         await this.loadReplicas();
       } else if (r.data && r.data.host_removed) {
@@ -1346,6 +1383,8 @@ function cc() {
         await this.loadHost(c.h.id);
       }
       delete this.gone[c.id];
+      // The machine's last card, and what Home Assistant has, changed.
+      if (this.ha && this.ha.installed === true) this.loadHa();
     },
 
     async download(c) {
