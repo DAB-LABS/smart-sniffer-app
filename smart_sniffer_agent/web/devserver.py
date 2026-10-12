@@ -116,7 +116,7 @@ AGENT_PORT = 9099
 MOCK_PORT = 9100
 APP_VERSION = "0.3.0"
 AGENT_VERSION = "0.8.1"
-RULES_VERSION_FALLBACK = "v0.8.1"
+RULES_VERSION_FALLBACK = "v0.8.2"
 REPLICA_PATH = "/share/smart-sniffer/replicas"
 
 mimetypes.add_type("application/javascript", ".js")

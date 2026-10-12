@@ -48,7 +48,7 @@ RUN ARCH=$(uname -m) && \
 # itself so their relative imports resolve without the integration's
 # __init__ (which needs Home Assistant). Only the files directly in
 # tools/replicas are shipped, not tools/replicas/extra.
-ARG SS_TAG=replica-files
+ARG SS_TAG=v0.8.2
 ARG SS_TARBALL=https://github.com/DAB-LABS/smart-sniffer/archive/${SS_TAG}.tar.gz
 RUN set -e; \
     SRC=/tmp/smart-sniffer; \

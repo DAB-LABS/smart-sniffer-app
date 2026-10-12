@@ -1,29 +1,42 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 -- 2026-10-12
+
+The app's page is rebuilt as the **Control Center**: your drives' health on its own page, with or without the SMART Sniffer integration. It also shows the drives on your other machines that run the SMART Sniffer agent, and replicas, fake drives for testing Home Assistant, which replace the Test Lab. Built against smart-sniffer v0.8.2.
 
 ### Added
 
-- **Field agents**: the Control Center now shows the drives on your other machines that run the SMART Sniffer agent, one card per machine, with every drive and ZFS pool judged by the same rules as your own. Agents that use a token ask for it on their card; the app checks it with the agent before saving it and never shows it again.
-- **The + card and the network scan**: one card adds field agents and replicas. Opening it scans the block your Home Assistant machine is on (prefilled from the Supervisor's network information) for agents on port 9099, and nothing on the network is scanned until you open it. Blocks wider than /22 are refused. **Add by hand** checks a single host name or address.
-- **Replicas as files**: the Test Lab's simulated drives are now replicas, fake drives and pools served from JSON files. Six ship with the app; your own live in `/share/smart-sniffer/replicas`, where files dropped in over Samba appear in the + card. Each replica has scenarios to apply and, in its Field report, editable Raw values.
-- **Save as replica**: any real drive with SMART data can be saved as a replica file, with its serial number, WWN and NVMe identifiers replaced and the verdict it had at the time recorded.
-- **Download and Upload**: a replica can be downloaded with its current values and uploaded again (1 MB at most).
-- **Add to Home Assistant from the page**: with the integration installed, an exit glyph after each card's title adds this machine, a field agent or the replicas to the integration (grey), or opens the entry or device page in Home Assistant (blue).
-- **Hiding cards**: the eye on a field agent card hides it; the eye in the section header shows the hidden cards again.
+- **The Control Center** -- one grid of cards, one per drive and per ZFS pool, from this machine, your field agents and the replicas, and one for each filesystem that belongs to no drive or pool. A card shows where the drive is, its temperature, power-on hours and data written, its disk space and its health. The verdict (Attention, Maybe, Health OK, Health not known) comes from the integration's own rule modules, built into the image from the smart-sniffer release this version names, so the page and Home Assistant agree. The page header shows the app, agent and rules versions and whether this machine's agent is answering.
+- **Health box and Details** -- under the health word, a box lists every row that caused it, with what was expected and the value. The chevron beside the word opens Details: every counter, Data Read, Device Statistics, the disk space in full and every attribute or NVMe log field as smartctl reports it.
+- **Disk space bars** -- one per filesystem on the drive, or ZFS dataset on the pool, up to three per card. Below 80% a bar says how full it is and the size; from 80% it says how much is free, the number gets heavier at 90% and 95%, and at 95% the outline turns dashed.
+- **Arranging and hiding cards** -- drag a card by the dots beside its title, or move it with the arrow keys. The eye hides a card for now; the eye beside Refresh shows the hidden cards again. The order and the hidden cards are kept in the app's options.
+- **Renaming** -- click a card's title, or a field agent's machine label, and type a name in place. A drive or pool in Home Assistant takes the name as its device name there, and a rename made in Home Assistant shows on the card.
+- **Removing** -- the trash removes a card for good with a second click on **Remove?**. A card in Home Assistant offers **Remove here**, or removing it and also disabling its device in Home Assistant while the agent still reports it, or deleting the device once the agent no longer reports it (the machine's whole entry when it is the last card). A replica in Home Assistant keeps the single **Remove?**, which also deletes its device and entities there. This machine's drives can only be hidden.
+- **Thresholds per drive** -- the sliders icon in Details edits a drive's alert thresholds, the same ones the integration offers under Configure > Alert thresholds. **Accept current readings** and **Reset to defaults** fill the fields, and **Save** writes them. A drive in Home Assistant keeps its thresholds in the integration, so the card and Home Assistant judge it the same way; any other drive keeps them in the app's options until it is added to Home Assistant, when they move into the integration.
+- **Field agents** -- your other machines that run the SMART Sniffer agent, with every drive and ZFS pool on its own card, judged by the same rules as your own. An agent with a token asks for it on its card; the app checks it with the agent before saving it and never shows it again. A machine that stops answering keeps its last readings, and its cards say when it was last seen. Field agents are stored in the app's options, so they are part of Home Assistant backups.
+- **The + card** -- the last card adds field agents and replicas. Opening it scans the block your Home Assistant machine is on (prefilled from the Supervisor's network information) for agents on port 9099; nothing on the network is scanned until you open it, and blocks wider than /22 are refused. **Add by hand** checks one host name or address. **Replicas** lists the replica files to add, and **Upload a replica** puts a file in your replica folder.
+- **Replicas** -- fake drives and pools with SMART data you control, served from JSON files by a replica agent inside the app. Six ship with the app; your own live in `/share/smart-sniffer/replicas`, where files copied in over Samba or SSH show up in the + card. Each replica card switches between scenarios with one click, and its Raw values can be edited in Details.
+- **Save as replica** -- the download arrow at the foot of a card saves it as a JSON file. A real drive's copy goes into your replica folder with its serial number, WWN and NVMe identifiers replaced and the verdict it had recorded; a replica downloads with its current values. A replica file is at most 1 MB.
+- **Add to Home Assistant from the page** -- with the integration installed, an exit icon on each card adds this machine, a field agent or the replicas to the integration (grey), or opens the device page in Home Assistant (blue). Details also gives the host and port for adding a machine by hand, with copy buttons.
 
 ### Changed
 
-- **The Control Center page is rebuilt** in three sections, Case file, Field agents and Replicas, and works on its own: the SMART Sniffer integration is no longer needed to see your drives' health. The verdict on every card (Attention, Maybe, Health OK, Health not known) comes from the integration's own rule modules, built into the image from the smart-sniffer release this version names, so the page and Home Assistant agree.
+- **The integration is optional.** The page shows your drives' health without it; the integration adds entities, history, notifications and automations.
 - **The replica agent always runs**, inside the app on port 9100, and does not advertise itself with mDNS, so Home Assistant never discovers it on its own. All replicas share one integration entry.
-- **Field agents are stored in the app's options** (the new **Field Agents** option), so they are part of Home Assistant backups. Adding, hiding and saving a password write the options once and do not restart the app.
-- **New permissions**: Home Assistant API access (`homeassistant_api`), to add this app's agents, replicas and field agents to the integration and find their device pages; and `/share`, mounted read-write for the replica folder. The app's existing Supervisor access now also reads the network information behind the scan and stores the field agents.
-- **The image takes the integration's rules, the replica agent and the shipped replicas** from one download of the smart-sniffer release, and the build fails if fewer than six replica files load. The stale `mock-agent.py` copy in this repository is gone.
+- **The web UI proxy behind ingress does more.** Besides serving the page and reading the agents, it runs the rule modules for the verdicts, reads field agents, and calls the Supervisor and Home Assistant for the options, the network information, adding, renaming and removing. The page's scripts and styles are named by their content, so a browser does not keep running the old page after an update.
+- **The Mission Log panel is gone.** An **App log** link in the page footer opens the app's log in Home Assistant, which holds the agent's lines and the page's.
+- **New permissions** -- Home Assistant API access (`homeassistant_api`), to add this app's agents, replicas and field agents to the integration and find, rename, disable or delete their devices; and `/share`, mounted read-write for the replica folder. The existing Supervisor access now also reads the network information behind the scan and writes the app's options.
+- **New options** -- Field Agents, Card Order, Hidden Cards, Thresholds, Card Names and Machine Names, all set from the page. Writing them does not restart the app. Mock Agent Port is now Replica Agent Port.
+- **The image takes the integration's rules, the replica agent and the shipped replicas** from one download of the smart-sniffer v0.8.2 release, and the build fails if fewer than six replica files load. This repository's own copy of the mock agent is gone.
 
 ### Removed
 
-- **The Test Lab switch and the `mock_mode` option** (Enable Mock Test Drives). The app removes the old option from its options when it starts after the update. Drives you had in the Test Lab come back as replicas, and an integration entry you had for the Test Lab now serves the replicas.
-- The Control Center's Connect and Disconnect buttons. Adding is the exit glyph; removing an entry happens in Home Assistant.
+- **The Test Lab, its mock drives and the Enable Mock Test Drives (`mock_mode`) option.** Replicas take their place.
+
+### Upgrading from 0.2.x
+
+- The Supervisor leaves the old `mock_mode` setting in the app's options after the update. When the app starts, it removes every option key the app no longer has, in one write, and its log says so once.
+- Mock drives you had in the Test Lab come back as replicas, and an integration entry you had for them now serves the replicas, so nothing needs to be added again.
 
 ## 0.2.12 — 2026-09-17
 
