@@ -22,7 +22,7 @@
 - [ ] Mask mDNS hostname in discovery dialog with friendly name ("Found HAOS Drive")
 - [ ] Mask 172.30.33.x IP with "Local" or "This system" in UI
 - [x] ~~Auto-detect mock agent in "Add Device" config flow (check 172.30.33.1:9100)~~ Not needed since 0.3.0: the replica agent never advertises itself, and the Control Center adds it to the integration.
-- [x] ~~Guided mock setup flow ("Mock Test Lab detected, add it?")~~ Replaced in 0.3.0 by the exit glyph on each replica card.
+- [x] ~~Guided setup flow for the mock drives~~ Replaced in 0.3.0 by the exit glyph on each replica card.
 
 ## Web UI
 - [x] ~~Show mock agent IP/port when mock mode is enabled~~ No mock mode since 0.3.0; the replica agent always runs.

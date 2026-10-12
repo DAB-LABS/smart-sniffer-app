@@ -27,9 +27,9 @@ The app runs as an HA add-on, so you'll need a Home Assistant instance for testi
 2. Add your fork as a custom repository in **Settings → Add-ons → Repositories**
 3. Install and test from there
 
-### Mock Test Lab
+### Replicas
 
-Enable **Mock Test Drives** in the app config to test without touching real hardware. Mock drives behave identically to real drives from the integration's perspective — you can adjust SMART attributes in the web UI and watch the integration respond.
+Test without touching real hardware with replicas: fake drives and pools that the app's replica agent always serves. Add them on the Control Center page from the + card, switch their scenarios or edit raw values on their cards, and add them to Home Assistant with the exit icon. To the integration they look like real drives, so you can watch it respond.
 
 ## What Can You Work On?
 
@@ -45,8 +45,8 @@ Check the [TODO.md](TODO.md) for tracked items, or look at [open issues](https:/
 The app has three main components:
 
 - **Go Agent** (`smartha-agent`) — reads SMART data from host drives via `smartctl`, serves it over HTTP, and advertises via mDNS. The binary is downloaded at build time from the [integration repo releases](https://github.com/DAB-LABS/smart-sniffer/releases).
-- **Mock Agent** (`mock-agent.py`) — Python script that simulates drives with configurable SMART attributes for testing.
-- **Web UI** (`web/index.html`) — Alpine.js + Tailwind dashboard served via HA ingress. Shows agent status, drive data, and mock controls.
+- **Replica Agent** (`mock-agent.py`): Python script that serves the replicas, fake drives and pools with SMART data you control.
+- **Control Center** (`web/`): the app's page, served via HA ingress by `web/proxy.py`. Shows this machine's drives, the replicas and field agents on other network machines.
 
 ## Code Style
 

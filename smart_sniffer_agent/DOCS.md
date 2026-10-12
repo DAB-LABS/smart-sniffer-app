@@ -131,7 +131,7 @@ Changing the Agent Port, Bearer Token or Scan Interval needs an app restart, as 
 
 ## Upgrading from 0.2.x
 
-The Test Lab and its **Enable Mock Test Drives** option are gone. The old setting stays in the app's options after the update until the app starts; the app then removes it, and its log says so once. Drives you had in the Test Lab come back as replicas, and an integration entry you had for the Test Lab now serves the replicas, so nothing needs to be added again.
+The 0.2.x mock drives and their **Enable Mock Test Drives** option are gone; replicas on the Control Center page take their place. The old setting stays in the app's options after the update until the app starts; the app then removes it, and its log says so once. Mock drives you had come back as replicas, and an integration entry you had for them now serves the replicas, so nothing needs to be added again.
 
 ## Security & Permissions
 

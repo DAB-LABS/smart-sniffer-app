@@ -1560,7 +1560,7 @@ function cc() {
       return o ? o.label : '';
     },
     // What the picker shows: the scenario's name, or "Choose scenario" for a
-    // replica that has none yet (one carried over from the old Test Lab).
+    // replica that has none yet (one carried over from the 0.2.x mock drives).
     scenLabel(it) {
       return this.scenarioName(it) || 'Choose scenario';
     },

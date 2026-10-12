@@ -17,9 +17,12 @@ Key behaviors:
 - Advertises itself via mDNS so the SMART Sniffer integration can auto-discover it.
   The mDNS name is unique per HA instance (smartha-<ha-hostname>) to avoid collisions
   on multi-HA networks. Manual fallback: host 0449a086-smart-sniffer-agent, port 9099.
-- Includes a Test Lab with simulated drives for safely testing the integration without
-  real hardware. Mock drives survive restarts and are manageable via the built-in web UI.
-- The web UI (Agent Control Center) is accessible from the HA add-on sidebar.
+- Includes replicas: fake drives and pools with SMART data you control, for safely
+  testing the integration without real hardware. A replica agent inside the add-on
+  serves them, and replica files survive restarts and updates.
+- The web UI (the Control Center page) is accessible from the HA add-on sidebar. It shows
+  this machine's drives, the replicas, and drives on other network machines that run
+  the SMART Sniffer agent (field agents).
 - On some hardware, Protection Mode must be turned OFF (Settings -> Apps -> SMART
   Sniffer -> Protection mode) for the add-on to access drive device nodes.
 
@@ -30,8 +33,7 @@ Configuration options:
 - Agent Port (default: 9099)
 - Bearer Token (optional, must match what is configured in the integration)
 - Scan Interval in seconds (default: 60)
-- Enable Mock Test Drives (off by default)
-- Mock Agent Port (default: 9100)
+- Replica Agent Port (default: 9100)
 
 What this add-on is NOT:
 - Not for monitoring remote machines -- use the standalone Go agent from smart-sniffer
@@ -45,14 +47,14 @@ What this add-on is NOT:
 
 - [smart-sniffer-app (this repo)](https://github.com/DAB-LABS/smart-sniffer-app):
   Add-on source (smart_sniffer_agent/), configuration schema (repository.yaml),
-  Test Lab, and web UI.
+  replica agent, and the Control Center page.
 - [smart-sniffer](https://github.com/DAB-LABS/smart-sniffer): Primary repo. HACS
   integration, standalone Go agent for remote machines, and all project documentation.
 
 ## Documentation
 
 - [README](https://github.com/DAB-LABS/smart-sniffer-app/blob/main/README.md):
-  Installation steps, configuration reference, Test Lab usage, Security and Permissions
+  Installation steps, configuration reference, Control Center and replicas, Security and Permissions
   section (why SYS_RAWIO/SYS_ADMIN are needed), and troubleshooting guide.
 - [CHANGELOG](https://github.com/DAB-LABS/smart-sniffer-app/blob/main/CHANGELOG.md):
   Release history for the add-on.

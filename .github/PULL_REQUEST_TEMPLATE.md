@@ -12,7 +12,7 @@
 
 ## Testing
 
-<!-- How was this tested? Hardware, architecture, Test Lab, specific HA version? -->
+<!-- How was this tested? Hardware, architecture, replicas, field agents, specific HA version? -->
 
 ## Checklist
 

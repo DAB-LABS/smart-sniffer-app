@@ -40,7 +40,8 @@ Referer.
     REPLICAS        board | carried | 0       three replicas (SMART failed, NVMe wear, a
                                               degraded pool), the first in HA; carried:
                                               the same, the NVMe one with no current
-                                              scenario (as the old Test Lab left it), and
+                                              scenario (as the 0.2.x mock drives left
+                                              it), and
                                               the Device Statistics replica; none
     REPLICA_FOLDER  ok | missing | read_only  upload and save enabled or not
     MDNS            on | off                  the agent's mDNS name in /app/info, or none

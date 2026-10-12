@@ -1380,7 +1380,7 @@ def test_scenario_picker_on_touch(browser, server):
 
 
 def test_replica_with_no_scenario(open_page):
-    """A replica carried over from the old Test Lab has no current scenario: the picker says so."""
+    """A replica carried over from the 0.2.x mock drives has no current scenario: the picker says so."""
     p = open_page("REPLICAS=carried")
     rep = by_id(p, REP_NVME)
     pick, current, options = _scenario(rep)

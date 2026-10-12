@@ -38,7 +38,7 @@ body:
       options:
         - App (add-on / agent)
         - Web UI
-        - Test Lab / Mock Drives
+        - Replicas (fake drives for testing)
         - CI/CD / Build
         - Documentation
         - Other
