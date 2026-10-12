@@ -1306,6 +1306,9 @@ function cc() {
     // icon) arms two buttons instead, growing left: Remove here, and the
     // same with what Home Assistant can do (ha_removal from /ha/devices:
     // delete its device or the machine's entry, or disable its device).
+    // A replica in Home Assistant keeps the single Remove?, and its second
+    // click takes the replica's device and entities out of Home Assistant
+    // too (ha_removal "replica").
     // Leaving them, Esc, focus going elsewhere or ARM_MS put the trash back.
     armed(c) {
       return !!(this.ui.arm && this.ui.arm.id === c.id);
@@ -1313,17 +1316,21 @@ function cc() {
     haRemoval(c) {
       if (this.glyph(c).kind !== 'blue') return null;
       const mode = this.ha && this.ha.ha_removal && this.ha.ha_removal[c.id];
-      return ['delete', 'disable', 'entry'].includes(mode) ? mode : null;
+      return ['delete', 'disable', 'entry', 'replica'].includes(mode) ? mode : null;
     },
     armedHa(c) {
-      return this.armed(c) && !!this.ui.arm.ha;
+      return this.armed(c) && !!this.ui.arm.ha && this.ui.arm.ha !== 'replica';
+    },
+    armedLabel(c) {
+      const also = this.ui.arm && this.ui.arm.ha === 'replica' ? ' It leaves Home Assistant too.' : '';
+      return `${this.removeText(c)} Press again to remove.${also}`;
     },
     haRemoveText() {
       const a = this.ui.arm;
       return a && a.ha === 'disable' ? 'Remove here + disable entities' : 'Remove here + delete entities';
     },
     trashClick(c) {
-      if (this.armed(c)) { this.confirmRemove(c, null); return; }
+      if (this.armed(c)) { this.confirmRemove(c, this.ui.arm.ha === 'replica' ? 'replica' : null); return; }
       this.disarm();
       this.ui.confirm = null;
       const arm = { id: c.id, busy: false, timer: null, ha: this.haRemoval(c) };
@@ -1352,6 +1359,7 @@ function cc() {
         return `Disabled in Home Assistant. It cannot be deleted while the agent still sees the ${c.kind === 'pool' ? 'pool' : 'drive'}.`;
       }
       if (data && data.home_assistant === 'deleted') return 'Deleted from Home Assistant.';
+      if (c.src === 'replicas') return 'Removed here. Home Assistant kept its entities; remove them there.';
       const reason = String((data && data.ha_error) || 'no answer').replace(/[.\s]+$/, '');
       return `Removed here. Home Assistant did not take the change: ${reason}.`;
     },
@@ -1373,7 +1381,10 @@ function cc() {
       this.gone[c.id] = true;
       this.order = this.order.filter((id) => id !== c.id);
       this.hidden = this.hidden.filter((id) => id !== c.id);
-      if (ha) this.showToast(this.haRemovedText(c, r.data));
+      // A replica says nothing when Home Assistant let it go too.
+      if (ha && !(ha === 'replica' && r.data && r.data.home_assistant === 'deleted')) {
+        this.showToast(this.haRemovedText(c, r.data));
+      }
       if (c.src === 'replicas') {
         await this.loadReplicas();
       } else if (r.data && r.data.host_removed) {

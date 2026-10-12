@@ -932,6 +932,44 @@ def test_trash_in_home_assistant_last_card_and_refusal(open_page):
                                       "Unable to remove device: the agent still reports this drive.")
 
 
+def test_trash_on_a_replica_in_home_assistant(open_page):
+    p = open_page()
+    rep = by_id(p, REP_FAILED)  # blue: the replica has a device there
+    trash = _trash(rep)
+    trash.click()
+    # One Remove?, as on a card not in Home Assistant, that says where it goes.
+    assert trash.inner_text() == "Remove?" and _ha_btn(rep).count() == 0
+    assert rep.get_by_role("group").count() == 0
+    assert trash.get_attribute("aria-label") == \
+        "Remove this replica? Press again to remove. It leaves Home Assistant too."
+    # The second click removes it here and in Home Assistant, and says nothing.
+    trash.click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_FAILED}\"]')")
+    dels = p.api("DELETE", r"/cards/")
+    assert len(dels) == 1 and unquote(dels[0][1]).endswith(f"/cards/{REP_FAILED}?ha=replica")
+    p.page.wait_for_timeout(300)
+    assert not _toast(p).is_visible()
+    # A replica not in Home Assistant: the page only.
+    _trash(by_id(p, REP_NVME)).click()
+    assert _trash(by_id(p, REP_NVME)).get_attribute("aria-label") == \
+        "Remove this replica? Press again to remove."
+    _trash(by_id(p, REP_NVME)).click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_NVME}\"]')")
+    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith(f"/cards/{REP_NVME}")
+
+
+def test_trash_on_a_replica_home_assistant_refuses(open_page):
+    p = open_page("HA_REMOVE=fail")
+    _trash(by_id(p, REP_FAILED)).click()
+    _trash(by_id(p, REP_FAILED)).click()
+    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_FAILED}\"]')")
+    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith("?ha=replica")
+    # Removed here anyway, and one short muted line says what is left.
+    toast = _toast(p)
+    assert toast.inner_text() == "Removed here. Home Assistant kept its entities; remove them there."
+    assert toast.evaluate("e => getComputedStyle(e).color") != ATT
+
+
 def test_trash_two_taps(browser, server):
     urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
     ctx = browser.new_context(viewport={"width": 390, "height": 900}, has_touch=True, is_mobile=True)

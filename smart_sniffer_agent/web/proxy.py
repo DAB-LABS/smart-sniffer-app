@@ -33,7 +33,9 @@ It also answers the Control Center's own routes:
   DELETE /cards/<id>             remove one card (not a drive of this machine);
                                  ?ha=disable, delete or entry also disables or
                                  deletes its device in Home Assistant, or
-                                 deletes its machine's entry (last card)
+                                 deletes its machine's entry (last card);
+                                 ?ha=replica deletes a replica's device once
+                                 the integration no longer sees the drive
   GET  /cards/<id>/file          one card as a JSON file
   GET, PUT /cards/<id>/thresholds  a drive's thresholds, from Home Assistant
                                  when the drive is in it, else the app's own;
@@ -1267,6 +1269,24 @@ class Supervisor:
             return err.reason
         return None
 
+    def poll_device(self, device_id: str) -> bool:
+        """Have the integration poll the agent behind a device now:
+        homeassistant.update_entity on one of the device's entities, which
+        for a coordinator's entity asks the coordinator for a refresh. Core
+        answers once it has run (or after its own 10 s). False when there
+        was no entity to update or Core did not take the call."""
+        # expand() keeps the entities that have a state: a disabled one
+        # cannot be updated.
+        status, entities = self.core("POST", "/template", {"template": (
+            "{{ expand(device_entities(%s)) | map(attribute='entity_id') | list | to_json }}"
+            % json.dumps(device_id))})
+        if status != 200 or not isinstance(entities, list) or not entities:
+            log(f"No entity of device {device_id} to update")
+            return False
+        status, _ = self.core("POST", "/services/homeassistant/update_entity",
+                              {"entity_id": str(entities[0])})
+        return status == 200
+
     def delete_entry(self, entry_id: str) -> str | None:
         """Delete a config entry, which takes its devices and entities. None
         when Home Assistant did, else the reason."""
@@ -2136,12 +2156,21 @@ def every_card_removed(host: dict[str, Any], response: Any) -> bool:
 #              integration lets its device be deleted;
 #   "disable"  the agent still reports it (or is not reporting at all, when
 #              the integration deletes nothing): the device is disabled,
-#              which stops its entities and keeps their history.
-HA_REMOVAL_MODES = ("delete", "disable", "entry")
+#              which stops its entities and keeps their history;
+#   "replica"  a replica: the replica agent stops reporting it, the
+#              integration polls, and its device is deleted. The replicas'
+#              entry stays, even with no replica left.
+HA_REMOVAL_MODES = ("delete", "disable", "entry", "replica")
+# How long a replica's removal keeps asking Home Assistant to delete its
+# device, and the wait between asks. The integration judges by its last
+# poll, and a poll asked for within 10 s of another waits out the rest.
+HA_REPLICA_SETTLE_SECONDS = 12.0
+HA_REPLICA_RETRY_SECONDS = 1.0
 
 
 def ha_removal_mode(item_type: Any, card_key: str, target: dict[str, Any] | None,
-                    response: Any, last: bool, entries_only: bool = False) -> str | None:
+                    response: Any, last: bool, entries_only: bool = False,
+                    replica: bool = False) -> str | None:
     """The Home Assistant removal for one card, or None when the card is not
     in Home Assistant (no exit icon, or a grey one).
 
@@ -2149,10 +2178,13 @@ def ha_removal_mode(item_type: Any, card_key: str, target: dict[str, Any] | None
     removed with the trash included: what the agent reports. ``last`` is
     whether this card is the machine's last one on the page. With
     ``entries_only`` Core's device list could not be read, so only the
-    entry is known."""
+    entry is known. A ``replica`` with a device is always "replica": its
+    removal stops the replica agent reporting it, and the entry stays."""
     if target is None or item_type not in ("drive", "pool"):
         return None
     device = (target.get("devices") or {}).get(card_key)
+    if replica:
+        return "replica" if device is not None else None
     if device is None and not entries_only:
         return None
     if last:
@@ -2496,6 +2528,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     cache: FleetCache = FleetCache(None)
     scans: ScanManager = ScanManager()
     ha_cache_seconds: float = HA_API_CACHE_SECONDS
+    ha_replica_seconds: float = HA_REPLICA_SETTLE_SECONDS
     _ha_cache: tuple[float, dict[str, Any]] | None = None
     # Entry ids whose diagnostics failed; kept for the process life.
     _diagnostics_failed: set[str] = set()
@@ -3413,10 +3446,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _route_card_delete(self, parsed, cid: str) -> None:
         ha = (parse_qs(parsed.query).get("ha") or [None])[0]
         if ha is not None and ha not in HA_REMOVAL_MODES:
-            raise ApiError(400, "bad_request", "ha must be delete, disable or entry")
+            raise ApiError(400, "bad_request", "ha must be delete, disable, entry or replica")
         host_key, key = self._check_card_host(cid, self.host_store.cards()["hosts"])
         if host_key == "self":
             raise ApiError(409, "cannot_remove", "A drive of this machine can be hidden, not removed.")
+        # The replicas' entry stays, even with no replica left; ha=replica is
+        # for replicas only.
+        if (ha == "replica" and host_key != "replicas") or (ha == "entry" and host_key == "replicas"):
+            raise ApiError(400, "bad_request", "ha=replica is for replicas, which keep their entry")
         # What Home Assistant has of the card is read before the page removal,
         # which can take the machine (and its last read) with it.
         ha_target = None
@@ -3438,6 +3475,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         for. None when done, else the reason, as Home Assistant gave it."""
         if target is None:
             return "the card is not in Home Assistant"
+        if mode == "replica":
+            return self._ha_remove_replica(target, key)
         if mode == "entry":
             if not machine_gone:
                 return "other cards of this machine are still on the page"
@@ -3457,6 +3496,27 @@ class ProxyHandler(BaseHTTPRequestHandler):
             type(self)._ha_cache = None  # the next /ha/devices reads the change
             return None
         return reason.strip().rstrip(".") or "no reason given"
+
+    def _ha_remove_replica(self, target: dict[str, Any], key: str | None) -> str | None:
+        """Delete a removed replica's device. The integration refuses while
+        its last poll still has the drive (device_removal.py), so each try
+        first asks for a poll by updating one of the device's entities; a
+        refusal is tried again until ha_replica_seconds have passed."""
+        device = (target.get("devices") or {}).get(key or "")
+        if not isinstance(device, str):
+            return "the card has no device in Home Assistant"
+        command = {"type": "config/device_registry/remove_config_entry",
+                   "device_id": device, "config_entry_id": target["entry_id"]}
+        deadline = time.monotonic() + type(self).ha_replica_seconds
+        while True:
+            self.supervisor.poll_device(device)
+            reason = self.supervisor.registry_command(command)
+            if reason is None:
+                type(self)._ha_cache = None  # the next /ha/devices reads the change
+                return None
+            if time.monotonic() + HA_REPLICA_RETRY_SECONDS > deadline:
+                return reason.strip().rstrip(".") or "no reason given"
+            time.sleep(HA_REPLICA_RETRY_SECONDS)
 
     def _remove_card(self, host_key: str, key: str | None, cid: str) -> dict[str, Any]:
         """Take a card off the page. The answer, with machine_gone (taken out
@@ -4016,7 +4076,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             for card in cards:
                 card_key = split_card_id(card["card_id"])[1] or ""
                 mode = ha_removal_mode(card.get("type"), card_key, target, response,
-                                       len(counted) == 1 and card is counted[0], entries_only)
+                                       len(counted) == 1 and card is counted[0], entries_only,
+                                       replica=key == "replicas")
                 if mode is not None:
                     out[card["card_id"]] = mode
         return out
@@ -4264,6 +4325,9 @@ def main():
                         help="The agent's mDNS name, shown on the page (empty: none)")
     parser.add_argument("--ha-cache-seconds", type=float, default=HA_API_CACHE_SECONDS,
                         help="How long /ha/devices is cached")
+    parser.add_argument("--ha-replica-seconds", type=float, default=HA_REPLICA_SETTLE_SECONDS,
+                        help="How long a replica's removal keeps asking Home Assistant "
+                             "to delete its device")
     parser.add_argument("--static-dir", type=str, default=STATIC_DIR,
                         help="Where the page, its scripts and images are")
     parser.add_argument("--data-dir", type=str, default="/data",
@@ -4282,6 +4346,7 @@ def main():
         args.supervisor_url, os.environ.get("SUPERVISOR_TOKEN", "")
     )
     ProxyHandler.ha_cache_seconds = args.ha_cache_seconds
+    ProxyHandler.ha_replica_seconds = args.ha_replica_seconds
     ProxyHandler.cache = FleetCache(
         os.path.join(args.data_dir, "fleet-cache.json") if args.data_dir else None
     )

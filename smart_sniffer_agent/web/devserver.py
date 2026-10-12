@@ -29,7 +29,7 @@ Referer.
     HA_NAME         ok | fail                 a rename reaches Home Assistant's device, or
                                               Home Assistant does not take it
     HA_REMOVE       ok | fail                 the trash's Home Assistant half (disable,
-                                              delete, entry) is taken, or refused
+                                              delete, entry, replica) is taken, or refused
     NETWORK         supervisor | none | wide  prefill 10.0.10.0/24; null (page falls
                                               back to its own address); 10.0.0.0/16
     SCAN            normal | slow | none      rows arrive over 3 s; over 12 s; nothing
@@ -1798,7 +1798,9 @@ class Handler(BaseHTTPRequestHandler):
         """Card id -> what the trash can do in Home Assistant, as the proxy
         works it out: "entry" on a machine's last card, "delete" for a drive
         whose device the agent no longer reports (world.ha_gone), "disable"
-        for the rest of its cards in Home Assistant. HAOS cards have none."""
+        for the rest of its cards in Home Assistant, "replica" for every
+        replica with a device (the replicas' entry stays). HAOS cards have
+        none."""
         out = {}
         entries_only = flags["HA_LOOKUP"] == "entries_only"
         responses = self._responses(flags, world)
@@ -1815,7 +1817,10 @@ class Handler(BaseHTTPRequestHandler):
                 device = cid.partition("|")[2] in e["devices"]
                 if not device and not entries_only:
                     continue
-                if len(counted) == 1 and c is counted[0]:
+                if t == "replicas":
+                    if device:
+                        out[cid] = "replica"
+                elif len(counted) == 1 and c is counted[0]:
                     out[cid] = "entry"
                 elif device:
                     gone = cid in world.ha_gone and response.get("status") == "ok"
@@ -1832,7 +1837,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ha_error": "Unable to remove device: the agent still reports this drive"}
         if ha == "entry":
             del world.ha[host_key]
-        elif ha == "delete":
+        elif ha in ("delete", "replica"):
             entry["devices"].pop(key, None)
         return {"home_assistant": "disabled" if ha == "disable" else "deleted", "ha_error": None}
 
@@ -1913,7 +1918,9 @@ class Handler(BaseHTTPRequestHandler):
             if host_key == "self":
                 return self._err(409, "cannot_remove", "A drive of this machine can be hidden, not removed.")
             ha = (parse_qs(urlparse(self.path).query).get("ha") or [None])[0]
-            if ha is not None and ha not in ("delete", "disable", "entry"):
+            if ha is not None and ha not in ("delete", "disable", "entry", "replica"):
+                return self._err(400, "bad_request")
+            if (ha == "replica" and host_key != "replicas") or (ha == "entry" and host_key == "replicas"):
                 return self._err(400, "bad_request")
             host_removed = False
             if host_key == "replicas":

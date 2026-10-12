@@ -27,6 +27,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -160,6 +161,11 @@ class FakeState:
         self.ws_closed_cleanly: list[bool] = []
         self.ws_error: dict[str, Any] = {"code": "not_found", "message": "Device not found"}
         self.entry_delete_status = 200  # else Core refuses to delete an entry
+        # device id -> the entity ids with a state, for the replica removal's poll.
+        self.device_entities: dict[str, list[str]] = {}
+        # How many remove_config_entry commands the integration refuses
+        # first, as it does while its last poll still has the drive.
+        self.remove_refusals = 0
 
 
 STATE = FakeState()
@@ -295,6 +301,11 @@ class FakeSupervisor(BaseHTTPRequestHandler):
                         STATE.int_thresholds.get(entry_id, {}).get(drive_id) or {})
                 drives[drive_id] = {"summary": {"model": "x"}, "attention": attention}
             _json_reply(self, 200, {"data": {"config_entry": config, "drives": drives}})
+        elif core == "/template" and method == "POST" and "device_entities(" in body["template"]:
+            device = re.search(r'device_entities\("([^"]+)"\)', body["template"]).group(1)
+            _json_reply(self, 200, STATE.device_entities.get(device, []))
+        elif core == "/services/homeassistant/update_entity" and method == "POST":
+            _json_reply(self, 200, [])
         elif core == "/template" and method == "POST":
             if STATE.devices is None:
                 _json_reply(self, 400, {"message": "Error rendering template"})
@@ -391,6 +402,9 @@ def _fake_core_websocket(handler: BaseHTTPRequestHandler) -> None:
         reply = {"id": command["id"], "type": "result", "success": True, "result": command.get("data")}
     elif STATE.ws_mode == "refuse" or command.get("type") not in (
             "config/device_registry/update", "config/device_registry/remove_config_entry"):
+        reply = {"id": command["id"], "type": "result", "success": False, "error": STATE.ws_error}
+    elif command["type"] == "config/device_registry/remove_config_entry" and STATE.remove_refusals:
+        STATE.remove_refusals -= 1
         reply = {"id": command["id"], "type": "result", "success": False, "error": STATE.ws_error}
     elif command["type"] == "config/device_registry/remove_config_entry":
         reply = {"id": command["id"], "type": "result", "success": True, "result": None}
@@ -710,6 +724,7 @@ def proxy(backends, mock_agent, data_dir):
         f"--token={APP_TOKEN}",
         f"--data-dir={data_dir}",
         "--ha-cache-seconds=0",
+        "--ha-replica-seconds=2",
     ], TOKEN)
     client.agent_port = agent_port  # type: ignore[attr-defined]
     client.mock_port = mock_port  # type: ignore[attr-defined]
@@ -3253,6 +3268,13 @@ def test_ha_removal_mode(mod):
     bare = {"entry_id": "e1", "devices": {}, "identifiers": {}}
     assert mode("drive", "S1", bare, read, True, True) == "entry"
     assert mode("drive", "S1", bare, read, False, True) is None
+    # A replica with a device: always "replica", its last one too (the
+    # replicas' entry stays); none without a device.
+    assert mode("drive", "S1", target, read, False, replica=True) == "replica"
+    assert mode("drive", "S1", target, read, True, replica=True) == "replica"
+    assert mode("pool", "pool:tank", target, read, True, replica=True) == "replica"
+    assert mode("drive", "S9", target, read, True, replica=True) is None
+    assert mode("drive", "S1", bare, read, True, True, replica=True) is None
 
 
 def _field_in_ha(proxy, field, devices: list[dict[str, Any]]) -> str:
@@ -3380,3 +3402,76 @@ def test_card_delete_ha_not_in_home_assistant(proxy, field):
     status, body = _delete(proxy, f"{key}|NUC-2", "delete")
     assert body["ha_error"] == "the card is not in Home Assistant" and body["host_removed"] is True
     assert not STATE.ws_commands
+
+
+def _replicas_in_ha(proxy) -> tuple[str, str]:
+    """Two replicas on the page, each with a device under the replicas'
+    entry. Their card ids."""
+    status, body = proxy.post("/replicas/add", {"files": ["shipped.smart-failed", "shipped.nvme-wear"]})
+    assert status == 201
+    _, read = proxy.get("/fleet/hosts/replicas/drives")
+    mine = {c["card_id"] for c in body["cards"]}
+    items = [i for i in read["items"] if i["id"] in mine]
+    STATE.entries = [_entry("e-lab", f"SMART Sniffer ({AGENT_HOST}:{proxy.mock_port})")]
+    STATE.devices = [_drive_device(f"dev-r{n}", "e-lab", i["card_id"].split("|", 1)[1], i["id"])
+                     for n, i in enumerate(items, 1)]
+    STATE.device_entities = {f"dev-r{n}": [f"sensor.r{n}_temperature", f"sensor.r{n}_health"]
+                             for n in range(1, len(items) + 1)}
+    return items[0]["card_id"], items[1]["card_id"]
+
+
+def _updates() -> list[Any]:
+    return [c[2] for c in STATE.calls if c[1] == "/core/api/services/homeassistant/update_entity"]
+
+
+@needs_mock
+@needs_rules
+def test_card_delete_ha_replica(proxy):
+    first, second = _replicas_in_ha(proxy)
+    # Every replica in Home Assistant is a "replica", the last one too.
+    assert proxy.get("/ha/devices")[1]["ha_removal"] == {first: "replica", second: "replica"}
+    # The integration refuses once (its last poll still had the drive): the
+    # removal polls through an entity of the device and asks again.
+    STATE.remove_refusals = 1
+    STATE.ws_error = {"code": "home_assistant_error",
+                      "message": "The replica agent still reports this drive."}
+    status, body = _delete(proxy, first, "replica")
+    assert status == 200 and body == {"removed": first, "host_removed": False,
+                                      "home_assistant": "deleted", "ha_error": None}
+    assert _updates() == [{"entity_id": "sensor.r1_temperature"}] * 2
+    removes = [c for c in STATE.ws_commands if c["type"] == "config/device_registry/remove_config_entry"]
+    assert removes == [{"type": "config/device_registry/remove_config_entry", "device_id": "dev-r1",
+                        "config_entry_id": "e-lab", "id": 1}] * 2
+    assert [d["id"] for d in STATE.devices] == ["dev-r2"]
+    _, read = proxy.get("/fleet/hosts/replicas/drives")
+    assert first not in {i["card_id"] for i in read["items"]}
+    assert proxy.get("/ha/devices")[1]["ha_removal"] == {second: "replica"}
+    # Refused past the wait: the replica is gone here, the reason passed on,
+    # and the replicas' entry is never touched.
+    STATE.calls.clear()
+    STATE.remove_refusals = 99
+    status, body = _delete(proxy, second, "replica")
+    assert status == 200 and body["home_assistant"] == "failed"
+    assert body["ha_error"] == "The replica agent still reports this drive"
+    assert len(_updates()) >= 2
+    _, read = proxy.get("/fleet/hosts/replicas/drives")
+    assert second not in {i["card_id"] for i in read["items"]}
+    assert [e["entry_id"] for e in STATE.entries] == ["e-lab"]
+    assert not any(c[0] == "DELETE" and "config_entries" in c[1] for c in STATE.calls)
+
+
+@needs_mock
+@needs_rules
+def test_card_delete_ha_replica_no_entity_and_bad_requests(proxy, field):
+    first, second = _replicas_in_ha(proxy)
+    # No entity with a state to poll through: the removal still asks.
+    STATE.device_entities = {}
+    status, body = _delete(proxy, first, "replica")
+    assert status == 200 and body["home_assistant"] == "deleted"
+    assert not _updates()
+    # The replicas keep their entry; ha=replica is for replicas only.
+    assert _delete(proxy, second, "entry")[0] == 400
+    key = _field_in_ha(proxy, field, [_drive_device("dev-1", "e-field", "NUC-1", "sda")])
+    assert _delete(proxy, f"{key}|NUC-1", "replica")[0] == 400
+    assert STATE.options["hosts"][0].get("removed", []) == []
+    _delete(proxy, second, None)
