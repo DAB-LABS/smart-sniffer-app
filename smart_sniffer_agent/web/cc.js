@@ -1489,7 +1489,7 @@ function cc() {
         integration_not_loaded: 'The integration is not installed.',
         invalid_auth: 'Home Assistant refused the password.',
         unreachable: 'Home Assistant is not answering.',
-      }[why] || 'Home Assistant did not add it. The Mission Log may say why.';
+      }[why] || 'Home Assistant did not add it. The App log may say why.';
     },
 
     // ── Field agents ────────────────────────────────────────────────

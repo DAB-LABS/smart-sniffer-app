@@ -1709,7 +1709,7 @@ def test_first_run(open_page):
     assert p.page.get_by_role("button", name="Refresh").is_visible()
     assert p.page.get_by_role("button", name="Add a drive, or a replica for testing").is_visible()
     assert p.page.locator(".app-foot a:visible").all_inner_texts() == [
-        "Mission Log", "App configuration", "GitHub", "HAIR, infrared remotes in Home Assistant"]
+        "App log", "App configuration", "GitHub", "HAIR, infrared remotes in Home Assistant"]
     assert p.page.locator(".exit").count() == 0
 
 
@@ -2422,8 +2422,9 @@ def test_footer_links(open_page):
     p = open_page()
     foot = p.page.locator("footer.app-foot")
     assert foot.locator("a:visible").all_inner_texts() == [
-        "Mission Log", "App configuration", "Integration", "GitHub", "HAIR, infrared remotes in Home Assistant"]
-    assert foot.get_by_role("link", name="Mission Log").get_attribute("title") == "The app's log in Home Assistant"
+        "App log", "App configuration", "Integration", "GitHub", "HAIR, infrared remotes in Home Assistant"]
+    assert foot.get_by_role("link", name="App log").get_attribute("title") == \
+        "The app's log in Home Assistant, from the agent and this page"
     hair = foot.get_by_role("link", name="HAIR, infrared remotes in Home Assistant")
     assert hair.get_attribute("href") == "https://github.com/DAB-LABS/HAIR"
     assert hair.get_attribute("target") == "_blank" and hair.get_attribute("rel") == "noopener"
