@@ -40,8 +40,10 @@ homeassistant_api: true
 
 # /share: the user's replica files live in /share/smart-sniffer/replicas, so
 # they survive app updates and can be dropped in over Samba or SSH
+# /media: USB drives HA mounts there, measured for disk space
 map:
   - share:rw
+  - media:ro
 
 # AppArmor — custom profile (apparmor.txt) provides the Protection Mode toggle
 # in the HA UI and documents what the container actually accesses.

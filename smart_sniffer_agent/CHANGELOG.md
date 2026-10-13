@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Disk space for USB drives and the data disk** -- USB drives Home Assistant mounts under `/media` get disk space bars on their cards and Disk Usage entities in the integration. So does the data disk, shown as `/data`, whether it is still on the boot drive or on a drive picked with **Move data disk**. The drives are found when the app starts; restart the app after plugging in a USB drive.
+
+### Changed
+
+- **New permission** -- `/media`, mounted read-only, to measure the USB drives' disk space.
+
 ## 0.3.0 -- 2026-10-12
 
 The app's page is rebuilt as the **Control Center**: your drives' health on its own page, with or without the SMART Sniffer integration. It also shows the drives on your other machines that run the SMART Sniffer agent, and replicas, fake drives for testing Home Assistant, which replace the Test Lab. Built against smart-sniffer v0.8.2.

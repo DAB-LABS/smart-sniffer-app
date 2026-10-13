@@ -149,10 +149,34 @@ else
     bashio::log.warning "Supervisor API not available — mDNS will use container hostname"
 fi
 
+# ── Find the mounts to measure for disk space ────────────────────────────────
+# The agent measures disk space only for the filesystems its config lists.
+# mounts.py writes that config from the mounts Home Assistant gives the app:
+# the data disk (/data, also after Move data disk) and USB drives under
+# /media. It is a snapshot, so a
+# drive plugged in later shows after an app restart. If it fails, the agent
+# starts without the config and disk space is off.
+AGENT_CONFIG="/data/agent-config.yaml"
+FS_COUNT=0
+if MOUNT_LINES="$(python3 /opt/mounts.py --out "${AGENT_CONFIG}" 2>&1)"; then
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        bashio::log.info "Disk space: ${line}"
+        FS_COUNT=$((FS_COUNT + 1))
+    done <<< "${MOUNT_LINES}"
+else
+    bashio::log.warning "Could not list the mounts. Disk space is off."
+    bashio::log.warning "${MOUNT_LINES}"
+    AGENT_CONFIG=""
+fi
+
 # ── Start the real Go agent ──────────────────────────────────────────────────
 bashio::log.info "Starting SMART Sniffer agent on port ${PORT}..."
 
 AGENT_ARGS="--port=${PORT} --scan-interval=${SCAN_INTERVAL}s"
+if [ -n "${AGENT_CONFIG}" ]; then
+    AGENT_ARGS="${AGENT_ARGS} --config=${AGENT_CONFIG}"
+fi
 if [ -n "${MDNS_NAME}" ]; then
     # Only pass --mdns-name if the agent binary supports it (v0.4.28+)
     if /usr/bin/smartha-agent --help 2>&1 | grep -q "mdns-name"; then
@@ -238,6 +262,7 @@ bashio::log.info "Replicas: agent on port ${MOCK_PORT}, ${SHIPPED_COUNT} shipped
 bashio::log.info "Integration rules: $(cat /opt/ssrules/VERSION 2>/dev/null || echo 'not found')"
 bashio::log.info "Web UI: http://localhost:${INGRESS_PORT} (via ingress)"
 bashio::log.info "Drives detected: ${DRIVE_COUNT:-0}"
+bashio::log.info "Disk space: ${FS_COUNT} mounts measured"
 bashio::log.info "─────────────────────────────────────────"
 
 # ── Wait for processes — restart on critical failure ─────────────────────────

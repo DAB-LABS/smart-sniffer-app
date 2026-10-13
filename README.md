@@ -79,7 +79,7 @@ The SMART Sniffer integration, when installed, polls the same agents and creates
 
 ## The Control Center
 
-One grid of cards, one per drive and per ZFS pool, from this machine (`HAOS`), your field agents and the replicas, each with its health word (Attention, Maybe, Health OK or Health not known), every row that caused it, its disk space, and Details for the full readings. Drag cards by their grip to arrange them; the eye hides a card for now, the trash removes it for good with a second click on **Remove?**, and for a card in Home Assistant also offers to disable its device there, or delete it once the agent no longer reports it. Rename a card or a field agent's machine in place by clicking its title or machine label; a drive in Home Assistant takes the name there as its device name, and a name given in Home Assistant shows on the card.
+One grid of cards, one per drive (including USB drives mounted under `/media` or a data disk, also after **Move data disk** from HA) and per ZFS pool, from this machine (`HAOS`), your field agents and the replicas, each with its health word (Attention, Maybe, Health OK or Health not known), every row that caused it, its disk space, and Details for the full readings. Drag cards by their grip to arrange them; the eye hides a card for now, the trash removes it for good with a second click on **Remove?**, and for a card in Home Assistant also offers to disable its device there, or delete it once the agent no longer reports it. Rename a card or a field agent's machine in place by clicking its title or machine label; a drive in Home Assistant takes the name there as its device name, and a name given in Home Assistant shows on the card.
 
 - **Field agents**: your other machines running the agent. The **+** card scans your network for them when you open it, and only then; you can also add one by hand. Agents with a token ask for it on their card. They are stored in the app's options.
 - **Replicas**: fake drives and pools for testing Home Assistant, switched between scenarios with one click. Six ship with the app; you can upload your own, drop files into `/share/smart-sniffer/replicas`, or save any card as a file, a real drive's with its serial number and WWN replaced.
@@ -118,6 +118,7 @@ SMART Sniffer needs direct hardware access to read drive health data. This is no
 | `hassio_api` | Network information for the scan's prefilled block, and the app's own options, where field agents are stored |
 | `homeassistant_api` | Adds this app's agents, replicas and field agents to the integration, and finds their device pages |
 | `share` | Your replica folder, `/share/smart-sniffer/replicas` |
+| `media` | Disk space of the USB drives Home Assistant mounts under `/media`, read-only |
 | Protection Mode OFF | May be needed to allow the drive permissions above to take effect |
 
 **What the app does NOT do:**

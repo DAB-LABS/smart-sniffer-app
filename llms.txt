@@ -20,6 +20,9 @@ Key behaviors:
 - Includes replicas: fake drives and pools with SMART data you control, for safely
   testing the integration without real hardware. A replica agent inside the add-on
   serves them, and replica files survive restarts and updates.
+- Shows disk space for USB drives mounted under /media (read-only) and for the data
+  disk, also after the "move data disk" function puts it on an external drive. The drives
+  are found when the add-on starts.
 - The web UI (the Control Center page) is accessible from the HA add-on sidebar. It shows
   this machine's drives, the replicas, and drives on other network machines that run
   the SMART Sniffer agent (field agents).
