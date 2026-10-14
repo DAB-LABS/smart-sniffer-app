@@ -95,8 +95,9 @@ RUN if head -1 /opt/web/alpine.min.js | grep -q "PLACEHOLDER"; then \
         "https://cdn.tailwindcss.com/3.4.17"; \
     fi
 
-# Copy the startup script
+# Copy the startup script, and the mount finder it runs for disk space
 COPY run.sh /
+COPY mounts.py /opt/mounts.py
 RUN chmod +x /run.sh
 
 # The HA base image provides ENTRYPOINT ["/init"] (s6-overlay).
