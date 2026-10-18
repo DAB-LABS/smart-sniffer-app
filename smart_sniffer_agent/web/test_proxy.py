@@ -2389,6 +2389,33 @@ def test_attach_filesystems(mod):
                        "filesystem": found[5]}
 
 
+def test_attach_filesystems_by_drive_id(mod):
+    # Agent 0.8.3 on macOS: an APFS volume's device is a synthesized
+    # container disk, the drive an IOService path; drive_id names the drive.
+    io_path = "IOService:/FakeRoot/fake-io@0/FakeNVMeController/NS_01@1"
+    items = [
+        {"type": "drive", "id": "fake-sn-0001", "drive": {"device_path": io_path}},
+        {"type": "drive", "id": "disk4", "drive": {"device_path": "/dev/disk4"}},
+    ]
+    data = {**_fs("fs-d", "/System/Volumes/Data", "/dev/disk3s5", "apfs"),
+            "physical_devices": ["/dev/disk0"], "drive_id": "fake-sn-0001"}
+    gone = {**_fs("fs-g", "/Volumes/Gone", "/dev/disk7s1", "apfs"),
+            "physical_devices": ["/dev/disk7"], "drive_id": "not-listed"}
+    usb = {**_fs("fs-u", "/Volumes/FakeUSB", "/dev/disk4s2", "hfs"),
+           "physical_devices": ["/dev/disk4"], "drive_id": "disk4"}
+    fusion = {**_fs("fs-f", "/", "/dev/disk5s1", "apfs"),
+              "physical_devices": ["/dev/disk0", "/dev/disk1"]}
+    bad = {**_fs("fs-b", "/Volumes/Odd", "/dev/disk4s3", "apfs"), "drive_id": ["disk4"]}
+    whole = {**_fs("fs-w", "/Volumes/Whole", "/dev/disk4"), "drive_id": "not-listed"}
+    left = mod.attach_filesystems("10.0.0.9:9099", items, [data, gone, usb, fusion, bad, whole])
+    on = {i["id"]: [f["id"] for f in i["filesystems"]] for i in items}
+    # A drive_id the drive list lacks, or one that is not text, falls back
+    # to the device path, as for any other filesystem.
+    assert on == {"fake-sn-0001": ["fs-d"], "disk4": ["fs-u", "fs-w"]}
+    assert [c["id"] for c in left] == ["fs-g", "fs-f", "fs-b"]
+    assert items[0]["filesystems"][0] is data
+
+
 def test_card_ids(mod):
     assert mod.drive_card_key({"serial": " S5GX "}, "nvme0") == "S5GX"
     assert mod.drive_card_key({"serial": ""}, "sdb") == "id:sdb"
@@ -2428,6 +2455,28 @@ def test_drives_card_ids_and_filesystems(proxy, field):
     assert not any(p == "/api/filesystems" for _, p, _ in FIELD["127.0.0.2"].requests)
     status, body = proxy.get("/fleet/hosts/self/drives")
     assert body["items"][0]["card_id"] == "self|SER-A"
+
+
+@needs_rules
+def test_macos_filesystem_on_its_drive_card(proxy, field):
+    key = f"127.0.0.2:{field}"
+    agent = FIELD["127.0.0.2"]
+    agent.filesystems = [
+        {**_fs("fs-d", "/System/Volumes/Data", "/dev/disk3s5", "apfs", pct=63.0),
+         "physical_devices": ["/dev/disk0"], "drive_id": "sdb"},
+        _fs("fs-x", "/Volumes/Other", "/dev/disk6s1", "apfs")]
+    try:
+        _store({"address": "127.0.0.2", "port": field})
+        _refresh_hosts(proxy)
+        status, body = proxy.get(f"/fleet/hosts/{key}/drives")
+        assert status == 200 and body["filesystems_status"] == "ok"
+        items = {i["id"]: i for i in body["items"]}
+        assert [f["mountpoint"] for f in items["sdb"]["filesystems"]] == ["/System/Volumes/Data"]
+        assert items["sdb"]["filesystems"][0]["drive_id"] == "sdb"
+        assert items["sda"]["filesystems"] == []
+        assert [c["card_id"] for c in body["filesystem_cards"]] == [f"{key}|fs:fs-x"]
+    finally:
+        agent.filesystems = None
 
 
 def test_cards_order(proxy, field):

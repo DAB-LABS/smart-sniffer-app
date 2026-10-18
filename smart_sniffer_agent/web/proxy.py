@@ -2042,17 +2042,23 @@ def _part_of(device: str, drive_path: str) -> bool:
 def attach_filesystems(host_key: str, items: list[dict[str, Any]],
                        filesystems: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Put each filesystem on the card it lives on, as item["filesystems"]:
-    a block device's on the drive whose path starts it, a ZFS dataset on its
-    pool's card. Returns the rest as FILESYSTEM cards."""
+    on the drive the agent names in drive_id (agent 0.8.3 on macOS, where an
+    APFS volume's device says nothing about its drive), else a block
+    device's on the drive whose path starts it, a ZFS dataset on its pool's
+    card. Returns the rest as FILESYSTEM cards."""
     for item in items:
         item["filesystems"] = []
     drives = [i for i in items if i.get("type") == "drive"]
+    by_id = {str(d.get("id")): d for d in drives}
     pools = {str((i.get("pool") or {}).get("name")): i for i in items if i.get("type") == "pool"}
     leftover: list[dict[str, Any]] = []
     for fs in filesystems:
         device = str(fs.get("device") or "")
+        drive_id = fs.get("drive_id")
         owner = None
-        if str(fs.get("fstype") or "").lower() == "zfs":
+        if isinstance(drive_id, str) and drive_id in by_id:
+            owner = by_id[drive_id]
+        elif str(fs.get("fstype") or "").lower() == "zfs":
             owner = pools.get(device.split("/", 1)[0])
         else:
             matches = [d for d in drives
