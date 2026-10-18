@@ -1164,7 +1164,8 @@ def test_rename_by_tap_and_keyboard(browser, server, open_page):
     field = c.locator("input.name-in.c-title")
     assert field.evaluate("e => document.activeElement === e")
     p.page.keyboard.press("Escape")
-    assert name.evaluate("e => document.activeElement === e")  # focus comes back
+    # Focus comes back on Alpine's next tick, once the title is drawn again.
+    playwright_api.expect(name).to_be_focused(timeout=2000)
     p.page.keyboard.press("F2")
     assert field.count() == 1
     p.page.keyboard.press("Escape")
@@ -1709,7 +1710,7 @@ def test_first_run(open_page):
     assert p.page.get_by_role("button", name="Refresh").is_visible()
     assert p.page.get_by_role("button", name="Add a drive, or a replica for testing").is_visible()
     assert p.page.locator(".app-foot a:visible").all_inner_texts() == [
-        "App log", "App configuration", "GitHub", "HAIR, infrared remotes in Home Assistant"]
+        "App log", "App configuration", "Agentic access", "GitHub", "HAIR, infrared remotes in Home Assistant"]
     assert p.page.locator(".exit").count() == 0
 
 
@@ -2422,7 +2423,11 @@ def test_footer_links(open_page):
     p = open_page()
     foot = p.page.locator("footer.app-foot")
     assert foot.locator("a:visible").all_inner_texts() == [
-        "App log", "App configuration", "Integration", "GitHub", "HAIR, infrared remotes in Home Assistant"]
+        "App log", "App configuration", "Agentic access", "Integration", "GitHub",
+        "HAIR, infrared remotes in Home Assistant"]
+    agentic = foot.get_by_role("link", name="Agentic access")
+    assert agentic.get_attribute("href") == "agentic-access"
+    assert agentic.get_attribute("target") == "_blank" and agentic.get_attribute("rel") == "noopener"
     assert foot.get_by_role("link", name="App log").get_attribute("title") == \
         "The app's log in Home Assistant, from the agent and this page"
     hair = foot.get_by_role("link", name="HAIR, infrared remotes in Home Assistant")
@@ -2717,3 +2722,131 @@ def test_screenshots(open_page):
         _shot(p, "plus-open-scanned", p.page.get_by_role("region", name="Add", exact=True))
         p = open_page("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", width)
         _shot(p, "first-run", None)
+        ax = _agentic_page(p.ctx, p.base, width=width)
+        _shot_page(ax, f"agentic-{width}.png")
+
+
+# ── Agentic access ──────────────────────────────────────────────────────────
+
+def _agentic_page(ctx, base: str, flags: str = "", width: int = 1280):
+    page = ctx.new_page()
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(f"{base}/api/hassio_ingress/tok123/agentic-access" + (f"?{flags}" if flags else ""))
+    page.wait_for_selector("pre.ax-json")
+    return page
+
+
+def _shot_page(page, name: str):
+    SHOTS.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(SHOTS / name), full_page=False)
+
+
+def _raw_json(base: str, flags: str = "") -> dict:
+    with urllib.request.urlopen(f"{base}/api/hassio_ingress/tok123/agentic-access.json?{flags}", timeout=10) as r:
+        assert r.headers["Content-Type"] == "application/json; charset=utf-8"
+        return json.loads(r.read())
+
+
+def _without_times(doc: dict) -> dict:
+    doc = json.loads(json.dumps(doc))
+    doc.pop("generated_at", None)
+    for agent in doc["agents"]:
+        for key in ("read_at", "last_answer", "data_age_seconds"):
+            agent.pop(key, None)
+        for d in agent["drives"]:
+            (d.get("data") or {}).pop("last_updated", None)
+    return doc
+
+
+def test_agentic_link_under_ingress(browser, server):
+    """The footer link opens the page in a new tab, under the ingress
+    prefix, and everything that page asks for stays under it."""
+    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset", method="POST"), timeout=5)
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    errors = []
+    page.goto(f"{server}/api/hassio_ingress/tok123/")
+    page.wait_for_selector("article.card")
+    seen = []
+    with ctx.expect_page() as info:
+        page.locator("footer.app-foot").get_by_role("link", name="Agentic access").click()
+    ax = info.value
+    ax.on("request", lambda r: seen.append(r.url))
+    ax.on("pageerror", lambda e: errors.append(str(e)))
+    ax.wait_for_selector("pre.ax-json")
+    assert ax.url == f"{server}/api/hassio_ingress/tok123/agentic-access"
+    ax.reload()
+    ax.wait_for_selector("pre.ax-json")
+    assert seen and all(u.startswith(f"{server}/api/hassio_ingress/tok123/") for u in seen), seen
+    assert ax.get_by_role("link", name="Raw JSON").get_attribute("href") == "agentic-access.json"
+    assert ax.get_by_role("link", name="Control Center").get_attribute("href") == "./"
+    doc = json.loads(ax.locator("pre.ax-json").inner_text())
+    assert doc["schema"] == "smart-sniffer-agentic-access"
+    assert [a["kind"] for a in doc["agents"]][0] == "self" and doc["agents"][-1]["kind"] == "replicas"
+    assert list(doc)[-1] == "guide"
+    assert not errors, errors
+    ctx.close()
+
+
+def test_agentic_copy(browser, server):
+    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset", method="POST"), timeout=5)
+    ctx = browser.new_context()
+    ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=server)
+    page = _agentic_page(ctx, server)
+    page.get_by_role("button", name="Copy").click()
+    page.wait_for_selector("#ax-status:has-text('Copied')")
+    copied = json.loads(page.evaluate("navigator.clipboard.readText()"))
+    assert _without_times(copied) == _without_times(_raw_json(server))
+    ctx.close()
+
+
+def test_agentic_copy_without_clipboard_selects(browser, server):
+    """Ingress on plain http is no secure context: the text is selected."""
+    ctx = browser.new_context()
+    page = _agentic_page(ctx, server)
+    page.evaluate("Object.defineProperty(window, 'isSecureContext', { value: false })")
+    page.evaluate("document.execCommand = () => false")
+    page.get_by_role("button", name="Copy").click()
+    page.wait_for_selector("#ax-status:has-text('Selected, press Ctrl+C')")
+    assert page.evaluate("window.getSelection().toString().length") > 1000
+    ctx.close()
+
+
+def test_agentic_download(browser, server):
+    ctx = browser.new_context(accept_downloads=True)
+    page = _agentic_page(ctx, server)
+    with page.expect_download() as info:
+        page.get_by_role("button", name="Download").click()
+    download = info.value
+    shown = json.loads(page.locator("pre.ax-json").inner_text())
+    assert download.suggested_filename == f"smart-sniffer-{shown['generated_at'][:10]}.json"
+    assert re.fullmatch(r"smart-sniffer-\d{4}-\d{2}-\d{2}\.json", download.suggested_filename)
+    saved = json.loads(Path(download.path()).read_text(encoding="utf-8"))
+    assert saved == shown
+    ctx.close()
+
+
+def test_agentic_unreachable_shows(browser, server):
+    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?AGENT=down", method="POST"), timeout=5)
+    ctx = browser.new_context()
+    page = _agentic_page(ctx, server, "AGENT=down")
+    doc = json.loads(page.locator("pre.ax-json").inner_text())
+    me = doc["agents"][0]
+    assert me["id"] == "self" and me["status"] == "unreachable" and me["stale"] is True
+    assert me["error"]["message"] == "The agent did not answer. Readings are from last_answer."
+    assert "not answering" in page.locator(".ax-meta").inner_text()
+    ctx.close()
+
+
+@pytest.mark.parametrize("width", [390, 1280])
+def test_agentic_no_page_scroll(browser, server, width):
+    ctx = browser.new_context()
+    page = _agentic_page(ctx, server, width=width)
+    sw, vw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
+    assert sw == vw, f"page is {sw} px wide at {vw} px"
+    pre = page.evaluate("(() => { const p = document.querySelector('pre.ax-json');"
+                        " return [p.scrollWidth, p.clientWidth, getComputedStyle(p).overflowX]; })()")
+    assert pre[2] == "auto"
+    if width == 390:
+        assert pre[0] > pre[1]  # the JSON block scrolls sideways
+    ctx.close()

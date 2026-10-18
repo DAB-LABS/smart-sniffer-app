@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import html
 import importlib.util
 import json
 import os
@@ -725,6 +726,8 @@ def proxy(backends, mock_agent, data_dir):
         f"--data-dir={data_dir}",
         "--ha-cache-seconds=0",
         "--ha-replica-seconds=2",
+        "--agentic-memo-seconds=0",
+        f"--static-dir={PROXY.parent}",
     ], TOKEN)
     client.agent_port = agent_port  # type: ignore[attr-defined]
     client.mock_port = mock_port  # type: ignore[attr-defined]
@@ -3524,3 +3527,295 @@ def test_card_delete_ha_replica_no_entity_and_bad_requests(proxy, field):
     assert _delete(proxy, f"{key}|NUC-1", "replica")[0] == 400
     assert STATE.options["hosts"][0].get("removed", []) == []
     _delete(proxy, second, None)
+
+
+# ── Agentic access ──────────────────────────────────────────────────────────
+
+def _raw_get(proxy, path: str) -> tuple[int, dict[str, str], bytes]:
+    """Status, headers (lower-case names) and body bytes of a GET."""
+    try:
+        with urllib.request.urlopen(proxy.base + path, timeout=30) as resp:
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, {k.lower(): v for k, v in err.headers.items()}, err.read()
+
+
+def _agentic(proxy, query: str = "") -> dict[str, Any]:
+    status, headers, body = _raw_get(proxy, "/agentic-access.json" + query)
+    assert status == 200, body
+    return json.loads(body)
+
+
+def _agents(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {a["id"]: a for a in doc["agents"]}
+
+
+def test_agentic_json_shape(proxy):
+    proxy.get("/fleet/hosts/self/drives")
+    status, headers, body = _raw_get(proxy, "/agentic-access.json")
+    assert status == 200
+    assert headers["content-type"] == "application/json; charset=utf-8"
+    assert headers["cache-control"] == "no-store"
+    assert "content-disposition" not in headers
+    assert int(headers["content-length"]) == len(body) and body.endswith(b"}\n")
+    assert body.startswith(b'{\n  "about": ')  # indented, header first
+    doc = json.loads(body)
+    keys = list(doc)
+    assert keys[:5] == ["about", "schema", "schema_version", "generated_at", "app_version"]
+    assert keys[-1] == "guide"
+    assert doc["schema"] == "smart-sniffer-agentic-access" and doc["schema_version"] == 1
+    assert doc["app_version"] == "0.3.1"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", doc["generated_at"])
+    assert set(doc["home_assistant"]) == {"version", "reachable", "integration_installed"}
+    assert set(doc["counts"]) == {"agents", "drives", "pools", "attention", "maybe", "unsupported",
+                                  "unreachable_agents", "replica_drives"}
+    me = _agents(doc)["self"]
+    assert me["kind"] == "self" and me["simulated"] is False and me["status"] == "ok"
+    assert me["address"] == AGENT_HOST and me["port"] == proxy.agent_port
+    assert me["has_token"] is True and me["error"] is None
+    assert isinstance(me["data_age_seconds"], int)
+    assert me["health"]["status"] == "ok"  # the agent's own health answer, cached
+    drive = me["drives"][0]
+    assert list(drive) == ["card_id", "id", "name", "hidden", "ha_device_id", "stale", "error",
+                           "attention", "filesystems", "replica", "data"]
+    assert drive["card_id"] == "self|SER-A" and drive["data"]["serial"] == "SER-A"
+    assert "view" not in drive
+    assert doc["this_machine_agent_version"] == me["agent"]["version"]
+
+
+def test_agentic_download_header(proxy):
+    status, headers, body = _raw_get(proxy, "/agentic-access.json?download=1")
+    assert status == 200
+    doc = json.loads(body)
+    assert headers["content-disposition"] == (
+        f'attachment; filename="smart-sniffer-{doc["generated_at"][:10]}.json"')
+    plain = _agentic(proxy)
+    doc.pop("generated_at"), plain.pop("generated_at")
+    for agent in doc["agents"] + plain["agents"]:
+        agent.pop("data_age_seconds", None)
+        agent.pop("read_at", None)
+    assert doc == plain
+
+
+@needs_rules
+def test_agentic_self_field_and_replicas(proxy, field, mock_agent):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    doc = _agentic(proxy)
+    order = [a["id"] for a in doc["agents"]]
+    assert order[0] == "self" and order[1] == key and order[-1] == "replicas"
+    nuc = _agents(doc)[key]
+    assert nuc["kind"] == "field" and nuc["name"] == "office-nuc" and nuc["address"] == "127.0.0.2"
+    assert nuc["has_token"] is False
+    assert [d["id"] for d in nuc["drives"]] == ["sda", "sdb"]
+    for d in nuc["drives"]:
+        assert d["data"]["smart_data"] and d["attention"]["state"] == "NO"
+        assert d["attention"]["thresholds_source"] == "app"
+    reps = _agents(doc)["replicas"]
+    assert reps["simulated"] is True and reps["kind"] == "replicas"
+    if mock_agent:
+        assert reps["status"] == "ok"
+        assert all(d["replica"] is not None for d in reps["drives"])
+        assert doc["counts"]["replica_drives"] == len(reps["drives"])
+    assert doc["counts"]["agents"] == 2
+    assert doc["counts"]["drives"] == len(_agents(doc)["self"]["drives"]) + 2
+
+
+def test_agentic_reads_from_cache(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "ok"
+    proxy.get("/fleet/hosts/self/drives")
+    FIELD["127.0.0.2"].requests.clear()
+    SELF_AGENT.requests.clear()
+    doc = _agentic(proxy)
+    assert _agents(doc)[key]["status"] == "ok"
+    assert FIELD["127.0.0.2"].requests == []
+    assert SELF_AGENT.requests == []
+    # fresh=1 reads again only what is older than 30 s: nothing here.
+    _agentic(proxy, "?fresh=1")
+    assert FIELD["127.0.0.2"].requests == [] and SELF_AGENT.requests == []
+
+
+def test_agentic_unreachable_agent(proxy, field):
+    _store({"address": "127.0.0.6", "port": field}, {"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    start = time.monotonic()
+    doc = _agentic(proxy)
+    assert time.monotonic() - start < 8
+    dead = _agents(doc)[f"127.0.0.6:{field}"]
+    assert dead["status"] == "unreachable" and dead["stale"] is True
+    assert dead["error"] == {"code": "unreachable",
+                             "message": "The agent has not answered since it was added. No readings."}
+    assert dead["drives"] == []
+    live = _agents(doc)[f"127.0.0.2:{field}"]
+    assert live["status"] == "ok" and len(live["drives"]) == 2
+    assert doc["counts"]["unreachable_agents"] >= 1
+    # A dead agent is not asked again inside its window.
+    again = _agents(_agentic(proxy))[f"127.0.0.6:{field}"]
+    assert again["status"] == "unreachable"
+
+
+def test_agentic_stale_agent_keeps_last_readings(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field})
+    _refresh_hosts(proxy)
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "ok"
+    FIELD["127.0.0.2"].mode = "broken"
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "unreachable"
+    FIELD["127.0.0.2"].requests.clear()
+    nuc = _agents(_agentic(proxy))[key]
+    assert FIELD["127.0.0.2"].requests == []  # the page's failed read is used
+    assert nuc["status"] == "unreachable" and nuc["stale"] is True
+    assert nuc["error"]["message"] == "The agent did not answer. Readings are from last_answer."
+    assert len(nuc["drives"]) == 2 and all(d["stale"] for d in nuc["drives"])
+    assert nuc["last_answer"]
+
+
+def test_agentic_password_states(proxy, field):
+    key = f"127.0.0.3:{field}"
+    _store({"address": "127.0.0.3", "port": field})
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    pi = _agents(_agentic(proxy))[key]
+    assert pi["status"] == "password_needed" and pi["error"]["code"] == "password_needed"
+    assert pi["has_token"] is False
+    _store({"address": "127.0.0.3", "port": field, "password": "wrong-pass"})
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    pi = _agents(_agentic(proxy))[key]
+    assert pi["status"] == "password_refused" and pi["has_token"] is True
+
+
+def test_agentic_never_includes_tokens(proxy, field):
+    key = f"127.0.0.3:{field}"
+    _store({"address": "127.0.0.3", "port": field, "password": FIELD_PASSWORD})
+    _refresh_hosts(proxy)
+    assert proxy.get(f"/fleet/hosts/{key}/drives")[1]["status"] == "ok"
+    for path in ("/agentic-access.json", "/agentic-access", "/agentic-access.json?download=1"):
+        status, _, body = _raw_get(proxy, path)
+        assert status == 200
+        for secret in (FIELD_PASSWORD, APP_TOKEN, TOKEN):
+            assert secret.encode() not in body, (path, secret)
+    doc = _agentic(proxy)
+    assert _agents(doc)[key]["has_token"] is True and _agents(doc)[key]["status"] == "ok"
+
+
+def test_agentic_removed_and_hidden(proxy, field):
+    key = f"127.0.0.2:{field}"
+    _store({"address": "127.0.0.2", "port": field, "removed": ["NUC-1"]})
+    STATE.options["hidden_cards"] = [f"{key}|NUC-2"]
+    STATE.options["card_names"] = [{"card": f"{key}|NUC-2", "name": "Spare"}]
+    STATE.options["host_names"] = [{"host": key, "name": "Office"}]
+    _refresh_hosts(proxy)
+    proxy.get(f"/fleet/hosts/{key}/drives")
+    nuc = _agents(_agentic(proxy))[key]
+    assert [d["card_id"] for d in nuc["drives"]] == [f"{key}|NUC-2"]
+    assert nuc["drives"][0]["hidden"] is True and nuc["drives"][0]["name"] == "Spare"
+    assert nuc["name"] == "Office"
+    assert nuc["summary"]["drives"] == 1
+
+
+@needs_rules
+def test_agentic_ha_ids(proxy, field):
+    key = _field_in_ha(proxy, field, [_drive_device("dev-1", "e-field", "NUC-1", "sda")])
+    doc = _agentic(proxy)
+    nuc = _agents(doc)[key]
+    assert nuc["home_assistant"] == {"config_entry_id": "e-field", "entry_state": "loaded"}
+    drives = {d["id"]: d for d in nuc["drives"]}
+    assert drives["sda"]["ha_device_id"] == "dev-1" and drives["sdb"]["ha_device_id"] is None
+    assert _agents(doc)["self"]["home_assistant"]["config_entry_id"] == "e-agent"
+    assert doc["home_assistant"]["reachable"] is True
+    assert doc["home_assistant"]["integration_installed"] is True
+
+
+def test_agentic_core_down(proxy):
+    STATE.core_status = 401
+    doc = _agentic(proxy)
+    assert doc["home_assistant"]["reachable"] is False
+    assert _agents(doc)["self"]["home_assistant"] is None
+
+
+def test_agentic_page(proxy):
+    status, headers, body = _raw_get(proxy, "/agentic-access")
+    assert status == 200
+    assert headers["content-type"] == "text/html; charset=utf-8"
+    assert headers["cache-control"] == "no-store"
+    page = body.decode()
+    assert "<!--AGENTIC" not in page
+    assert '<pre class="ax-json"' in page
+    assert 'href="agentic-access.json"' in page and 'href="./"' in page
+    assert re.search(r'href="cc\.css\?v=[0-9a-f]{12}"', page)
+    assert re.search(r'src="agentic\.js\?v=[0-9a-f]{12}"', page)
+    assert 'href="/' not in page and 'src="/' not in page
+    assert re.search(r'data-file="smart-sniffer-\d{4}-\d{2}-\d{2}\.json"', page)
+    # The JSON is in the page, escaped: the text of the <pre> parses.
+    text = re.search(r'<pre class="ax-json"[^>]*>(.*)</pre>', page, re.S).group(1)
+    assert "<" not in text and "&quot;" not in text
+    doc = json.loads(html.unescape(text))
+    assert doc["schema"] == "smart-sniffer-agentic-access"
+    # A trailing slash goes back to the page, whose links need the root.
+    req = urllib.request.Request(proxy.base + "/agentic-access/")
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        opener.open(req, timeout=10)
+        raise AssertionError("expected a redirect")
+    except urllib.error.HTTPError as err:
+        assert err.code == 301 and err.headers["Location"] == "../agentic-access"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def test_agentic_html_escapes_agent_text(proxy):
+    SELF_AGENT.drives = [{**simple_drive("sda", "SER-A"), "model": "</pre><script>x()</script>"}]
+    proxy.get("/fleet/hosts/self/drives")
+    _, _, body = _raw_get(proxy, "/agentic-access")
+    assert b"<script>x()" not in body and b"&lt;/pre&gt;&lt;script&gt;" in body
+
+
+def test_agentic_404_and_405(proxy):
+    status, _, body = _raw_get(proxy, "/agentic-access/x")
+    assert status == 404 and json.loads(body)["error"] == "not_found"
+    status, _, body = _raw_get(proxy, "/agentic-accessx.json")
+    assert status == 404
+    assert proxy.post("/agentic-access.json")[0] == 405
+    assert proxy.post("/agentic-access")[0] == 405
+
+
+def test_agentic_guide_copy(mod):
+    for text in (json.dumps(mod.AGENTIC_GUIDE, ensure_ascii=False), mod.AGENTIC_ABOUT):
+        assert "\u2014" not in text and "\u2013" not in text
+        assert not any(ord(c) > 0x2000 for c in text)
+    guide = json.dumps(mod.AGENTIC_GUIDE)
+    for word in ("smart_sniffer.get_drive_data", "config_entry_id", "response_variable",
+                 "0.5.15", "0.6.3", "0.8.0", "512000 bytes"):
+        assert word in guide
+
+
+def test_agentic_cards_mapping(mod):
+    response = {"id": "h", "items": [
+        {"type": "drive", "id": "sda", "card_id": "h|S1", "drive": {"id": "sda"},
+         "verdict": {"state": "NO"}, "view": {"rows": []}, "lab": None,
+         "thresholds_source": "integration", "filesystems": [{"id": "f"}]},
+        {"type": "drive", "id": "sdb", "card_id": "h|S2", "drive": {"id": "sdb"}, "verdict": None,
+         "view": None, "lab": None, "error": "not_answering"},
+        {"type": "pool", "id": "pool.tank", "card_id": "h|pool:tank", "pool": {"name": "tank"},
+         "verdict": {"state": "YES", "problems": ["x"]}, "view": {}, "lab": None},
+    ], "filesystem_cards": [{"type": "filesystem", "card_id": "h|fs:z", "filesystem": {"id": "z"}}]}
+    drives, pools, filesystems = mod.agentic_cards(response, {"h|S2"}, {"h|S1": "Boot"},
+                                                   {"S1": "dev-1", "pool:tank": "dev-p"})
+    assert drives[0]["attention"] == {"state": "NO", "thresholds_source": "integration"}
+    assert drives[0]["name"] == "Boot" and drives[0]["ha_device_id"] == "dev-1"
+    assert drives[0]["filesystems"] == [{"id": "f"}] and "view" not in drives[0]
+    assert drives[1]["attention"] is None and drives[1]["error"] == "not_answering"
+    assert drives[1]["hidden"] is True
+    assert pools[0]["verdict"]["state"] == "YES" and pools[0]["ha_device_id"] == "dev-p"
+    assert pools[0]["data"] == {"name": "tank"}
+    assert filesystems == [{"card_id": "h|fs:z", "name": None, "hidden": False,
+                            "ha_device_id": None, "stale": False, "data": {"id": "z"}}]

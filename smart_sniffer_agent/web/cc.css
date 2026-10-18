@@ -549,3 +549,19 @@ table.attrs .thr-in.pending { color: var(--paper); font-weight: 700; }
   .tune { padding: 8px 6px; margin-top: -6px; margin-bottom: -6px; }
   .copy { padding: 7px; margin: -7px -3px; }
 }
+
+/* ------------------------------------------------------------------
+   Agentic access (agentic.html): the whole data set as JSON. Dark like
+   the Control Center; the JSON block scrolls sideways, the page never.
+   ------------------------------------------------------------------ */
+.ax-page .brand { gap: 14px; }
+.ax-back { font-size: 0.95rem; color: var(--grey); }
+.ax-title { margin: 0; font-size: 0.95rem; font-weight: 600; color: var(--paper); padding-left: 14px; border-left: 1px solid var(--rule-2); line-height: 1.1; }
+.ax-lead { margin: 16px 0 0; font-size: 0.86rem; max-width: 82ch; }
+.ax-lead + .ax-lead { margin-top: 4px; }
+.ax-tools { margin: 16px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ax-status { font-size: 0.74rem; color: var(--dim); }
+.ax-meta { margin: 12px 0 8px; font-size: 0.74rem; overflow-wrap: anywhere; }
+.ax-json { margin: 0; padding: 12px 14px; background: var(--panel); border: 1px solid var(--rule); border-radius: 3px;
+           font: 0.76rem/1.45 var(--mono); color: var(--grey); white-space: pre; overflow: auto; tab-size: 2;
+           max-width: 100%; max-height: 75vh; }

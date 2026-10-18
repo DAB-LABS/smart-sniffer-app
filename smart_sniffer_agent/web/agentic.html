@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SMART Sniffer Agentic access</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='6.5' cy='6.5' r='4.5' fill='none' stroke='%238f8f8f' stroke-width='1.8'/%3E%3Cpath d='M10 10l4.5 4.5' stroke='%238f8f8f' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="cc.css">
+<script src="agentic.js" defer></script>
+</head>
+<body>
+<!-- Served by proxy.py at <ingress>/agentic-access with the document filled
+     in below. Every link is relative to the ingress root: no leading slash. -->
+<main class="page ax-page">
+  <header class="app-head">
+    <div class="brand">
+      <a class="ax-back" href="./">Control Center</a>
+      <h1 class="ax-title">Agentic access</h1>
+    </div>
+  </header>
+  <p class="ax-lead">Everything the Control Center knows, as JSON for an AI assistant or a script. The guide at the end explains the fields.</p>
+  <p class="ax-lead dim">Contains serial numbers, host names and addresses. Share it only with people and tools you trust.</p>
+  <div class="ax-tools">
+    <button class="btn btn-sm" type="button" id="ax-copy">Copy</button>
+    <button class="btn btn-sm" type="button" id="ax-download" data-file="<!--AGENTIC_FILE-->">Download</button>
+    <a class="btn btn-sm btn-quiet" href="agentic-access.json" target="_blank" rel="noopener">Raw JSON</a>
+    <small class="ax-status" id="ax-status" role="status"></small>
+  </div>
+  <p class="ax-meta mono dim"><!--AGENTIC_META--></p>
+  <pre class="ax-json" id="ax-json" tabindex="0" aria-label="The data as JSON"><!--AGENTIC_JSON--></pre>
+</main>
+</body>
+</html>

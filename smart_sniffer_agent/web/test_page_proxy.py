@@ -411,3 +411,29 @@ def test_threshold_edit_touches_only_its_card(tab, app):
         assert not tab.errors, tab.errors
     finally:
         SELF.drives = drives
+
+
+def test_agentic_access_from_the_footer(tab, app):
+    """The footer's Agentic access link opens the proxy's own page in a new
+    tab, its JSON parses and holds the fake agents, and no token is in it."""
+    tab.load()
+    tab.page.wait_for_selector('article.card[data-card="self|HAOS-DISK-1"]', timeout=10000)
+    tab.card(f"{app.nas}|NAS-A").wait_for(timeout=10000)
+    with tab.ctx.expect_page() as info:
+        tab.page.locator("footer.app-foot").get_by_role("link", name="Agentic access").click()
+    ax = info.value
+    ax.wait_for_selector("pre.ax-json")
+    assert ax.url == app.base + "/agentic-access"
+    text = ax.locator("pre.ax-json").inner_text()
+    doc = json.loads(text)
+    agents = {a["id"]: a for a in doc["agents"]}
+    assert list(agents)[0] == "self" and list(agents)[-1] == "replicas"
+    assert [d["data"]["serial"] for d in agents["self"]["drives"]] == ["HAOS-DISK-1"]
+    assert [d["data"]["serial"] for d in agents[app.nas]["drives"]] == ["NAS-A", "NAS-B"]
+    assert agents[app.nas]["has_token"] is True
+    for secret in (APP_TOKEN, FIELD_PASSWORD, TOKEN):
+        assert secret not in ax.content()
+    with ax.expect_download() as dl:
+        ax.get_by_role("button", name="Download").click()
+    assert dl.value.suggested_filename == f"smart-sniffer-{doc['generated_at'][:10]}.json"
+    assert not tab.errors, tab.errors

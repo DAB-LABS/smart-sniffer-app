@@ -72,6 +72,10 @@ app's own; GET and PUT /cards/<id>/thresholds and POST .../accept and
 .../reset answer as the proxy does, and /ha/add moves the app's into Home
 Assistant.
 
+Agentic access (the footer link): agentic-access and agentic-access.json
+are built from the same fake reads with proxy.py's own helpers and guide,
+so the switches above shape them too.
+
 A scan of 10.0.10.0/24 on port 9099 finds office-nuc (10.0.10.61, open),
 backup-pi (10.0.10.52, 401) and proxmox-01 (10.0.10.21), at 0.8 s, 1.6 s
 and 2.2 s; Check answers for every machine of the catalog (nas.lan and
@@ -1344,6 +1348,82 @@ def scan_state(world: World, scan: dict) -> dict:
     return out
 
 
+# ── Agentic access ───────────────────────────────────────────────────────────
+
+def agentic_document(flags, world: World) -> dict:
+    """GET /agentic-access.json, as the proxy builds it, from this server's
+    own fake reads: this machine, the stored field agents (removed cards
+    left out, hidden ones marked), then the replicas."""
+    reads = [("self", self_response(flags, world), None)]
+    for host in world.hosts:
+        reads.append((host["id"], field_response(flags, world, host), host))
+    reads.append(("replicas", replicas_response(flags, world), None))
+    hidden = set(world.hidden_cards)
+    reachable = flags["HA"] != "unreachable"
+    agents = []
+    for key, read, host in reads:
+        kind = read["kind"]
+        target = world.ha.get(key) if reachable and flags["HA"] == "installed" else None
+        drives, pools, filesystems = PROXY.agentic_cards(read, hidden, world.card_names,
+                                                         (target or {}).get("devices") or {})
+        status = read["status"]
+        error = None
+        if status != "ok":
+            error = {"code": status, "message": PROXY.AGENTIC_ERRORS.get(status) if read["last_answer"]
+                     else PROXY.AGENTIC_NEVER_READ}
+        agents.append({
+            "id": key, "kind": kind, "simulated": kind == "replicas",
+            "name": world.host_names.get(key) or (read.get("agent") or {}).get("hostname"),
+            "address": host["address"] if host else agent_host(flags),
+            "port": host["port"] if host else (MOCK_PORT if kind == "replicas" else AGENT_PORT),
+            "has_token": bool(host.get("password")) if host else kind == "self",
+            "status": status, "stale": bool(read.get("stale")),
+            "read_at": read["read_at"], "last_answer": read["last_answer"],
+            "data_age_seconds": 0 if status == "ok" else None,
+            "error": error, "agent": read.get("agent"), "health": None,
+            "summary": read.get("summary"),
+            "home_assistant": ({"config_entry_id": target["entry_id"], "entry_state": "loaded"}
+                               if target else None),
+            "pools_status": read.get("pools_status"), "filesystems_status": read.get("filesystems_status"),
+            "drives": drives, "pools": pools, "filesystems": filesystems,
+        })
+    real = [a for a in agents if a["kind"] != "replicas"]
+    total = lambda k: sum(int((a["summary"] or {}).get(k) or 0) for a in real)  # noqa: E731
+    return {
+        "about": PROXY.AGENTIC_ABOUT, "schema": PROXY.AGENTIC_SCHEMA,
+        "schema_version": PROXY.AGENTIC_SCHEMA_VERSION, "generated_at": iso(0),
+        "app_version": APP_VERSION,
+        "rules_version": None if flags["RULES"] == "missing" else RULES_VERSION,
+        "this_machine_agent_version": (agents[0]["agent"] or {}).get("version"),
+        "home_assistant": {"version": None if not reachable else flags["HA_VERSION"].strip() or None,
+                           "reachable": reachable,
+                           "integration_installed": {"installed": True, "not_installed": False}.get(flags["HA"])},
+        "counts": {"agents": len(real), "drives": sum(len(a["drives"]) for a in real),
+                   "pools": sum(len(a["pools"]) for a in real), "attention": total("attention"),
+                   "maybe": total("maybe"), "unsupported": total("unsupported"),
+                   "unreachable_agents": sum(1 for a in real if a["status"] != "ok"),
+                   "replica_drives": sum(len(a["drives"]) for a in agents if a["kind"] == "replicas")},
+        "agents": agents,
+        "guide": PROXY.AGENTIC_GUIDE,
+    }
+
+
+def agentic_page(document: dict) -> bytes:
+    """GET /agentic-access: agentic.html with the document in it."""
+    import html as _html
+    body = PROXY.agentic_bytes(document)
+    date = document["generated_at"][:10]
+    drives = sum(len(a["drives"]) for a in document["agents"])
+    down = sum(1 for a in document["agents"] if a["status"] != "ok")
+    meta = [f"generated {date} {document['generated_at'][11:16]} UTC", f"{len(document['agents'])} agents",
+            f"{drives} drives"] + ([f"{down} not answering"] if down else []) + [f"{len(body) / 1024:.0f} KB"]
+    page = ((WEB_DIR / "agentic.html").read_text(encoding="utf-8")
+            .replace("<!--AGENTIC_FILE-->", f"smart-sniffer-{date}.json")
+            .replace("<!--AGENTIC_META-->", _html.escape("  \u00b7  ".join(meta)))
+            .replace("<!--AGENTIC_JSON-->", _html.escape(body.decode("utf-8"), quote=False)))
+    return page.encode("utf-8")
+
+
 # ── Handler ──────────────────────────────────────────────────────────────────
 
 def sep_ok(card_id: str) -> bool:
@@ -1428,7 +1508,8 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method):
         route = self._route()
         head = route.split("/")[0]
-        if head not in ("api", "mock", "app", "evaluate", "ha", "fleet", "replicas", "dev", "cards", "hosts"):
+        if head not in ("api", "mock", "app", "evaluate", "ha", "fleet", "replicas", "dev", "cards", "hosts",
+                        "agentic-access", "agentic-access.json"):
             if method != "GET":
                 return self._err(405, "method_not_allowed")
             return self._static(route)
@@ -1474,6 +1555,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         if head == "app" and parts[1:] == ["info"]:
             return self._app_info(flags, world)
+        if head in ("agentic-access", "agentic-access.json") and len(parts) == 1:
+            if method != "GET":
+                return self._err(405, "method_not_allowed")
+            if PROXY is None or not hasattr(PROXY, "agentic_cards"):
+                return self._err(503, "proxy_unavailable")
+            doc = agentic_document(flags, world)
+            if head == "agentic-access":
+                return self._send(200, ctype="text/html; charset=utf-8", body=agentic_page(doc))
+            headers = {}
+            if "download=1" in (urlparse(self.path).query or ""):
+                headers["Content-Disposition"] = f'attachment; filename="smart-sniffer-{doc["generated_at"][:10]}.json"'
+            return self._send(200, ctype="application/json; charset=utf-8", body=PROXY.agentic_bytes(doc),
+                              headers=headers)
         if head == "api":
             return self._agent_api(parts[1:], flags)
         if head == "evaluate" and method == "POST":

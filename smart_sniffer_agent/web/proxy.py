@@ -63,7 +63,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 import hashlib
+import html
 import http.client
 import importlib
 import ipaddress
@@ -109,6 +111,9 @@ HA_API_CACHE_SECONDS = 30
 THRESHOLD_MIN_SECONDS = 5  # the least time Home Assistant's thresholds are kept
 REFRESH_MINUTES = 15  # how often the page re-reads stored field agents
 REPLICA_AGENT_TIMEOUT = 1.0  # seconds, /app/info's check of the replica agent
+AGENTIC_MEMO_SECONDS = 15  # how long one built Agentic access document is reused
+AGENTIC_MAX_AGE_SECONDS = 60  # how old this machine's and the replicas' cached read may be
+AGENTIC_FRESH_SECONDS = 30  # ?fresh=1: agents read longer ago than this are read again
 MAX_REPLICA_BYTES = 1_048_576  # a replica file, as the replica agent limits it
 
 # Matches the titles the integration's config flow gives its entries:
@@ -2511,11 +2516,194 @@ def _flow_message(step: Any, status: int | None) -> str:
     return f"HTTP {status}"
 
 
+# ── Agentic access ──────────────────────────────────────────────────────────
+# One JSON document of everything the Control Center knows, for an AI
+# assistant or a script: a header, one entry per agent, then a guide. Key
+# order is part of the contract (header first, guide last), so the document
+# is never dumped with sort_keys.
+
+AGENTIC_SCHEMA = "smart-sniffer-agentic-access"
+AGENTIC_SCHEMA_VERSION = 1
+AGENTIC_ABOUT = (
+    "SMART Sniffer drive health export from the SMART Sniffer App in Home Assistant. "
+    "A read-only snapshot of every agent the app's Control Center reads, with each drive's "
+    "raw SMART data, ZFS pools, filesystems and the health verdicts the Control Center shows. "
+    "Read the guide at the end before drawing conclusions."
+)
+AGENTIC_ERRORS = {
+    "unreachable": "The agent did not answer. Readings are from last_answer.",
+    "password_needed": "The agent needs a token and none is stored. Readings are from last_answer.",
+    "password_refused": "The agent refused the stored token. Readings are from last_answer.",
+}
+AGENTIC_NEVER_READ = "The agent has not answered since it was added. No readings."
+AGENTIC_GUIDE: dict[str, Any] = {
+    "purpose": (
+        "Read-only drive health data from SMART Sniffer agents, judged by the same rules the "
+        "SMART Sniffer integration uses in Home Assistant. Nothing in this document can change "
+        "a setting."
+    ),
+    "structure": [
+        "agents: one entry per agent. kind self is the agent inside this Home Assistant app, "
+        "reading this machine's drives. kind field is a SMART Sniffer agent on another machine. "
+        "kind replicas holds simulated drives for testing (simulated is true); they are not real "
+        "hardware, leave them out of real health answers.",
+        "counts covers the real agents only; replica drives are counted in replica_drives.",
+        "agents[].status is ok, unreachable, password_needed or password_refused. When it is not "
+        "ok, stale is true and the drives are the last good readings, taken at last_answer. Say "
+        "that the data may be out of date.",
+        "agents[].health is the agent's own /api/health answer from its last good read.",
+        "agents[].drives[].data is the agent's payload for the drive. data.smart_data is smartctl "
+        "JSON output, unchanged.",
+        "agents[].drives[].attention is the verdict. It is null when the rules were not loaded or "
+        "the drive could not be read (error is set); health is then not known.",
+        "agents[].pools[].verdict.state is YES (problems lists why) or NO. Pools have no MAYBE.",
+        "Filesystems sit on the drive or pool they belong to. agents[].filesystems holds those "
+        "that belong to neither, each as a card with the filesystem in data.",
+        "hidden true marks a card the user hid in the Control Center. It is still monitored.",
+    ],
+    "attention_states": {
+        "NO": "All monitored indicators are clear.",
+        "MAYBE": "Warning. An early sign of wear or degradation. Plan a replacement and watch "
+                 "the reasons.",
+        "YES": "Critical. Data is at risk. Back up now.",
+        "UNSUPPORTED": "No usable SMART data, so health cannot be judged. Often a USB bridge that "
+                       "does not pass SMART through. If data.smart_lost is true, the drive gave "
+                       "SMART data earlier in this agent run and has stopped; that is not the "
+                       "same as never supported.",
+    },
+    "severity": "critical goes with YES, warning with MAYBE, none with NO and UNSUPPORTED.",
+    "reasons": (
+        "attention.reasons lists what caused the state, one line each. attention.accepted lists "
+        "readings the user accepted with a custom threshold; they are known and not new "
+        "problems. attention.limits gives each threshold, its default and whether the user "
+        "changed it. attention.readings holds the values the rules used; prefer them over your "
+        "own reading of raw tables."
+    ),
+    "fields": [
+        "Wear, NVMe: nvme_smart_health_information_log.percentage_used counts up, percent of "
+        "rated life used. It can pass 100; that means the rated endurance is used up, not that "
+        "the drive has failed.",
+        "Wear, ATA: wear attributes such as Wear_Leveling_Count, SSD_Life_Left and "
+        "Media_Wearout_Indicator usually count down (normalized value is life remaining); the "
+        "rules turn them into percent used.",
+        "Wear, WD SSDs: on WD Blue, Red and Green SATA SSDs (model_family \"WD Blue / Red / Green "
+        "SSDs\") attribute 230 counts up and is already percent used. The rules use Device "
+        "Statistics Percentage Used Endurance Indicator first, and report wear as unknown when "
+        "attribute 230 and Average_PE_Cycles_TLC disagree badly.",
+        "Raw values: some vendors pack several numbers into one ATA raw value (for example "
+        "Seagate attribute 188). Treat large raw values with care; the rules decode the "
+        "counters they use.",
+        "Standby: data.in_standby true means the drive was spun down and the agent served its "
+        "cached readings. data.last_updated is when SMART data was last read; Home Assistant "
+        "shows it as the data_as_of attribute.",
+        "data.readable false means smartctl could not read the drive in the last cycle; the "
+        "readings are cached.",
+        "data.smart_available false means the drive answered without SMART data; "
+        "data.smart_unavailable_reason says why. data.smart_lost true means it had SMART data "
+        "earlier in this agent run. Both need agent 0.8.3 or later and are absent when not set.",
+        "Units: temperature.current is degrees Celsius. power_on_time.hours is hours. NVMe "
+        "data_units_read and data_units_written count units of 512000 bytes. "
+        "data.derived.host_writes.bytes and host_reads.bytes are bytes. Filesystem sizes are "
+        "bytes and use_percent is percent.",
+        "Times are UTC in ISO 8601.",
+    ],
+    "home_assistant_action": {
+        "action": "smart_sniffer.get_drive_data",
+        "what": "Returns the cached SMART data and verdicts for all drives of one SMART Sniffer "
+                "agent in Home Assistant. It only returns data, so it must be called with a "
+                "response variable.",
+        "required": "config_entry_id: the integration entry of the agent. It is "
+                    "agents[].home_assistant.config_entry_id here, when that agent is in Home "
+                    "Assistant.",
+        "example": "action: smart_sniffer.get_drive_data\ndata:\n  config_entry_id: "
+                   "<config_entry_id>\nresponse_variable: drive_data",
+        "response": "agent: name, host, os, uptime, version. drives: one object per drive id with "
+                    "model, serial, protocol, device_path, attention (state, severity, reasons, "
+                    "accepted), smart_data, device_statistics, derived. filesystems: mountpoint, "
+                    "total_bytes, used_bytes, use_percent. Pools are not included.",
+        "versions": "Integration 0.5.15 or later has the action. attention.accepted needs "
+                    "0.6.3. device_statistics and derived need 0.8.0.",
+    },
+    "links": {
+        "page": "agentic-access",
+        "raw": "agentic-access.json",
+        "download": "agentic-access.json?download=1",
+        "fresh": "agentic-access.json?fresh=1",
+        "note": "Paths are relative to the SMART Sniffer page in Home Assistant (the app's "
+                "ingress address). They work only in a browser logged in to Home Assistant. "
+                "fresh=1 reads again every agent last read more than 30 seconds ago.",
+    },
+}
+
+
+def _iso_epoch(text: Any) -> float | None:
+    """Seconds since the epoch of a utc_now() time, None when it is not one."""
+    if not isinstance(text, str):
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ")))
+    except ValueError:
+        return None
+
+
+def agentic_cards(response: dict[str, Any], hidden: set[str], names: dict[str, str],
+                  devices: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]],
+                                                    list[dict[str, Any]]]:
+    """(drives, pools, filesystems) of one cached drives read, as the export
+    gives them: the page's view left out, every card's name, hidden flag and
+    Home Assistant device beside the agent's own payload."""
+    def common(cid: str) -> dict[str, Any]:
+        key = split_card_id(cid)[1]
+        return {"name": names.get(cid), "hidden": cid in hidden,
+                "ha_device_id": devices.get(key) if key else None}
+
+    drives: list[dict[str, Any]] = []
+    pools: list[dict[str, Any]] = []
+    for item in response.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get("card_id") or "")
+        if item.get("type") == "pool":
+            pools.append({
+                "card_id": cid, **common(cid), "stale": bool(item.get("stale")),
+                "verdict": item.get("verdict"),
+                "filesystems": item.get("filesystems") or [],
+                "replica": item.get("lab"),
+                "data": item.get("pool"),
+            })
+            continue
+        verdict = item.get("verdict")
+        drives.append({
+            "card_id": cid, "id": item.get("id"), **common(cid),
+            "stale": bool(item.get("stale")),
+            "error": item.get("error"),
+            "attention": ({**verdict, "thresholds_source": item.get("thresholds_source")}
+                          if isinstance(verdict, dict) else None),
+            "filesystems": item.get("filesystems") or [],
+            "replica": item.get("lab"),
+            "data": item.get("drive"),
+        })
+    filesystems: list[dict[str, Any]] = []
+    for card in response.get("filesystem_cards") or []:
+        if not isinstance(card, dict):
+            continue
+        cid = str(card.get("card_id") or "")
+        filesystems.append({"card_id": cid, **common(cid), "stale": bool(card.get("stale")),
+                            "data": card.get("filesystem")})
+    return drives, pools, filesystems
+
+
+def agentic_bytes(document: dict[str, Any]) -> bytes:
+    """The document as served: indented, UTF-8, ending in a newline."""
+    return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 # ── Request handler ─────────────────────────────────────────────────────────
 
 # Path prefixes that belong to the proxy itself: anything under them that no
 # route matches is a JSON 404, never the page.
-_APP_PREFIXES = ("/app/", "/evaluate", "/fleet/", "/ha/", "/lab/", "/replicas", "/cards")
+_APP_PREFIXES = ("/app/", "/evaluate", "/fleet/", "/ha/", "/lab/", "/replicas", "/cards",
+                 "/agentic-access")
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -2543,6 +2731,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
     # drive id) -> (time, {label: int}) read through the options flow.
     _thr_cache: dict[str, tuple[float, dict[str, dict[str, int]] | None]] = {}
     _thr_flow_cache: dict[tuple[str, str], tuple[float, dict[str, int]]] = {}
+    # Agentic access: how long a built document is reused, how old this
+    # machine's and the replicas' cached read may be; the last document.
+    agentic_memo_seconds: float = AGENTIC_MEMO_SECONDS
+    agentic_max_age_seconds: float = AGENTIC_MAX_AGE_SECONDS
+    _agentic_doc: tuple[float, dict[str, Any]] | None = None
+    # Agents whose latest read failed: key -> (epoch seconds, status).
+    # Written by every read, the page's included; a good read clears it.
+    _last_failure: dict[str, tuple[float, str]] = {}
+    _agentic_lock = threading.Lock()
 
     # The routes answered by the proxy itself: (method, path pattern, handler
     # name). Path parameters are named groups, percent-decoded before use.
@@ -2577,6 +2774,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ("PUT", r"/hosts/(?P<key>[^/]+)/name", "_route_host_name"),
         ("PATCH", r"/cards/(?P<cid>[^/]+)", "_route_card_patch"),
         ("DELETE", r"/cards/(?P<cid>[^/]+)", "_route_card_delete"),
+        ("GET", r"/agentic-access", "_route_agentic_page"),
+        ("GET", r"/agentic-access\.json", "_route_agentic_json"),
     ]
 
     def log_message(self, format, *args):
@@ -3105,8 +3304,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "filesystems_status": filesystems_status,
             "rules_version": self.rules.version if rules_ok else None,
             "stale": False,
+            "health": info,
         }
         self.cache.update(key, response=response, last_answer=now)
+        type(self)._last_failure.pop(key, None)
         return response
 
     def _agent_info(self, kind: str, address: str, info: dict[str, Any],
@@ -3125,6 +3326,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         live: the health answer of an agent that wants a password; the agent
         block then comes from it (drive and pool counts as health gives them)."""
         cached = self.cache.get(key)
+        type(self)._last_failure[key] = (time.time(), status)
         last = cached.get("response") if isinstance(cached.get("response"), dict) else {}
         items = [{**item, "stale": True} for item in last.get("items") or []]
         for item in items:  # a read cached before cards had ids
@@ -3149,7 +3351,238 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "filesystems_status": last.get("filesystems_status"),
             "rules_version": last.get("rules_version") or self.rules.version,
             "stale": True,
+            "health": live if live is not None else last.get("health"),
         }
+
+    # ── /agentic-access ──
+    # Built from the per-agent cache the page fills: an agent is read again
+    # only when its cached read is older than the page's own cadence (60 s
+    # for this machine and the replicas, REFRESH_MINUTES for field agents),
+    # and an agent that just failed is not asked again inside that window.
+
+    def _send_bytes(self, code: int, body: bytes, content_type: str,
+                    headers: dict[str, str] | None = None) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _agentic_document(self, fresh: bool = False) -> dict[str, Any]:
+        """The document, built at most once per agentic_memo_seconds; one
+        build at a time, so requests that arrive together share it."""
+        cls = type(self)
+        with cls._agentic_lock:
+            memo = cls._agentic_doc
+            if not fresh and memo is not None and time.monotonic() - memo[0] < cls.agentic_memo_seconds:
+                return memo[1]
+            document = self._agentic_build(fresh)
+            cls._agentic_doc = (time.monotonic(), document)
+            return document
+
+    def _agentic_build(self, fresh: bool) -> dict[str, Any]:
+        cls = type(self)
+        generated = utc_now()
+        now = _iso_epoch(generated) or time.time()
+        sv = self.supervisor
+        try:
+            stored = self.host_store.cards()
+        except ApiError:
+            stored = None
+        hosts = stored["hosts"] if stored else self.host_store.hosts_quick()
+        hidden = set(stored["hidden_cards"]) if stored else set()
+        names = stored["card_names"] if stored else {}
+        host_names = stored["host_names"] if stored else {}
+        lookup: dict[str, Any] | None = None
+        if sv.available:
+            try:
+                lookup = self._ha_lookup()
+            except Exception as err:  # noqa: BLE001 -- the export goes on without it
+                log(f"Agentic access: Home Assistant lookup failed: {type(err).__name__}: {err}")
+
+        targets: list[tuple[str, tuple[str, str, int, str], dict[str, Any] | None]] = [
+            ("self", ("self", "127.0.0.1", self.agent_port, self.token), None)]
+        for host in hosts:
+            if self.host_store.shows_cards(host):
+                targets.append((host_id(host["address"], host["port"]),
+                                ("field", host["address"], host["port"], host.get("password") or ""),
+                                host))
+        targets.append(("replicas", ("replicas", "127.0.0.1", self.mock_port, ""), None))
+
+        def max_age(kind: str) -> float:
+            base = REFRESH_MINUTES * 60.0 if kind == "field" else float(cls.agentic_max_age_seconds)
+            return min(base, float(AGENTIC_FRESH_SECONDS)) if fresh else base
+
+        # The latest read of each agent, by the page or by an earlier
+        # export: its cached response, or its failure when that came after.
+        responses: dict[str, dict[str, Any] | None] = {}
+        to_read: list[tuple[str, tuple[str, str, int, str]]] = []
+        for key, target, _host in targets:
+            cached = self.cache.get(key).get("response")
+            read_at = _iso_epoch(cached.get("read_at")) if isinstance(cached, dict) else None
+            failed = cls._last_failure.get(key)
+            if failed is not None:
+                if now - failed[0] <= max_age(target[0]):
+                    responses[key] = self._stale(key, target[0], failed[1])
+                    continue
+            elif read_at is not None and now - read_at <= max_age(target[0]):
+                responses[key] = cached
+                continue
+            to_read.append((key, target))
+
+        def read(item: tuple[str, tuple[str, str, int, str]]) -> dict[str, Any] | None:
+            key, target = item
+            try:
+                return self._read_agent(key, *target)
+            except Exception as err:  # noqa: BLE001 -- that agent alone becomes an error
+                log(f"Agentic access: reading {key} failed: {type(err).__name__}: {err}")
+                return None
+
+        if to_read:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for (key, _target), response in zip(to_read, pool.map(read, to_read)):
+                    responses[key] = response
+
+        ha_targets = (lookup.get("targets") or {}) if lookup and lookup.get("reachable") else {}
+        agents: list[dict[str, Any]] = []
+        for key, target, host in targets:
+            try:
+                agents.append(self._agentic_agent(key, target, host, responses.get(key), now,
+                                                  hidden, names, host_names, ha_targets.get(key)))
+            except Exception as err:  # noqa: BLE001 -- one agent never fails the document
+                log(f"Agentic access: {key} failed: {type(err).__name__}: {err}")
+                agents.append({"id": key, "kind": target[0], "simulated": target[0] == "replicas",
+                               "status": "error", "stale": True,
+                               "error": {"code": "internal_error", "message": None}})
+
+        real = [a for a in agents if a.get("kind") != "replicas"]
+        counts = {
+            "agents": len(real),
+            "drives": sum(len(a.get("drives") or []) for a in real),
+            "pools": sum(len(a.get("pools") or []) for a in real),
+            "attention": sum(int((a.get("summary") or {}).get("attention") or 0) for a in real),
+            "maybe": sum(int((a.get("summary") or {}).get("maybe") or 0) for a in real),
+            "unsupported": sum(int((a.get("summary") or {}).get("unsupported") or 0) for a in real),
+            "unreachable_agents": sum(1 for a in real if a.get("status") != "ok"),
+            "replica_drives": sum(len(a.get("drives") or []) for a in agents
+                                  if a.get("kind") == "replicas"),
+        }
+        self_agent = next((a for a in agents if a.get("id") == "self"), {})
+        return {
+            "about": AGENTIC_ABOUT,
+            "schema": AGENTIC_SCHEMA,
+            "schema_version": AGENTIC_SCHEMA_VERSION,
+            "generated_at": generated,
+            "app_version": self.app_version,
+            "rules_version": self.rules.version if self.rules.load() else None,
+            "this_machine_agent_version": (self_agent.get("agent") or {}).get("version"),
+            "home_assistant": {
+                "version": sv.ha_version() if sv.available else None,
+                "reachable": bool(lookup and lookup.get("reachable")),
+                "integration_installed": lookup.get("installed") if lookup else None,
+            },
+            "counts": counts,
+            "agents": agents,
+            "guide": AGENTIC_GUIDE,
+        }
+
+    def _agentic_agent(self, key: str, target: tuple[str, str, int, str],
+                       host: dict[str, Any] | None, response: dict[str, Any] | None, now: float,
+                       hidden: set[str], names: dict[str, str], host_names: dict[str, str],
+                       ha_target: dict[str, Any] | None) -> dict[str, Any]:
+        """One agent's entry. Its token is only ever looked at as a yes/no."""
+        kind, _address, port, token = target
+        if response is None:
+            raise ValueError("no read")
+        if host is not None:
+            response = without_removed(response, host.get("removed") or [])
+        status = str(response.get("status") or "error")
+        last_answer = response.get("last_answer")
+        answered = _iso_epoch(last_answer)
+        error = None
+        if status != "ok":
+            error = {"code": status,
+                     "message": AGENTIC_ERRORS.get(status) if last_answer else AGENTIC_NEVER_READ}
+        agent = response.get("agent") if isinstance(response.get("agent"), dict) else None
+        devices = (ha_target or {}).get("devices") or {}
+        drives, pools, filesystems = agentic_cards(response, hidden, names, devices)
+        return {
+            "id": key,
+            "kind": kind,
+            "simulated": kind == "replicas",
+            "name": host_names.get(key) or (agent or {}).get("hostname"),
+            "address": host["address"] if host is not None else self.agent_host,
+            "port": port,
+            "has_token": bool(token),
+            "status": status,
+            "stale": bool(response.get("stale")),
+            "read_at": response.get("read_at"),
+            "last_answer": last_answer,
+            "data_age_seconds": max(0, int(now - answered)) if answered is not None else None,
+            "error": error,
+            "agent": agent,
+            "health": response.get("health"),
+            "summary": response.get("summary"),
+            "home_assistant": ({"config_entry_id": ha_target.get("entry_id"),
+                                "entry_state": ha_target.get("state")} if ha_target else None),
+            "pools_status": response.get("pools_status"),
+            "filesystems_status": response.get("filesystems_status"),
+            "drives": drives,
+            "pools": pools,
+            "filesystems": filesystems,
+        }
+
+    @staticmethod
+    def _agentic_flags(parsed) -> tuple[bool, bool]:
+        query = parse_qs(parsed.query or "")
+        return (query.get("fresh", [""])[0] == "1", query.get("download", [""])[0] == "1")
+
+    def _route_agentic_json(self, parsed) -> None:
+        fresh, download = self._agentic_flags(parsed)
+        document = self._agentic_document(fresh)
+        headers = {}
+        if download:
+            headers["Content-Disposition"] = (
+                f'attachment; filename="smart-sniffer-{document["generated_at"][:10]}.json"')
+        self._send_bytes(200, agentic_bytes(document), "application/json; charset=utf-8", headers)
+
+    def _route_agentic_page(self, parsed) -> None:
+        if parsed.path.endswith("/"):
+            # The page's links are relative to the ingress root; under a
+            # trailing slash they would not be.
+            self.send_response(301)
+            self.send_header("Location", "../agentic-access")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        fresh, _download = self._agentic_flags(parsed)
+        root = os.path.realpath(self.static_dir)
+        try:
+            with open(os.path.join(root, "agentic.html"), encoding="utf-8") as handle:
+                template = handle.read()
+        except OSError:
+            raise ApiError(404, "not_found", "agentic.html is missing") from None
+        document = self._agentic_document(fresh)
+        body = agentic_bytes(document)
+        every = document["agents"]
+        drives = sum(len(a.get("drives") or []) for a in every)
+        down = sum(1 for a in every if a.get("status") != "ok")
+        size = len(body)
+        meta = [f"generated {document['generated_at'][:10]} {document['generated_at'][11:16]} UTC",
+                f"{len(every)} agent{'' if len(every) == 1 else 's'}",
+                f"{drives} drive{'' if drives == 1 else 's'}"]
+        if down:
+            meta.append(f"{down} not answering")
+        meta.append(f"{size / 1024:.0f} KB" if size >= 1024 else f"{size} B")
+        page = (template
+                .replace("<!--AGENTIC_FILE-->",
+                         html.escape(f"smart-sniffer-{document['generated_at'][:10]}.json"))
+                .replace("<!--AGENTIC_META-->", html.escape("  ·  ".join(meta)))
+                .replace("<!--AGENTIC_JSON-->", html.escape(body.decode("utf-8"), quote=False)))
+        self._send_bytes(200, _version_assets(page.encode("utf-8"), root), "text/html; charset=utf-8")
 
     # ── /replicas ──
 
@@ -4334,6 +4767,11 @@ def main():
     parser.add_argument("--ha-replica-seconds", type=float, default=HA_REPLICA_SETTLE_SECONDS,
                         help="How long a replica's removal keeps asking Home Assistant "
                              "to delete its device")
+    parser.add_argument("--agentic-memo-seconds", type=float, default=AGENTIC_MEMO_SECONDS,
+                        help="How long one Agentic access document is reused")
+    parser.add_argument("--agentic-max-age-seconds", type=float, default=AGENTIC_MAX_AGE_SECONDS,
+                        help="How old this machine's and the replicas' cached read may be "
+                             "before Agentic access reads them again")
     parser.add_argument("--static-dir", type=str, default=STATIC_DIR,
                         help="Where the page, its scripts and images are")
     parser.add_argument("--data-dir", type=str, default="/data",
@@ -4353,6 +4791,8 @@ def main():
     )
     ProxyHandler.ha_cache_seconds = args.ha_cache_seconds
     ProxyHandler.ha_replica_seconds = args.ha_replica_seconds
+    ProxyHandler.agentic_memo_seconds = args.agentic_memo_seconds
+    ProxyHandler.agentic_max_age_seconds = args.agentic_max_age_seconds
     ProxyHandler.cache = FleetCache(
         os.path.join(args.data_dir, "fleet-cache.json") if args.data_dir else None
     )
