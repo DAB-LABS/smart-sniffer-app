@@ -26,6 +26,11 @@ Key behaviors:
 - The web UI (the Control Center page) is accessible from the HA add-on sidebar. It shows
   this machine's drives, the replicas, and drives on other network machines that run
   the SMART Sniffer agent (field agents).
+- Agentic access: a link in the Control Center footer opens all drive data as one JSON
+  document for AI assistants and scripts (<ingress>/agentic-access, raw JSON at
+  agentic-access.json): every agent, each drive's smartctl data and verdict, ZFS pools,
+  filesystems, and a guide to the fields and the smart_sniffer.get_drive_data action.
+  Behind the Home Assistant login (ingress only); tokens are never included.
 - On some hardware, Protection Mode must be turned OFF (Settings -> Apps -> SMART
   Sniffer -> Protection mode) for the add-on to access drive device nodes.
 

@@ -85,6 +85,7 @@ One grid of cards, one per drive (including USB drives mounted under `/media` or
 - **Replicas**: fake drives and pools for testing Home Assistant, switched between scenarios with one click. Six ship with the app; you can upload your own, drop files into `/share/smart-sniffer/replicas`, or save any card as a file, a real drive's with its serial number and WWN replaced.
 
 - **Thresholds**: each drive's alert thresholds, edited in its Details. A drive in Home Assistant keeps them in the integration, so the card and Home Assistant agree; any other drive keeps them in the app's options. Accept current readings makes what is flagged the drive's new normal.
+- **Agentic access**: a footer link opens everything the page knows as one JSON document for an AI assistant or a script, with a guide to the fields, Copy and Download. It needs your Home Assistant login and never includes tokens.
 - **Connect by hand**: Details on a drive or pool card gives the host and port (and this app's mDNS name) to type into the integration, with copy buttons; the line at the top of the page has the same for this app's agent.
 
 See [DOCS.md](smart_sniffer_agent/DOCS.md) for the details, including how to put the page in the sidebar or on a dashboard.
