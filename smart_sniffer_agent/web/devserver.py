@@ -46,6 +46,8 @@ Referer.
     REPLICA_FOLDER  ok | missing | read_only  upload and save enabled or not
     MDNS            on | off                  the agent's mDNS name in /app/info, or none
     LATENCY         seconds                   added to every route (default 0.02)
+    SELF_DELAY      seconds                   added to fleet/hosts/self/drives only (default 0):
+                                              the page before this machine's first answer
     SLUG, HOSTNAME, HA_VERSION                the app's slug, its agent host name, Home
                                               Assistant's version (2025.x and earlier
                                               give the /hassio/... link paths)
@@ -128,6 +130,7 @@ mimetypes.add_type("text/css", ".css")
 
 DEFAULTS = {
     "AGENT": "up",
+    "SELF_DELAY": "0",
     "DRIVES": "board",
     "VDISK": "0",
     "RULES": "ok",
@@ -1515,6 +1518,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(route)
         flags = flags_for(self)
         time.sleep(float(os.environ.get("LATENCY", "0.02")))
+        if route.strip("/") == "fleet/hosts/self/drives":
+            try:
+                time.sleep(max(0.0, float(flags["SELF_DELAY"])))
+            except ValueError:
+                pass
         try:
             with LOCK:
                 self._api(method, [unquote(p) for p in route.strip("/").split("/")], flags)

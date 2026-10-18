@@ -1449,7 +1449,8 @@ class Supervisor:
         cached = self._installed_cache
         if entries is None and cached and time.monotonic() - cached[0] < HA_API_CACHE_SECONDS:
             return cached[1]
-        if not self.available or not self.core_reachable():
+        # Entries just read prove Core answers; only ask when there are none.
+        if not self.available or (entries is None and not self.core_reachable()):
             self._installed_cache = (time.monotonic(), None)
             return None
         if entries is None:
@@ -2724,6 +2725,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
     ha_cache_seconds: float = HA_API_CACHE_SECONDS
     ha_replica_seconds: float = HA_REPLICA_SETTLE_SECONDS
     _ha_cache: tuple[float, dict[str, Any]] | None = None
+    # One Home Assistant lookup at a time: callers that arrive together
+    # share it. _ha_gen moves on whenever the cached lookup is dropped, so a
+    # background refresh begun before that does not put an old answer back.
+    _ha_lock = threading.Lock()
+    _ha_gen = 0
+    _thr_gen = 0
+    # Background refreshes in flight, by key; one per key at a time.
+    _bg_lock = threading.Lock()
+    _bg_running: set[str] = set()
     # Entry ids whose diagnostics failed; kept for the process life.
     _diagnostics_failed: set[str] = set()
     # The integration's thresholds read: entry id -> (time, {drive id:
@@ -3848,7 +3858,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if device is not None:
             ha = "saved" if self.supervisor.set_device_name(device, name or None) else "failed"
             if ha == "saved":
-                type(self)._ha_cache = None  # the next /ha/devices reads the new name
+                self._drop_ha_cache()  # the next /ha/devices reads the new name
         self._send_json(200, {"id": cid, "name": name, "home_assistant": ha})
 
     def _route_host_name(self, _parsed, key: str) -> None:
@@ -3932,7 +3942,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                            "device_id": device, "config_entry_id": target["entry_id"]}
             reason = self.supervisor.registry_command(command)
         if reason is None:
-            type(self)._ha_cache = None  # the next /ha/devices reads the change
+            self._drop_ha_cache()  # the next /ha/devices reads the change
             return None
         return reason.strip().rstrip(".") or "no reason given"
 
@@ -3951,7 +3961,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.supervisor.poll_device(device)
             reason = self.supervisor.registry_command(command)
             if reason is None:
-                type(self)._ha_cache = None  # the next /ha/devices reads the change
+                self._drop_ha_cache()  # the next /ha/devices reads the change
                 return None
             if time.monotonic() + HA_REPLICA_RETRY_SECONDS > deadline:
                 return reason.strip().rstrip(".") or "no reason given"
@@ -4048,7 +4058,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         def resolve(cid: str, drive_id: str) -> tuple[str, dict[str, int], str | None]:
             if "lookup" not in memo:
-                memo["lookup"] = self._ha_lookup() if self.supervisor.available else None
+                # A drive read never waits on a lookup it has an older answer
+                # for: that answer is used and a new one is read behind it.
+                memo["lookup"] = self._ha_lookup(allow_stale=True) if self.supervisor.available else None
             entry_id = self._entry_for_card(memo["lookup"], host_key, cid)
             if entry_id is not None:
                 return "integration", self._integration_thresholds(entry_id, drive_id), entry_id
@@ -4082,13 +4094,38 @@ class ProxyHandler(BaseHTTPRequestHandler):
         cls = type(self)
         cached = cls._thr_cache.get(entry_id)
         if cached is None or not self._thr_fresh(cached[0]):
-            cached = (time.monotonic(), self._diagnostics_thresholds(entry_id))
-            cls._thr_cache[entry_id] = cached
+            if cached is not None and self._stale_ok():
+                # The last diagnostics now; new ones read behind this read.
+                gen = cls._thr_gen
+
+                def diagnostics() -> None:
+                    value = self._diagnostics_thresholds(entry_id)
+                    if cls._thr_gen == gen:
+                        cls._thr_cache[entry_id] = (time.monotonic(), value)
+
+                self._in_background(f"diag:{entry_id}", diagnostics)
+            else:
+                cached = (time.monotonic(), self._diagnostics_thresholds(entry_id))
+                cls._thr_cache[entry_id] = cached
         drives = cached[1]
         if drives is not None and drive_id in drives:
             return dict(drives[drive_id])
         flow = cls._thr_flow_cache.get((entry_id, drive_id))
         if flow is None or not self._thr_fresh(flow[0]):
+            if flow is not None and self._stale_ok():
+                gen = cls._thr_gen
+
+                def form() -> None:
+                    try:
+                        values = self._flow_read_thresholds(entry_id, drive_id)
+                    except ApiError as err:
+                        log(f"Could not read the thresholds of {drive_id} from Home Assistant: {err.message}")
+                        return
+                    if cls._thr_gen == gen:
+                        cls._thr_flow_cache[(entry_id, drive_id)] = (time.monotonic(), values)
+
+                self._in_background(f"flow:{entry_id}:{drive_id}", form)
+                return dict(flow[1])
             try:
                 values = self._flow_read_thresholds(entry_id, drive_id)
             except ApiError as err:
@@ -4195,6 +4232,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _forget_thresholds(self, entry_id: str | None = None) -> None:
         cls = type(self)
+        cls._thr_gen += 1
         if entry_id is None:
             cls._thr_cache = {}
             cls._thr_flow_cache = {}
@@ -4406,13 +4444,65 @@ class ProxyHandler(BaseHTTPRequestHandler):
         found = self._match_stored(str(config.get("host") or ""), port, stored)
         return found or self._match_stored(inner, port, stored)
 
-    def _ha_lookup(self, fresh: bool = False) -> dict[str, Any]:
+    def _stale_ok(self) -> bool:
+        """Whether a cached Home Assistant answer past its time may be used
+        while a new one is read behind it. Off when caching is (tests)."""
+        return type(self).ha_cache_seconds > 0
+
+    def _in_background(self, key: str, work: Callable[[], None]) -> None:
+        """Run work() in a thread, unless one for the same key still runs."""
+        cls = type(self)
+        with cls._bg_lock:
+            if key in cls._bg_running:
+                return
+            cls._bg_running.add(key)
+
+        def run() -> None:
+            try:
+                work()
+            except Exception as err:  # noqa: BLE001 -- a refresh never takes the server down
+                log(f"Background refresh {key} failed: {type(err).__name__}: {err}")
+            finally:
+                with cls._bg_lock:
+                    cls._bg_running.discard(key)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _drop_ha_cache(self) -> None:
+        """Forget the cached lookup; the next one reads Home Assistant now."""
+        cls = type(self)
+        cls._ha_gen += 1
+        cls._ha_cache = None
+
+    def _ha_lookup(self, fresh: bool = False, allow_stale: bool = False) -> dict[str, Any]:
         """The /ha/devices answer, cached ha_cache_seconds (30 s); dropped
-        after any /ha/add."""
+        after any /ha/add. One lookup runs at a time; callers that arrive
+        while it runs wait for it and share its answer. allow_stale: an
+        answer past its time is returned at once and a new one is read in
+        the background (drive reads, which must not wait on Core)."""
         cls = type(self)
         cached = cls._ha_cache
         if not fresh and cached and time.monotonic() - cached[0] < cls.ha_cache_seconds:
             return cached[1]
+        if not fresh and allow_stale and cached and self._stale_ok():
+            self._in_background("ha_lookup", lambda: self._ha_lookup(fresh=True))
+            return cached[1]
+        started = time.monotonic()
+        with cls._ha_lock:
+            cached = cls._ha_cache
+            # Another caller finished a lookup while this one waited.
+            if cached and cached[0] >= started:
+                return cached[1]
+            if not fresh and cached and time.monotonic() - cached[0] < cls.ha_cache_seconds:
+                return cached[1]
+            gen = cls._ha_gen
+            result = self._ha_lookup_now()
+            if cls._ha_gen == gen:
+                cls._ha_cache = (time.monotonic(), result)
+            return result
+
+    def _ha_lookup_now(self) -> dict[str, Any]:
+        """One lookup of the integration's entries and devices in Core."""
         sv = self.supervisor
         result: dict[str, Any] = {
             "installed": None, "reachable": False, "lookup": None,
@@ -4481,7 +4571,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             else:
                 result["lookup"] = "entries_only"
             result["targets"] = targets
-        cls._ha_cache = (time.monotonic(), result)
         return result
 
     def _route_ha_devices(self, _parsed) -> None:
@@ -4541,7 +4630,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         try:
             outcome, code = self._ha_add(target, host, port, token)
         finally:
-            type(self)._ha_cache = None
+            self._drop_ha_cache()
             self.supervisor.forget_installed()
         if outcome.get("result") in ("created", "reloaded", "already_added"):
             copied = self._copy_thresholds(target)

@@ -39,6 +39,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -3819,3 +3820,91 @@ def test_agentic_cards_mapping(mod):
     assert pools[0]["data"] == {"name": "tank"}
     assert filesystems == [{"card_id": "h|fs:z", "name": None, "hidden": False,
                             "ha_device_id": None, "stale": False, "data": {"id": "z"}}]
+
+
+# ── Home Assistant slow: drive reads do not wait on it ──────────────────────
+#
+# A proxy of its own whose Supervisor answers every /core/* call late, as a
+# busy or just-restarted Home Assistant does, with the lookup cached 1 s.
+
+CORE_DELAY = 0.4
+
+
+class SlowCoreSupervisor(FakeSupervisor):
+    def _dispatch(self, method: str) -> None:
+        if self.path.startswith("/core/"):
+            time.sleep(CORE_DELAY)
+        super()._dispatch(method)
+
+
+@pytest.fixture
+def slow_core(backends, data_dir):
+    _supervisor, agent = backends
+    slow = _serve(SlowCoreSupervisor)
+    proc, client = _start_proxy([
+        f"--agent-port={agent.server_address[1]}",
+        f"--mock-port={_free_port()}",
+        "--app-version=0.3.1",
+        f"--rules-dir={RULES_DIR}",
+        f"--supervisor-url=http://127.0.0.1:{slow.server_address[1]}",
+        f"--agent-host={AGENT_HOST}",
+        f"--token={APP_TOKEN}",
+        "--data-dir=",
+        "--ha-cache-seconds=1",
+    ], TOKEN)
+    client.agent_port = agent.server_address[1]  # type: ignore[attr-defined]
+    yield client
+    _stop_proxy(proc)
+    slow.shutdown()
+
+
+def _core_calls(method: str, path: str) -> int:
+    return sum(1 for c in list(STATE.calls) if c[0] == method and c[1] == path)
+
+
+def _timed_get(proxy, path: str) -> tuple[float, Any]:
+    start = time.monotonic()
+    status, body = proxy.get(path)
+    assert status == 200
+    return time.monotonic() - start, body
+
+
+@needs_rules
+def test_drive_read_does_not_wait_for_a_stale_ha_lookup(slow_core):
+    cold, body = _timed_get(slow_core, "/fleet/hosts/self/drives")
+    assert body["status"] == "ok" and cold >= 3 * CORE_DELAY  # the first lookup is read now
+    time.sleep(1.2)  # the lookup is now past its time
+    STATE.entries = [_entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{slow_core.agent_port})")]
+    templates = _core_calls("POST", "/core/api/template")
+    warm, body = _timed_get(slow_core, "/fleet/hosts/self/drives")
+    assert body["status"] == "ok" and warm < CORE_DELAY  # served with the last lookup
+    # The new lookup was read behind that answer and is used next.
+    deadline = time.monotonic() + 10
+    while _core_calls("POST", "/core/api/template") == templates:
+        assert time.monotonic() < deadline, "no background lookup"
+        time.sleep(0.05)
+    time.sleep(0.1)
+    fast, devices = _timed_get(slow_core, "/ha/devices")
+    assert fast < CORE_DELAY
+    assert devices["targets"]["self"]["entry_id"] == "e-agent"
+
+
+@needs_rules
+def test_ha_lookup_single_flight(slow_core):
+    STATE.entries = [_entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{slow_core.agent_port})")]
+    paths = ["/fleet/hosts/self/drives", "/ha/devices", "/fleet/hosts/self/drives", "/ha/devices"]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        answers = list(pool.map(slow_core.get, paths))
+    assert all(status == 200 for status, _ in answers)
+    # Four callers that arrived together, one lookup: one reachability
+    # check, one entry list, one device template.
+    assert _core_calls("GET", "/core/api/") == 1
+    assert _core_calls("GET", "/core/api/config/config_entries/entry?domain=smart_sniffer") == 1
+    assert _core_calls("POST", "/core/api/template") == 1
+
+
+def test_integration_installed_reuses_entries(slow_core):
+    STATE.entries = [_entry("e-agent", f"SMART Sniffer ({AGENT_HOST}:{slow_core.agent_port})")]
+    _, body = _timed_get(slow_core, "/ha/devices")
+    assert body["installed"] is True and body["reachable"] is True
+    assert _core_calls("GET", "/core/api/") == 1  # not asked again once the entries answered

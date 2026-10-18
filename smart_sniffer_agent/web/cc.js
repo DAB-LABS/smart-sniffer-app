@@ -348,8 +348,9 @@ function cc() {
     // ── The cards ───────────────────────────────────────────────────
     // A card: { id, kind, src, it, h, fs }. kind is drive, pool,
     // filesystem, machine (a field agent with nothing to show: waiting for
-    // its password, never read, not answering) or down (this app's agent
-    // not answering before its first answer). src is self, field or replicas.
+    // its password, never read, not answering), down (this app's agent
+    // not answering before its first answer) or loading (this app's agent
+    // not asked yet: its first answer is still on the way). src is self, field or replicas.
     cardsFrom(src, data, h) {
       const out = [];
       ((data && data.items) || []).forEach((it) => {
@@ -362,6 +363,9 @@ function cc() {
     },
     get allCards() {
       const out = [];
+      // Until this machine's agent first answers, one card says it is
+      // being read, as a field agent's does, so the page is never blank.
+      if (!this.selfLoaded) out.push({ id: 'self', kind: 'loading', src: 'self', it: null, h: null, fs: null });
       if (this.selfLoaded) {
         const live = this.self && this.self.status === 'ok' ? this.self : null;
         const data = live || this.selfLastGood;
@@ -405,7 +409,7 @@ function cc() {
     },
     cardClass(c) {
       return {
-        machine: c.kind === 'machine' || c.kind === 'down',
+        machine: ['machine', 'down', 'loading'].includes(c.kind),
         stale: this.unanswered(c),
         'is-hidden': this.isHidden(c),
         'drop-gap': !!(this.drag && this.drag.id === c.id),
@@ -613,6 +617,7 @@ function cc() {
     // name, the mount point.
     baseTitle(c) {
       if (c.kind === 'down') return "This app's agent is not answering";
+      if (c.kind === 'loading') return "This machine's drives";
       if (c.kind === 'machine') return this.hostName(c.h);
       if (c.kind === 'filesystem') return c.fs.mountpoint;
       if (c.kind === 'pool') return c.it.pool.name;
@@ -621,7 +626,7 @@ function cc() {
     // Shown: the Home Assistant device's own name when the user gave it one,
     // else the name given here, else the original.
     title(c) {
-      if (c.kind === 'down' || c.kind === 'machine') return this.baseTitle(c);
+      if (['down', 'loading', 'machine'].includes(c.kind)) return this.baseTitle(c);
       const ha = this.haNames(c);
       return (ha && ha.name_by_user) || this.names[c.id] || this.baseTitle(c);
     },
@@ -747,7 +752,7 @@ function cc() {
     where(c) {
       const it = c.it || {};
       const addr = c.h ? `${c.h.address}:${c.h.port}` : '';
-      if (c.kind === 'down') return [this.agentAddress];
+      if (c.kind === 'down' || c.kind === 'loading') return [this.agentAddress];
       if (c.kind === 'machine') return [addr];
       // A filesystem or pool card starts with what it is; its pill names
       // the machine, as a drive card's does.
@@ -791,7 +796,7 @@ function cc() {
 
     // Health: attention, maybe, ok, unknown; null for a card with no health line.
     health(c) {
-      if (c.kind === 'filesystem' || c.kind === 'machine') return null;
+      if (['filesystem', 'machine', 'loading'].includes(c.kind)) return null;
       if (c.kind === 'down') return 'unknown';
       const it = c.it;
       if (c.kind === 'pool') {
@@ -1283,7 +1288,7 @@ function cc() {
       return c.kind === 'drive' || c.kind === 'pool';
     },
     canHide(c) {
-      return c.src !== 'replicas' && c.kind !== 'down';
+      return c.src !== 'replicas' && c.kind !== 'down' && c.kind !== 'loading';
     },
     canRemove(c) {
       return c.src !== 'self';

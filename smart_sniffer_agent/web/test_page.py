@@ -2747,6 +2747,8 @@ def test_screenshots(open_page):
         _shot(p, "plus-open-scanned", p.page.get_by_role("region", name="Add", exact=True))
         p = open_page("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", width)
         _shot(p, "first-run", None)
+        p = open_page("SELF_DELAY=4", width)
+        _shot(p, "self-reading", by_id(p, "self"))
         ax = _agentic_page(p.ctx, p.base, width=width)
         _shot_page(ax, f"agentic-{width}.png")
 
@@ -2935,3 +2937,22 @@ def test_cards_after_shot(open_page):
     SHOTS.mkdir(parents=True, exist_ok=True)
     p.page.screenshot(path=str(SHOTS / "cards-after-1280.png"),
                       clip={"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0})
+
+
+def test_self_reading_card(open_page):
+    """Before this machine's agent first answers, its place holds a card
+    that says it is being read: the page is never just the + card."""
+    p = open_page("SELF_DELAY=3")
+    reading = by_id(p, "self")
+    assert reading.count() == 1
+    assert reading.locator(".m-msg").inner_text() == "Reading this machine's drives."
+    assert reading.locator("h3.c-title").inner_text() == "This machine's drives"
+    assert reading.locator(".pill").inner_text() == "HAOS"
+    assert "machine" in reading.get_attribute("class")
+    assert reading.locator(".hbox, .c-health").count() == 0  # no health claimed while unknown
+    assert p.page.locator(".agent-dot").get_attribute("class") == "agent-dot unknown"
+    assert by_id(p, NVME).count() == 0
+    assert card_ids(p)[0] == "self"  # where this machine's drives will be
+    by_id(p, NVME).wait_for(timeout=6000)
+    assert by_id(p, "self").count() == 0
+    assert card_ids(p)[:2] == [NVME, BARRACUDA]

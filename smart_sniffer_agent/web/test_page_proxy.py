@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -437,3 +438,56 @@ def test_agentic_access_from_the_footer(tab, app):
         ax.get_by_role("button", name="Download").click()
     assert dl.value.suggested_filename == f"smart-sniffer-{doc['generated_at'][:10]}.json"
     assert not tab.errors, tab.errors
+
+
+# Home Assistant slow, as when it is busy or just restarted: every /core/*
+# call answers late, and the lookup is cached 1 s.
+CORE_DELAY = 0.5
+
+
+class SlowCoreSupervisor(FakeSupervisor):
+    def _dispatch(self, method: str) -> None:
+        if self.path.startswith("/core/"):
+            time.sleep(CORE_DELAY)
+        super()._dispatch(method)
+
+
+def test_drives_show_without_waiting_on_home_assistant(browser, static_dir):
+    """A page opened after the Home Assistant lookup went past its time
+    shows this machine's drives at once; the lookup is read behind them.
+    Before 0.3.1 the page waited for six slow Core calls (blank)."""
+    STATE.reset()
+    slow = _serve(SlowCoreSupervisor)
+    agent = _serve(agent_handler(SELF))
+    work = Path(tempfile.mkdtemp(prefix="ss-slow-"))
+    proc, client = _start_proxy([
+        f"--agent-port={agent.server_address[1]}",
+        f"--mock-port={_free_port()}",
+        "--app-version=0.3.1",
+        f"--rules-dir={RULES_DIR}",
+        f"--supervisor-url=http://127.0.0.1:{slow.server_address[1]}",
+        f"--token={APP_TOKEN}",
+        f"--data-dir={work}",
+        f"--static-dir={static_dir}",
+        "--ha-cache-seconds=1",
+    ], TOKEN)
+    try:
+        # The first lookup after the app starts is read now.
+        with urllib.request.urlopen(client.base + "/fleet/hosts/self/drives", timeout=30) as resp:
+            assert json.loads(resp.read())["status"] == "ok"
+        time.sleep(1.3)  # now past its time
+        t = Tab(browser, client.base)
+        try:
+            start = time.monotonic()
+            t.load()
+            t.page.wait_for_selector('article.card[data-card="self|HAOS-DISK-1"]', timeout=10000)
+            assert time.monotonic() - start < 1.5 + CORE_DELAY
+            assert not t.errors, t.errors
+        finally:
+            t.close()
+    finally:
+        _stop_proxy(proc)
+        slow.shutdown()
+        agent.shutdown()
+        shutil.rmtree(work, ignore_errors=True)
+        STATE.reset()

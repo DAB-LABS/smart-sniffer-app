@@ -271,6 +271,9 @@
             </template>
           </div>
         </template>
+        <template x-if="c.kind === 'loading'">
+          <div class="m-body"><p class="m-msg">Reading this machine's drives.</p></div>
+        </template>
         <template x-if="c.kind === 'down'">
           <div class="m-body">
             <p class="m-msg">The app may still be starting. This page asks again every 8 seconds. If it stays like this, read the <a :href="appPage('logs')" target="_top">App log</a>.</p>
