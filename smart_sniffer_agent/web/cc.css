@@ -162,6 +162,10 @@ p.sec-label { margin: 22px 0 10px; }
         font-family: var(--mono); font-size: 0.66rem; line-height: 16px; letter-spacing: 0.04em; text-align: center;
         color: var(--grey); border: 1px solid var(--rule-2); border-radius: 0;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A replica's pill is a ghost: dotted frame, dimmer type, so test data
+   reads as not part of the system. It is fixed, so never the dashed hover
+   hint of a renamable pill. The rest of the card is as any other. */
+.pill.pill-ghost { border-style: dotted; color: var(--dim); }
 
 /* Exit icon: blue when the device is in Home Assistant (opens it there);
    grey outline when the integration is installed and the device is not in

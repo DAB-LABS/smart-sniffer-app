@@ -593,10 +593,16 @@ def test_one_grid_of_cards(open_page):
     assert {NAS_ATT, NAS_POOL, NAS_FS, STUDIO, BACKUP_PI, REP_FAILED, REP_NVME, REP_POOL} <= set(ids)
     pills = {cid: by_id(p, cid).locator(".pill").inner_text() for cid in
              (NVME, NAS_ATT, NAS_POOL, NAS_FS, BACKUP_PI, REP_FAILED, REP_POOL)}
-    assert pills == {NVME: "HAOS", NAS_ATT: "NAS-01", NAS_POOL: "ZFS POOL", NAS_FS: "FILESYSTEM",
-                     BACKUP_PI: "BACKUP-PI", REP_FAILED: "REPLICA", REP_POOL: "ZFS POOL"}
-    assert "on NAS-01" in by_id(p, NAS_POOL).locator(".c-where").inner_text()
-    assert "on REPLICA" in by_id(p, REP_POOL).locator(".c-where").inner_text()
+    # Every pill names the machine; a pool or filesystem card says what it
+    # is first on the line under its title.
+    assert pills == {NVME: "HAOS", NAS_ATT: "NAS-01", NAS_POOL: "NAS-01", NAS_FS: "NAS-01",
+                     BACKUP_PI: "BACKUP-PI", REP_FAILED: "REPLICA", REP_POOL: "REPLICA"}
+    def where(cid):
+        return by_id(p, cid).locator(".c-where span:not(.scen-box):not(.scen-size)").all_inner_texts()
+
+    assert where(NAS_POOL)[0] == "ZFS pool" and where(NAS_FS)[0] == "Filesystem"
+    assert where(REP_POOL)[0] == "ZFS pool"
+    assert "ZFS pool" not in where(NVME) and "Filesystem" not in where(NAS_ATT)
     # The + card is last.
     assert last_is_plus(p)
     # A FILESYSTEM card has no health line and no Download.
@@ -1033,8 +1039,12 @@ def test_rename_has_no_pencils_and_hints_on_the_name_only(open_page):
     hov = pill.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color, getComputedStyle(e).cursor]")
     assert rest[0] == "solid" and hov[0] == "dashed" and hov[1] != rest[1] and hov[2] == "text"
     assert pill.bounding_box() == b0
-    # A fixed pill has no hover change.
-    for cid in (NVME, REP_NVME, NAS_POOL, NAS_FS):
+    # A fixed pill has no hover change: this machine's and the replicas',
+    # on drive and pool cards alike. A field agent's pool and filesystem
+    # pills name the machine and are editable like its drives'.
+    for cid in (NAS_POOL, NAS_FS):
+        assert by_id(p, cid).locator(".pill").get_attribute("tabindex") == "0"
+    for cid in (NVME, REP_NVME, REP_POOL):
         f = by_id(p, cid).locator(".pill")
         p.page.mouse.move(2, 2)
         p.page.wait_for_timeout(150)
@@ -1206,8 +1216,8 @@ def test_rename_pools_filesystems_and_fixed_pills(open_page):
     fs.locator("input.name-in").fill("Scratch")
     p.page.keyboard.press("Enter")
     assert fs.locator("h3.c-title").inner_text() == "Scratch"
-    # HAOS, REPLICA, ZFS POOL and FILESYSTEM pills are fixed.
-    for cid in (NVME, REP_NVME, NAS_POOL, NAS_FS):
+    # HAOS and REPLICA pills are fixed, on every kind of card.
+    for cid in (NVME, REP_NVME, REP_POOL):
         c = by_id(p, cid)
         assert c.locator(".pill").get_attribute("tabindex") is None
         c.locator(".pill").dblclick()
@@ -1232,13 +1242,28 @@ def test_rename_machine_pill_follows_on_every_card(open_page):
     assert unquote(puts[0][1]).endswith(f"/hosts/{NAS}/name")
     for cid in drives:
         assert by_id(p, cid).locator(".pill").inner_text() == "BASEMENT NAS"
-    assert by_id(p, NAS_POOL).locator(".pill").inner_text() == "ZFS POOL"
+    # The machine's pool and filesystem cards follow; their pills rename it too.
+    assert by_id(p, NAS_POOL).locator(".pill").inner_text() == "BASEMENT NAS"
+    assert by_id(p, NAS_FS).locator(".pill").inner_text() == "BASEMENT NAS"
     # A single click does the same; empty restores the agent's name.
     c.locator(".pill").click()
     c.locator(".pill-edit input.name-in").fill("")
     p.page.keyboard.press("Enter")
     for cid in drives:
         assert by_id(p, cid).locator(".pill").inner_text() == "NAS-01"
+    for cid in (NAS_POOL, NAS_FS):
+        pill = by_id(p, cid).locator(".pill")
+        assert pill.get_attribute("tabindex") == "0"
+        pill.dblclick()
+        field = by_id(p, cid).locator(".pill-edit input.name-in")
+        assert field.input_value() == "nas-01"
+        p.page.keyboard.press("Escape")
+    by_id(p, NAS_FS).locator(".pill").click()
+    by_id(p, NAS_FS).locator(".pill-edit input.name-in").fill("Attic NAS")
+    p.page.keyboard.press("Enter")
+    assert unquote(p.api("PUT", r"/hosts/.+/name$")[-1][1]).endswith(f"/hosts/{NAS}/name")
+    for cid in drives + [NAS_POOL]:
+        assert by_id(p, cid).locator(".pill").inner_text() == "ATTIC NAS"
     # A machine with nothing to show is renamed from its title.
     pi = by_id(p, BACKUP_PI)
     pi.locator(".t-name").dblclick()
@@ -1349,7 +1374,7 @@ def test_scenario_picker_applies_on_change(open_page):
         "Healthy SATA HDD", "Reallocated sectors growing", "Pending sectors", "Command timeouts", "SMART failed"]
     pool_pick, _, pool_options = _scenario(by_id(p, REP_POOL))
     assert pool_options == ["Healthy pool", "ZFS pool degraded", "Pool faulted"]
-    assert by_id(p, REP_POOL).locator(".c-where").inner_text().split("\n")[-1] == "on REPLICA"
+    assert "ZFS pool" in by_id(p, REP_POOL).locator(".c-where").inner_text()
     # Quiet at rest: no border until hovered or focused.
     assert pick.evaluate("e => getComputedStyle(e).borderTopColor") == "rgba(0, 0, 0, 0)"
     assert pick.evaluate("e => getComputedStyle(e).fontFamily") == rep.locator(".c-where").evaluate(
@@ -2850,3 +2875,63 @@ def test_agentic_no_page_scroll(browser, server, width):
     if width == 390:
         assert pre[0] > pre[1]  # the JSON block scrolls sideways
     ctx.close()
+
+
+def test_replica_pill_is_a_ghost(open_page):
+    """A replica's REPLICA pill reads as test data: dotted frame, dimmer type.
+    The card itself keeps the normal border, hidden cards keep theirs, and
+    the ghost is not the dashed hover hint of a renamable pill."""
+    p = open_page()
+    look = ("e => { const s = getComputedStyle(e); "
+            "return [s.borderTopStyle, s.borderTopColor, s.borderTopWidth, s.color]; }")
+    real_pill = by_id(p, NAS_ATT).locator(".pill").evaluate(look)
+    for cid in (REP_FAILED, REP_NVME, REP_POOL):
+        card = by_id(p, cid)
+        pill = card.locator(".pill")
+        assert pill.inner_text() == "REPLICA"
+        ghost = pill.evaluate(look)
+        assert ghost[0] == "dotted" and ghost[1] == real_pill[1] and ghost[2] == "1px", cid
+        assert ghost[3] == "rgb(143, 143, 143)" and real_pill[3] == "rgb(189, 189, 189)"  # --dim, not --grey
+        # The card's own frame is the normal one, as on a real drive.
+        frame = ["solid", "rgb(71, 71, 71)", "1px"]
+        assert card.evaluate(look)[:3] == by_id(p, NAS_ATT).evaluate(look)[:3] == frame
+        # Fixed: no tab stop, no editor, no hover change.
+        assert pill.get_attribute("tabindex") is None
+        p.page.mouse.move(2, 2)
+        before = pill.evaluate(look)
+        pill.hover()
+        p.page.wait_for_timeout(150)
+        assert pill.evaluate(look) == before
+    for cid in (NVME, NAS_ATT, NAS_POOL, NAS_FS):
+        assert by_id(p, cid).locator(".pill").evaluate(look)[0] == "solid", cid
+    # A renamable pill's hint under the pointer is dashed, never dotted.
+    pill = by_id(p, NAS_ATT).locator(".pill")
+    pill.hover()
+    p.page.wait_for_timeout(150)
+    assert pill.evaluate(look)[0] == "dashed"
+    # Health colours are unchanged on a replica.
+    rep, real = by_id(p, REP_FAILED), by_id(p, NAS_ATT)
+    box = "e => [getComputedStyle(e).borderTopColor, getComputedStyle(e).borderTopStyle]"
+    assert rep.locator(".hbox").evaluate(box) == real.locator(".hbox").evaluate(box)
+    assert rep.locator(".h-att").evaluate("e => getComputedStyle(e).color") == ATT
+
+
+def test_cards_after_shot(open_page):
+    """One picture of a drive, a filesystem, a pool and a replica card side
+    by side, for looking at by eye (cards-after-<width>.png)."""
+    p = open_page("", 1280)
+    order = [NAS_ATT, NAS_FS, NAS_POOL, REP_FAILED]
+    p.page.evaluate("""(ids) => {
+      const grid = document.querySelector('.grid');
+      ids.slice().reverse().forEach((id) => grid.prepend(grid.querySelector(`[data-card="${CSS.escape(id)}"]`)));
+    }""", order)
+    p.page.mouse.move(2, 2)
+    p.page.wait_for_timeout(300)
+    boxes = [by_id(p, cid).bounding_box() for cid in order]
+    x0 = min(b["x"] for b in boxes) - 8
+    y0 = min(b["y"] for b in boxes) - 8
+    x1 = max(b["x"] + b["width"] for b in boxes) + 8
+    y1 = max(b["y"] + b["height"] for b in boxes) + 8
+    SHOTS.mkdir(parents=True, exist_ok=True)
+    p.page.screenshot(path=str(SHOTS / "cards-after-1280.png"),
+                      clip={"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0})

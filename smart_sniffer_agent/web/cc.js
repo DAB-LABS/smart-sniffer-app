@@ -599,10 +599,15 @@ function cc() {
       if (c.src === 'replicas') return 'REPLICA';
       return this.hostName(c.h).toUpperCase();
     },
+    // Every card's pill names its machine; a pool or filesystem card says
+    // what it is on the line under its title (kindWord).
     pill(c) {
-      if (c.kind === 'pool') return 'ZFS POOL';
-      if (c.kind === 'filesystem') return 'FILESYSTEM';
       return this.machine(c);
+    },
+    kindWord(c) {
+      if (c.kind === 'pool') return 'ZFS pool';
+      if (c.kind === 'filesystem') return 'Filesystem';
+      return null;
     },
     // The name the card had before anyone renamed it: the model, the pool's
     // name, the mount point.
@@ -634,7 +639,7 @@ function cc() {
       return ['drive', 'pool', 'filesystem', 'machine'].includes(c.kind);
     },
     canRenameHost(c) {
-      return c.src === 'field' && ['drive', 'machine'].includes(c.kind);
+      return c.src === 'field' && ['drive', 'machine', 'pool', 'filesystem'].includes(c.kind);
     },
     renaming(c, what) {
       const r = this.ui.rename;
@@ -744,15 +749,17 @@ function cc() {
       const addr = c.h ? `${c.h.address}:${c.h.port}` : '';
       if (c.kind === 'down') return [this.agentAddress];
       if (c.kind === 'machine') return [addr];
+      // A filesystem or pool card starts with what it is; its pill names
+      // the machine, as a drive card's does.
       if (c.kind === 'filesystem') {
-        return [c.src === 'field' ? addr : null, c.fs.device, c.fs.fstype].filter(Boolean);
+        return [this.kindWord(c), c.src === 'field' ? addr : null, c.fs.device, c.fs.fstype].filter(Boolean);
       }
       if (c.kind === 'pool') {
         const layout = this.poolLayout(it);
         // A replica's scenario is the picker drawn ahead of these parts.
-        if (c.src === 'replicas') return [this.scenOn(c) ? null : this.scenarioName(it), layout, 'on REPLICA'].filter(Boolean);
-        if (c.src === 'self') return [layout, 'on HAOS'].filter(Boolean);
-        return [addr, layout, `on ${this.machine(c)}`].filter(Boolean);
+        if (c.src === 'replicas') return [this.kindWord(c), this.scenOn(c) ? null : this.scenarioName(it), layout].filter(Boolean);
+        if (c.src === 'self') return [this.kindWord(c), layout].filter(Boolean);
+        return [this.kindWord(c), addr, layout].filter(Boolean);
       }
       if (c.src === 'replicas') return this.scenOn(c) ? [] : [this.scenarioName(it) || (it.lab && it.lab.name) || ''];
       const drive = it.drive || {};
