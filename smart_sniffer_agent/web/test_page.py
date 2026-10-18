@@ -267,14 +267,14 @@ def health_words(p: Page) -> set:
 STATES = [
     ("", {"Attention", "Maybe", "Health OK", "Health not known", "Health FAILED"}, (True, True)),
     ("AGENT=down", {"Health not known", "Attention", "Maybe", "Health OK"}, (True, True)),
-    ("HA=not_installed", {"Attention", "Maybe", "Health OK"}, None),
+    ("HA=not_installed", {"Attention", "Maybe", "Health OK"}, (False, True)),  # grey: the install guide
     ("HA=unreachable", {"Attention", "Maybe", "Health OK"}, None),
     ("HA_LOOKUP=entries_only", {"Attention", "Health OK"}, (True, True)),
     ("HA_SELF=0&VDISK=1", {"Health not known", "Health OK", "Attention"}, (True, True)),
     ("RULES=missing", {"Health not known"}, (True, True)),
     ("POOL=degraded", {"Attention", "Maybe"}, (True, True)),
     ("DRIVES=0", {"Attention", "Maybe"}, (True, True)),
-    ("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", {"Health OK"}, None),
+    ("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", {"Health OK"}, (False, True)),
 ]
 
 
@@ -1455,9 +1455,16 @@ def test_download(open_page, tmp_path):
 def test_exit_icon_confirms(open_page):
     p = open_page()
     usb = by_id(p, NAS_USB)
-    usb.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
+    usb.get_by_role("button", name="Create sensors and alerts").click()
     ask = usb.get_by_role("group", name="Confirm")
-    assert ask.inner_text().startswith("Add NAS-01 to Home Assistant?")
+    assert ask.locator(".ask-title").inner_text() == "Create sensors and alerts for NAS-01?"
+    nas = [i.split("|")[1] for i in card_ids(p) if i.startswith(NAS + "|")]
+    drives = len([k for k in nas if not k.startswith(("pool:", "fs:"))])
+    assert ask.locator(".ask-line").inner_text() == (
+        f"Each of its {drives} drives gets health sensors for dashboards and automations, "
+        "and an alert when it needs attention.")
+    assert ask.get_by_role("button").all_inner_texts() == ["Create", "Cancel"]
+    assert "Home Assistant" not in ask.inner_text()
     # The confirm sits under the title.
     assert usb.evaluate("""e => { let s = e.querySelector('.ask').previousElementSibling;
         while (s && s.tagName === 'TEMPLATE') s = s.previousElementSibling;
@@ -1466,9 +1473,13 @@ def test_exit_icon_confirms(open_page):
     assert usb.get_by_role("group", name="Confirm").count() == 0
     p = open_page("HA_SELF=0")
     nvme = by_id(p, NVME)
-    nvme.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
-    assert nvme.get_by_role("group", name="Confirm").inner_text().startswith("Add this drive to Home Assistant?")
-    nvme.get_by_role("group", name="Confirm").get_by_role("button", name="Add").click()
+    nvme.get_by_role("button", name="Create sensors and alerts").click()
+    ask = nvme.get_by_role("group", name="Confirm")
+    assert ask.locator(".ask-title").inner_text() == "Create sensors and alerts for HAOS?"
+    assert ask.locator(".ask-line").inner_text() == (
+        "Each of its 2 drives gets health sensors for dashboards and automations, "
+        "and an alert when it needs attention.")
+    ask.get_by_role("button", name="Create").click()
     p.page.wait_for_selector(f'[data-card="{NVME}"] a.exit', timeout=6000)
     assert json.loads(p.api("POST", r"/ha/add$")[0][2]) == {"target": "self"}
     # The exit icon's place is the same on every card, left of the pill.
@@ -1482,9 +1493,9 @@ def test_exit_icon_confirms(open_page):
 def test_add_error_shows_on_the_confirm(open_page):
     p = open_page("HA_SELF=0&ADD=error")
     c = by_id(p, NVME)
-    c.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
-    c.get_by_role("group", name="Confirm").get_by_role("button", name="Add").click()
-    p.page.wait_for_selector("text=Home Assistant did not add it.")
+    c.get_by_role("button", name="Create sensors and alerts").click()
+    c.get_by_role("group", name="Confirm").get_by_role("button", name="Create").click()
+    p.page.wait_for_selector("text=Home Assistant did not create them. The App log may say why.")
 
 
 def test_placeholder_authenticate(open_page):
@@ -1736,7 +1747,8 @@ def test_first_run(open_page):
     assert p.page.get_by_role("button", name="Add a drive, or a replica for testing").is_visible()
     assert p.page.locator(".app-foot a:visible").all_inner_texts() == [
         "App log", "App configuration", "Agentic access", "GitHub", "HAIR, infrared remotes in Home Assistant"]
-    assert p.page.locator(".exit").count() == 0
+    # No integration yet: the grey icon opens the install guide.
+    assert p.page.locator("a.exit").count() == 0 and p.page.locator("button.exit.add").count() == 1
 
 
 def test_raw_table_marks(open_page):
@@ -2652,7 +2664,7 @@ def test_screenshots(open_page):
         _shot(p, "grid-details-open", None)
         by_id(p, NAS_ATT).locator(".chev").click()
         usb = by_id(p, NAS_USB)
-        usb.get_by_role("button", name="Not in Home Assistant yet. Add it").click()
+        usb.get_by_role("button", name="Create sensors and alerts").click()
         _shot(p, "exit-grey-confirm", usb)
         _trash(by_id(p, NAS_MAYBE)).click()
         _shot(p, "remove-armed", by_id(p, NAS_MAYBE))
@@ -2718,7 +2730,7 @@ def test_screenshots(open_page):
         _shot(p, "agent-line", p.page.locator(".agent-line"))
         p = open_page("POOL=degraded", width)
         _shot(p, "pool-degraded", by_id(p, NAS_POOL))
-        p = open_page("HA=not_installed", width)
+        p = open_page("HA=unreachable", width)
         _shot(p, "exit-absent", by_id(p, NVME))
         p = open_page("HA_NAME=fail", width)
         by_id(p, NVME).locator(".t-name").dblclick()
@@ -2956,3 +2968,126 @@ def test_self_reading_card(open_page):
     by_id(p, NVME).wait_for(timeout=6000)
     assert by_id(p, "self").count() == 0
     assert card_ids(p)[:2] == [NVME, BARRACUDA]
+
+
+# ── Sensors and alerts: Create, or the install guide ─────────────────────────
+
+HACS_REPO = ("https://my.home-assistant.io/redirect/hacs_repository/"
+             "?owner=DAB-LABS&repository=smart-sniffer&category=integration")
+
+
+def test_create_confirm_wording(open_page):
+    """State 3, integration installed and loaded: Create and Cancel, in the
+    user's words; the page lives inside Home Assistant, so never "add to
+    Home Assistant"."""
+    p = open_page("HA_SELF=0")
+    icon = by_id(p, NVME).locator("button.exit.add")
+    assert icon.get_attribute("aria-label") == "Create sensors and alerts"
+    assert icon.get_attribute("title") == "Create sensors and alerts"
+    icon.click()
+    ask = by_id(p, NVME).get_by_role("group", name="Confirm")
+    assert ask.locator(".ask-title").inner_text() == "Create sensors and alerts for HAOS?"
+    assert ask.get_by_role("button").all_inner_texts() == ["Create", "Cancel"]
+    ask.get_by_role("button", name="Cancel").click()
+    assert by_id(p, NVME).locator(".ask").count() == 0
+    # One drive: the singular line.
+    p = open_page("HA_SELF=0&DRIVES=1")
+    by_id(p, NVME).locator("button.exit.add").click()
+    assert by_id(p, NVME).locator(".ask-line").inner_text() == (
+        "Its drive gets health sensors for dashboards and automations, and an alert when it needs attention.")
+    # Replicas: test sensors, and the others come too while none is in it.
+    p = open_page("HA=installed&REPLICAS=board")
+    rep = by_id(p, REP_NVME)
+    rep.locator("button.exit.add").click()
+    ask = rep.get_by_role("group", name="Confirm")
+    assert ask.locator(".ask-title").inner_text() == "Create test sensors for the replicas?"
+    line = ask.locator(".ask-line").inner_text()
+    assert line.endswith("Delete them from the integration when you're done testing.")
+    for text in p.page.locator(".ask").all_inner_texts():
+        assert "Add" not in text and "to Home Assistant" not in text
+    assert not p.page.locator(".ha-notice").count()  # never with the integration installed
+
+
+def test_create_error_says_create(open_page):
+    p = open_page("HA_SELF=0&ADD=error")
+    c = by_id(p, NVME)
+    c.locator("button.exit.add").click()
+    c.get_by_role("button", name="Create", exact=True).click()
+    err = c.locator(".ask-err")
+    err.wait_for()
+    assert err.inner_text() == "Home Assistant did not create them. The App log may say why."
+
+
+def test_install_guide_without_the_integration(open_page):
+    """State 1, integration not installed: the grey icon still shows on drive
+    and pool cards, and opens a guide instead of Create."""
+    p = open_page("HA=not_installed")
+    for cid in (NVME, NAS_ATT, NAS_POOL, REP_FAILED):
+        assert by_id(p, cid).locator("button.exit.add").count() == 1, cid
+    assert by_id(p, NAS_FS).locator(".exit").count() == 0  # no icon on a filesystem card, as before
+    by_id(p, NAS_POOL).locator("button.exit.add").click()
+    guide = by_id(p, NAS_POOL).get_by_role("group", name="Install the integration")
+    assert guide.locator(".ask-title").inner_text() == "Sensors and alerts need the SMART Sniffer integration"
+    steps = guide.locator(".ask-steps li").all_inner_texts()
+    assert steps == ["Install it from HACS. Open in HACS", "Restart Home Assistant.", "Come back here and click again."]
+    link = guide.get_by_role("link", name="Open in HACS")
+    assert link.get_attribute("href") == HACS_REPO
+    assert link.get_attribute("target") == "_blank" and link.get_attribute("rel") == "noopener"
+    assert guide.get_by_role("button").all_inner_texts() == ["Close"]
+    assert not p.api("POST", r"/ha/add$")
+    guide.get_by_role("button", name="Close").click()
+    assert by_id(p, NAS_POOL).locator(".ask").count() == 0
+
+
+def test_install_guide_names_hacs_first_when_it_is_missing(open_page):
+    p = open_page("HA=not_installed&HACS=missing")
+    by_id(p, NVME).locator("button.exit.add").click()
+    guide = by_id(p, NVME).get_by_role("group", name="Install the integration")
+    first = guide.locator(".ask-steps li").first
+    assert first.inner_text() == "Install HACS, then the SMART Sniffer integration. How to install HACS"
+    assert first.get_by_role("link").get_attribute("href") == "https://hacs.xyz/docs/use/"
+
+
+def test_integration_notice(open_page, browser, server):
+    """A quiet line when the integration is not installed, dismissed for
+    every browser through the proxy; never shown when it is installed or
+    when Home Assistant cannot be reached."""
+    p = open_page("HA=not_installed")
+    notice = p.page.locator(".ha-notice")
+    assert notice.inner_text().startswith("Want sensors and alerts? Install the SMART Sniffer integration.")
+    assert notice.get_by_role("link").get_attribute("href") == HACS_REPO
+    assert notice.get_by_role("link").get_attribute("target") == "_blank"
+    notice.get_by_role("button", name="Dismiss").click()
+    assert p.page.locator(".ha-notice").count() == 0
+    assert len(p.api("POST", r"/app/notice/dismiss$")) == 1
+    # Another browser, no reset of the harness: still dismissed.
+    ctx = browser.new_context()
+    other = ctx.new_page()
+    other.goto(f"{server}/?HA=not_installed")
+    other.wait_for_selector("article.card")
+    other.wait_for_timeout(600)
+    assert other.locator(".ha-notice").count() == 0
+    ctx.close()
+    for flags in ("", "HA=unreachable"):
+        q = open_page(flags)
+        assert q.page.locator(".ha-notice").count() == 0, flags
+    q = open_page("HA=unreachable")
+    assert q.page.locator(".exit").count() == 0  # state 4: no icon, as before
+
+
+def test_create_and_guide_shots(open_page):
+    """create-confirm-<w>.png (installed), install-guide-<w>.png (not
+    installed, with the notice) for looking at by eye."""
+    p = open_page("HA_SELF=0", 1280)
+    by_id(p, NVME).locator("button.exit.add").click()
+    p.page.mouse.move(2, 2)
+    _shot(p, "create-confirm", by_id(p, NVME))
+    p = open_page("HA=not_installed", 1280)
+    by_id(p, NVME).locator("button.exit.add").click()
+    p.page.mouse.move(2, 2)
+    p.page.wait_for_timeout(250)
+    SHOTS.mkdir(parents=True, exist_ok=True)
+    top = p.page.locator("header.app-head").bounding_box()
+    card = by_id(p, NVME).bounding_box()
+    p.page.screenshot(path=str(SHOTS / "install-guide-1280.png"), clip={
+        "x": 0, "y": 0, "width": 1280, "height": card["y"] + card["height"] + 16 - top["y"] + top["y"]})

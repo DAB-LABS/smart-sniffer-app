@@ -51,6 +51,10 @@
       <template x-if="topAgent.mdns"><span class="cp al-mdns"><span class="cp-k">mDNS</span><span class="cp-v mono" x-text="topAgent.mdns"></span><button class="copy" type="button" aria-label="Copy the mDNS name" title="Copy" @click="copy($event, topAgent.mdns, 'top:mdns')"><svg aria-hidden="true"><use href="#copy"/></svg></button><small class="copied" role="status" x-show="ui.copied === 'top:mdns'" x-text="ui.copiedText"></small></span></template>
     </section>
   </template>
+  <!-- No integration yet: one quiet line, dismissed for every browser -->
+  <template x-if="noticeShown">
+    <p class="ha-notice" role="note"><span>Want sensors and alerts? <a :href="guideSteps().href" target="_blank" rel="noopener">Install the SMART Sniffer integration.</a></span><button class="notice-x" type="button" aria-label="Dismiss" title="Dismiss" @click="dismissNotice()">&times;</button></p>
+  </template>
   <p class="sec-label sec-drives">DRIVES:</p>
   <p class="page-err" x-show="pageErr || hostsErr" x-text="pageErr || hostsErr" role="alert"></p>
   <p class="toast" x-show="ui.toast" x-text="ui.toast" role="status"></p>
@@ -71,14 +75,21 @@
           <div class="c-tags">
             <span class="exit-slot">
               <template x-if="glyph(c).kind === 'blue'"><a class="exit" :href="glyph(c).href" target="_top" aria-label="Open in Home Assistant" title="Open in Home Assistant"><svg aria-hidden="true"><use href="#exit"/></svg></a></template>
-              <template x-if="glyph(c).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking(c) ? 'true' : 'false'" aria-label="Not in Home Assistant yet. Add it" title="Not in Home Assistant yet" @click="askAdd(c)"><svg aria-hidden="true"><use href="#exit"/></svg></button></template>
+              <template x-if="glyph(c).kind === 'grey'"><button class="exit add" type="button" :aria-expanded="asking(c) ? 'true' : 'false'" aria-label="Create sensors and alerts" title="Create sensors and alerts" @click="askAdd(c)"><svg aria-hidden="true"><use href="#exit"/></svg></button></template>
             </span>
             <template x-if="!renaming(c, 'pill')"><span class="pill" :class="{ 'pill-ed': canRenameHost(c), 'pill-ghost': c.src === 'replicas' }" :tabindex="canRenameHost(c) ? 0 : null" :role="canRenameHost(c) ? 'button' : null" :aria-label="canRenameHost(c) ? 'Machine ' + machine(c) + '. Rename: Enter or F2' : null" x-text="pill(c)" @click="startRename(c, 'pill', $event)" @keydown="nameKey($event, c, 'pill')"></span></template>
             <template x-if="renaming(c, 'pill')"><span class="pill pill-ed pill-edit" :style="'width:' + ui.rename.w + 'px'"><input class="name-in" type="text" maxlength="100" spellcheck="false" autocomplete="off" :aria-label="'Name of this machine. Enter saves, Esc cancels, empty restores the original.'" x-model="ui.rename.value" @mousedown="renameDown($event)" @keydown="renameKey($event)" @blur="finishRename(true)"></span></template>
           </div>
         </div>
         <template x-if="asking(c)">
-          <div class="ask" role="group" aria-label="Confirm"><span x-text="ui.confirm.text"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.confirm.busy" @click="confirmAdd()">Add</button><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Cancel</button></span><span class="ask-err" x-show="ui.confirm.err" x-text="ui.confirm.err"></span></div>
+          <div class="ask" role="group" :aria-label="ui.confirm.guide ? 'Install the integration' : 'Confirm'">
+            <template x-if="!ui.confirm.guide">
+              <div class="ask-body"><b class="ask-title" x-text="ui.confirm.text"></b><span class="ask-line" x-text="ui.confirm.line"></span><span class="ask-btns"><button class="btn btn-sm btn-primary" type="button" :disabled="ui.confirm.busy" @click="confirmAdd()">Create</button><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Cancel</button></span><span class="ask-err" x-show="ui.confirm.err" x-text="ui.confirm.err"></span></div>
+            </template>
+            <template x-if="ui.confirm.guide">
+              <div class="ask-body"><b class="ask-title">Sensors and alerts need the SMART Sniffer integration</b><ol class="ask-steps"><li><span x-text="guideSteps().first"></span> <a :href="guideSteps().href" target="_blank" rel="noopener" x-text="guideSteps().link"></a></li><li>Restart Home Assistant.</li><li>Come back here and click again.</li></ol><span class="ask-btns"><button class="btn btn-sm btn-quiet" type="button" @click="closeConfirm()">Close</button></span></div>
+            </template>
+          </div>
         </template>
         <div class="c-where"><template x-if="scenOn(c)"><span class="scen-box"><span class="scen-size" aria-hidden="true" x-text="scenLabel(c.it)"></span><select class="scen" :class="{ empty: !scenarioName(c.it) }" aria-label="Scenario" :disabled="!!ui.busy['scen:' + c.id]" @change="pickScenario(c, $event.target.value)"><template x-if="!scenarioName(c.it)"><option value="" disabled selected>Choose scenario</option></template><template x-for="o in scenOptions(c.it)" :key="o.id"><option :value="o.id" :selected="o.id === scenCurrent(c.it)" x-text="o.label"></option></template></select></span></template><template x-for="(w, i) in where(c)" :key="i"><span x-text="w"></span></template></div>
         <template x-if="vitals(c).length">

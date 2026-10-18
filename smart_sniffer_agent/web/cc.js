@@ -30,6 +30,10 @@ const ARM_MS = 4000; // how long the trash's Remove? waits for its second click
 const TOAST_MS = 4000; // how long a removal's Home Assistant message shows
 const HA_NAME_FAILED = 'Saved in this app; Home Assistant did not take the name.';
 const enc = encodeURIComponent;
+// Where the integration comes from: its HACS page (through My Home
+// Assistant, which opens the user's own instance), or HACS itself first.
+const HACS_REPO_URL = 'https://my.home-assistant.io/redirect/hacs_repository/?owner=DAB-LABS&repository=smart-sniffer&category=integration';
+const HACS_DOCS_URL = 'https://hacs.xyz/docs/use/';
 
 function parseBlock(text) {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/.exec(String(text).trim());
@@ -72,6 +76,7 @@ function cc() {
     hostData: {},
     optimistic: {},
     ha: null,
+    noticeGone: false,
     haTimers: [],
     toastTimer: null,
     scanTimer: null,
@@ -1450,7 +1455,10 @@ function cc() {
     glyph(c) {
       if (!['drive', 'pool'].includes(c.kind)) return NONE;
       const ha = this.ha;
-      if (!ha || ha.installed !== true || ha.reachable === false) return NONE;
+      if (!ha || ha.reachable === false) return NONE;
+      // Not installed: the grey icon still shows, and opens the install guide.
+      if (ha.installed === false) return { kind: 'grey', href: null };
+      if (ha.installed !== true) return NONE;
       const t = ha.targets && ha.targets[this.target(c)];
       if (!t) return { kind: 'grey', href: null };
       const key = this.haKey(c);
@@ -1459,21 +1467,55 @@ function cc() {
       if (ha.lookup === 'entries_only') return { kind: 'blue', href: t.entry_url };
       return { kind: 'grey', href: null };
     },
+    // The confirm under a card's title: what Create makes, in the user's
+    // words. The page lives inside Home Assistant, so it never says "add to
+    // Home Assistant".
     askText(c) {
       if (c.src === 'replicas') {
-        let text = 'Add this replica to Home Assistant?';
         const others = ((this.replicas && this.replicas.items) || []).length - 1;
         const entry = this.ha && this.ha.targets && this.ha.targets.replicas;
-        if (!entry && others > 0) text += ` The other ${this.plural(others, 'replica comes', 'replicas come')} with it.`;
-        return text;
+        const more = !entry && others > 0 ? `The other ${this.plural(others, 'replica comes', 'replicas come')} too. ` : '';
+        return { title: 'Create test sensors for the replicas?',
+                 line: `${more}Delete them from the integration when you're done testing.` };
       }
-      if (c.src === 'field') return `Add ${this.machine(c)} to Home Assistant?`;
-      return 'Add this drive to Home Assistant?';
+      const data = c.src === 'self' ? (this.self || this.selfLastGood) : this.data(c.h);
+      const n = ((data && data.items) || []).filter((i) => i.type === 'drive').length;
+      const what = 'health sensors for dashboards and automations, and an alert when it needs attention.';
+      let line = `Each of its ${n} drives gets ${what}`;
+      if (n === 1) line = `Its drive gets ${what}`;
+      if (n === 0) line = `It gets ${what}`;
+      return { title: `Create sensors and alerts for ${this.machine(c)}?`, line };
+    },
+    // Without the integration the same icon opens a short install guide.
+    // Home Assistant cannot tell an integration downloaded but not yet
+    // restarted from one never installed, so the guide always starts at
+    // installing it (or HACS first, when HACS is not set up either).
+    guideSteps() {
+      const noHacs = !!(this.ha && this.ha.hacs === false);
+      return {
+        first: noHacs ? 'Install HACS, then the SMART Sniffer integration.' : 'Install it from HACS.',
+        href: noHacs ? HACS_DOCS_URL : HACS_REPO_URL,
+        link: noHacs ? 'How to install HACS' : 'Open in HACS',
+      };
+    },
+    get noticeShown() {
+      const ha = this.ha;
+      return !!(ha && ha.reachable !== false && ha.installed === false && !ha.notice_dismissed && !this.noticeGone);
+    },
+    async dismissNotice() {
+      this.noticeGone = true;
+      const r = await this.request('app/notice/dismiss', { method: 'POST', body: {} });
+      if (r.ok && this.ha) this.ha.notice_dismissed = true;
     },
     askAdd(c) {
       this.disarm();
       if (this.ui.confirm && this.ui.confirm.id === c.id) { this.closeConfirm(); return; }
-      this.ui.confirm = { id: c.id, target: this.target(c), text: this.askText(c), busy: false, err: '' };
+      if (this.ha && this.ha.installed === false) {
+        this.ui.confirm = { id: c.id, guide: true, busy: false, err: '' };
+        return;
+      }
+      const ask = this.askText(c);
+      this.ui.confirm = { id: c.id, target: this.target(c), text: ask.title, line: ask.line, busy: false, err: '' };
     },
     asking(c) {
       return !!(this.ui.confirm && this.ui.confirm.id === c.id);
@@ -1498,10 +1540,10 @@ function cc() {
       const why = r.data && (r.data.message || r.data.error);
       c.err = {
         cannot_connect: 'Home Assistant could not reach this agent.',
-        integration_not_loaded: 'The integration is not installed.',
+        integration_not_loaded: 'The integration is not installed. Install it from HACS and restart Home Assistant.',
         invalid_auth: 'Home Assistant refused the password.',
         unreachable: 'Home Assistant is not answering.',
-      }[why] || 'Home Assistant did not add it. The App log may say why.';
+      }[why] || 'Home Assistant did not create them. The App log may say why.';
     },
 
     // ── Field agents ────────────────────────────────────────────────

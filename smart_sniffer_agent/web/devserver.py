@@ -24,6 +24,8 @@ Referer.
     HA              installed | not_installed | unreachable
                                               exit icons; none and no Integration link; none
     HA_LOOKUP       registry | entries_only   device links or entry links
+    HACS            installed | missing       with HA=not_installed: whether HACS is set up,
+                                              which picks the install guide's first step
     HA_SELF         1 | 0                     this app's agent in HA (blue or grey icons)
     ADD             ok | error                /ha/add succeeds or answers flow_failed
     HA_NAME         ok | fail                 a rename reaches Home Assistant's device, or
@@ -136,6 +138,7 @@ DEFAULTS = {
     "RULES": "ok",
     "HA": "installed",
     "HA_LOOKUP": "registry",
+    "HACS": "installed",
     "HA_SELF": "1",
     "ADD": "ok",
     "HA_NAME": "ok",
@@ -978,6 +981,7 @@ class World:
         self.card_names: dict[str, str] = {}
         self.host_names: dict[str, str] = {}
         self.ha_names: dict[str, str] = {}
+        self.notice_dismissed = False  # the integration notice, as /data keeps it
         self.self_cache: list | None = None
         self.self_last_answer = time.time() - 240
         self.scans: dict[str, dict] = {}
@@ -1563,6 +1567,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         if head == "app" and parts[1:] == ["info"]:
             return self._app_info(flags, world)
+        if head == "app" and parts[1:] == ["notice", "dismiss"] and method == "POST":
+            world.notice_dismissed = True
+            return self._send(200, {"notice_dismissed": True})
         if head in ("agentic-access", "agentic-access.json") and len(parts) == 1:
             if method != "GET":
                 return self._err(405, "method_not_allowed")
@@ -1770,7 +1777,8 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["devices"] and method == "GET":
             if not reachable:
                 return self._send(200, {"installed": None, "reachable": False, "lookup": None,
-                                        "integration_url": base, "targets": {}})
+                                        "integration_url": base, "targets": {}, "hacs": None,
+                                        "notice_dismissed": world.notice_dismissed})
             targets = {}
             if installed:
                 entries_only = flags["HA_LOOKUP"] == "entries_only"
@@ -1784,6 +1792,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"installed": installed, "reachable": True,
                                     "lookup": "entries_only" if flags["HA_LOOKUP"] == "entries_only" else "registry",
                                     "integration_url": base, "targets": targets,
+                                    "hacs": None if installed else flags["HACS"] == "installed",
+                                    "notice_dismissed": False if installed else world.notice_dismissed,
                                     "ha_removal": self._ha_removals(flags, world) if installed else {}})
         if parts == ["add"] and method == "POST":
             target = str((self._body() or {}).get("target", ""))

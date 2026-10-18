@@ -1909,7 +1909,7 @@ def test_ha_devices_core_down(proxy):
     assert status == 200
     assert body == {"installed": None, "reachable": False, "lookup": None,
                     "integration_url": "/config/integrations/integration/smart_sniffer",
-                    "targets": {}, "ha_removal": {}}
+                    "targets": {}, "hacs": None, "ha_removal": {}, "notice_dismissed": False}
 
 
 def test_ha_devices_not_installed(proxy):
@@ -3908,3 +3908,64 @@ def test_integration_installed_reuses_entries(slow_core):
     _, body = _timed_get(slow_core, "/ha/devices")
     assert body["installed"] is True and body["reachable"] is True
     assert _core_calls("GET", "/core/api/") == 1  # not asked again once the entries answered
+
+
+
+# ── The integration notice and the install guide's HACS step ────────────────
+
+def _app_state(data_dir) -> dict[str, Any]:
+    path = data_dir / "app-state.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def test_hacs_seen_only_while_the_integration_is_missing(proxy):
+    STATE.components = ["sensor", "hacs"]
+    _, body = proxy.get("/ha/devices")
+    assert body["installed"] is False and body["hacs"] is True
+    STATE.components = ["sensor"]
+    _, body = proxy.get("/ha/devices")
+    assert body["hacs"] is False  # not loaded: never set up, or not there
+    STATE.components.append("smart_sniffer")
+    _, body = proxy.get("/ha/devices")
+    assert body["installed"] is True and body["hacs"] is None  # not asked once installed
+
+
+def test_hacs_unknown_when_core_config_fails(mod):
+    class Sv(mod.Supervisor):
+        def core(self, method, path, body=None):
+            return 500, None
+
+    assert Sv("http://supervisor", "token").hacs_installed() is None
+    assert Sv("http://supervisor", "").hacs_installed() is None  # no Supervisor token
+
+
+def test_notice_dismiss_persists_and_resets(proxy, data_dir):
+    _, body = proxy.get("/ha/devices")
+    assert body["installed"] is False and body["notice_dismissed"] is False
+    status, answer = proxy.post("/app/notice/dismiss")
+    assert status == 200 and answer == {"notice_dismissed": True}
+    assert _app_state(data_dir)["integration_notice_dismissed"] is True  # in /data, for every browser
+    assert proxy.get("/ha/devices")[1]["notice_dismissed"] is True
+    assert proxy.request("GET", "/app/notice/dismiss")[0] == 405
+    # Seen installed: the flag goes, so a later removal shows the notice again.
+    STATE.components.append("smart_sniffer")
+    _, body = proxy.get("/ha/devices")
+    assert body["installed"] is True and body["notice_dismissed"] is False
+    assert _app_state(data_dir)["integration_notice_dismissed"] is False
+    STATE.components.remove("smart_sniffer")
+    _, body = proxy.get("/ha/devices")
+    assert body["installed"] is False and body["notice_dismissed"] is False
+
+
+def test_app_state_file(mod, tmp_path):
+    path = tmp_path / "app-state.json"
+    state = mod.AppState(str(path))
+    assert state.get("x") is None
+    state.set("x", True)
+    assert json.loads(path.read_text()) == {"x": True}
+    assert mod.AppState(str(path)).get("x") is True
+    path.write_text("not json")
+    assert mod.AppState(str(path)).get("x") is None  # unreadable: start empty
+    memory = mod.AppState(None)
+    memory.set("x", 1)
+    assert memory.get("x") == 1

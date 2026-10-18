@@ -111,6 +111,7 @@ HA_API_CACHE_SECONDS = 30
 THRESHOLD_MIN_SECONDS = 5  # the least time Home Assistant's thresholds are kept
 REFRESH_MINUTES = 15  # how often the page re-reads stored field agents
 REPLICA_AGENT_TIMEOUT = 1.0  # seconds, /app/info's check of the replica agent
+NOTICE_DISMISSED = "integration_notice_dismissed"  # app-state.json key
 AGENTIC_MEMO_SECONDS = 15  # how long one built Agentic access document is reused
 AGENTIC_MAX_AGE_SECONDS = 60  # how old this machine's and the replicas' cached read may be
 AGENTIC_FRESH_SECONDS = 30  # ?fresh=1: agents read longer ago than this are read again
@@ -1470,6 +1471,19 @@ class Supervisor:
     def forget_installed(self) -> None:
         self._installed_cache = None
 
+    def hacs_installed(self) -> bool | None:
+        """Whether HACS is set up in Home Assistant: hacs among the loaded
+        components of Core's /api/config. None when Core does not say. A
+        HACS that was downloaded but never set up is not loaded, and counts
+        as missing: it still has to be set up before it can install the
+        integration."""
+        if not self.available:
+            return None
+        status, config = self.core("GET", "/config")
+        if status != 200 or not isinstance(config, dict) or not isinstance(config.get("components"), list):
+            return None
+        return "hacs" in config["components"]
+
 
 # ── Talking to agents ───────────────────────────────────────────────────────
 
@@ -1867,6 +1881,43 @@ def stored_keys(stored: list[dict[str, Any]]) -> set[tuple[str, int]]:
 
 
 # ── Field agents: stored hosts and the last-good cache ──────────────────────
+
+class AppState:
+    """/data/app-state.json: small page settings that follow the user to every
+    browser, such as the dismissed integration notice. Written atomically."""
+
+    def __init__(self, path: str | None) -> None:
+        self.path = path
+        self.lock = threading.Lock()
+        self.values: dict[str, Any] = {}
+        if path:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+                if isinstance(data, dict):
+                    self.values = data
+            except (OSError, ValueError):
+                pass
+
+    def get(self, key: str, default: Any = None) -> Any:
+        with self.lock:
+            return self.values.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        with self.lock:
+            if self.values.get(key) == value:
+                return
+            self.values[key] = value
+            if not self.path:
+                return
+            tmp = f"{self.path}.tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(self.values, handle)
+                os.replace(tmp, self.path)
+            except OSError as err:
+                log(f"Cannot write {self.path}: {err.strerror or err}; kept in memory")
+
 
 class FleetCache:
     """/data/fleet-cache.json: per host the last good response, its time,
@@ -2721,6 +2772,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     supervisor: Supervisor = Supervisor("http://supervisor", "")
     host_store: HostStore = HostStore(supervisor)
     cache: FleetCache = FleetCache(None)
+    app_state: AppState = AppState(None)
     scans: ScanManager = ScanManager()
     ha_cache_seconds: float = HA_API_CACHE_SECONDS
     ha_replica_seconds: float = HA_REPLICA_SETTLE_SECONDS
@@ -2755,6 +2807,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     # name). Path parameters are named groups, percent-decoded before use.
     ROUTES: list[tuple[str, str, str]] = [
         ("GET", r"/app/info", "_route_app_info"),
+        ("POST", r"/app/notice/dismiss", "_route_notice_dismiss"),
         ("POST", r"/evaluate", "_route_evaluate"),
         ("POST", r"/fleet/scan", "_route_scan_start"),
         ("GET", r"/fleet/scan/(?P<scan_id>[^/]+)", "_route_scan_get"),
@@ -4506,12 +4559,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sv = self.supervisor
         result: dict[str, Any] = {
             "installed": None, "reachable": False, "lookup": None,
-            "integration_url": INTEGRATION_URL, "targets": {},
+            "integration_url": INTEGRATION_URL, "targets": {}, "hacs": None,
         }
         if sv.available and sv.core_reachable():
             entries = sv.entries() or []
             result["reachable"] = True
             result["installed"] = sv.integration_installed(entries)
+            if result["installed"] is False:
+                # The install guide names HACS first when it is missing too.
+                result["hacs"] = sv.hacs_installed()
+            elif result["installed"]:
+                # Seen installed: a notice dismissed before may show again
+                # if the integration is ever removed.
+                self.app_state.set(NOTICE_DISMISSED, False)
             stored = self.host_store.hosts_quick()
             targets: dict[str, dict[str, Any]] = {}
             for entry in entries:
@@ -4575,7 +4635,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _route_ha_devices(self, _parsed) -> None:
         lookup = self._ha_lookup()
-        self._send_json(200, {**lookup, "ha_removal": self._ha_removals(lookup)})
+        self._send_json(200, {**lookup, "ha_removal": self._ha_removals(lookup),
+                              "notice_dismissed": bool(self.app_state.get(NOTICE_DISMISSED))})
+
+    def _route_notice_dismiss(self, _parsed) -> None:
+        """The integration notice, dismissed for every browser until the
+        integration is seen installed."""
+        self.app_state.set(NOTICE_DISMISSED, True)
+        self._send_json(200, {"notice_dismissed": True})
 
     def _ha_removals(self, lookup: dict[str, Any]) -> dict[str, str]:
         """Card id -> what the trash can do in Home Assistant (see
@@ -4886,6 +4953,9 @@ def main():
         os.path.join(args.data_dir, "fleet-cache.json") if args.data_dir else None
     )
     ProxyHandler.host_store = HostStore(ProxyHandler.supervisor, ProxyHandler.cache)
+    ProxyHandler.app_state = AppState(
+        os.path.join(args.data_dir, "app-state.json") if args.data_dir else None
+    )
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), ProxyHandler)
     server.daemon_threads = True

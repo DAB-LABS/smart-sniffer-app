@@ -27,7 +27,7 @@ The verdict on the page (Attention, Maybe, Health OK) is the integration's own: 
 1. **Start this app.** It begins reading your Home Assistant machine's drives at once.
 2. **Open the Control Center** with **Open Web UI**, or turn on **Show in sidebar** on the app's Info page (see [Where it lives](#where-it-lives)). It shows one card per drive.
 3. If a drive shows **Health not known**, or the app's log says **DRIVE ACCESS BLOCKED**, turn off **Protection Mode**: go to **Settings → Apps → SMART Sniffer → Protection mode**, switch it **OFF**, then restart the app (see [Protection Mode](#protection-mode) below).
-4. **Optional: add the integration.** Install the SMART Sniffer integration through HACS. A small exit icon then appears beside each card's type label: grey means Home Assistant does not have this drive yet, and clicking it adds this machine's drives; blue opens the drive's device page in Home Assistant. Home Assistant may also discover the app's agent on its own and offer it under **Settings → Devices & Services**.
+4. **Optional: add the integration.** Install the SMART Sniffer integration through HACS. A small icon beside each drive and pool card's machine label then creates sensors and alerts: grey means there are none for this drive yet, and clicking it asks **Create sensors and alerts for HAOS?**; **Create** makes them for every drive of this machine. Blue opens the drive's device page in Home Assistant. Before the integration is installed, the grey icon opens a short guide instead: install it from HACS, restart Home Assistant, then click again. Home Assistant may also discover the app's agent on its own and offer it under **Settings → Devices & Services**.
 5. If you prefer to add it by hand: **Settings → Devices & Services → Add Integration → SMART Sniffer**, then enter the host and port from the app's startup log (`Integration host:`), for example `0449a086-smart-sniffer-agent` and port `9099`.
 
 ## The Control Center
@@ -94,17 +94,18 @@ Drives with no usable SMART data cannot be saved.
 
 On a replica the arrow saves it with its current values, as a file you can keep or upload again. The trash takes the replica off the page and, when it is in Home Assistant, deletes its device and entities there; the replicas' entry stays. A real pool's file is the pool as its agent reports it, which is not a replica file, because an agent does not report a pool's disk layout.
 
-**Replicas in Home Assistant.** All replicas are served by one replica agent inside the app, so they share one integration entry. The first time you add a replica to Home Assistant (with the grey exit icon on its card), every replica on the page comes with it; later replicas appear at the integration's next poll. The replica agent is not exposed on your network and does not advertise itself, so Home Assistant never discovers it on its own.
+**Replicas in Home Assistant.** All replicas are served by one replica agent inside the app, so they share one integration entry. The first time you create test sensors for a replica (with the grey icon on its card, **Create test sensors for the replicas?**), every replica on the page comes with it; delete them from the integration when you are done testing; later replicas appear at the integration's next poll. The replica agent is not exposed on your network and does not advertise itself, so Home Assistant never discovers it on its own.
 
 ## Home Assistant
 
-With the integration installed, an exit icon sits just left of each drive and pool card's type label:
+An icon sits just left of each drive and pool card's machine label:
 
-- **No icon**: the integration is not installed, or Home Assistant cannot be reached from the app.
-- **Grey**: Home Assistant does not have this drive yet. Click it and confirm to add it; a field agent's drives are added all at once, with its saved password as the token.
-- **Blue**: in Home Assistant. It opens the drive's or pool's device page.
+- **No icon**: Home Assistant cannot be reached from the app.
+- **Grey, integration installed**: this drive has no sensors yet. Click it: **Create sensors and alerts for NAS-01?** (the machine's name) says what each drive gets, and **Create** makes them for every drive of that machine at once, with a field agent's saved password as the token. For replicas it reads **Create test sensors for the replicas?**.
+- **Grey, integration not installed**: it opens a short guide instead: install the integration from HACS (with an **Open in HACS** link, or a link to install HACS first when HACS is not set up), restart Home Assistant, then click again. Until the integration is installed, a quiet line above the cards says the same; its x dismisses it for every browser, and it comes back only if the integration is installed and later removed.
+- **Blue**: it has sensors. It opens the drive's or pool's device page.
 
-Adding from the page needs the app's Home Assistant API access, which it has by default.
+Creating sensors from the page needs the app's Home Assistant API access, which it has by default.
 
 **Adding by hand.** To add a machine in the integration yourself (**Settings → Devices & Services → Add Integration → SMART Sniffer**), open a card's Details: **Connect by hand** gives the host and port to type, each with a copy button. For this machine's own drives the host is the name Home Assistant reaches the app's agent by, and the app's mDNS name is shown too. A field agent that wants a password needs the `token:` line from its config as the token. The line at the top of the page gives the same for this app's agent: its host and port and its mDNS name, each with a copy button, and whether it is answering.
 

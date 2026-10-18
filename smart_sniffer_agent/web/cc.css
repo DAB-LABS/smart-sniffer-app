@@ -178,11 +178,21 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .exit.add:hover, .exit.add[aria-expanded="true"] { color: var(--grey); }
 .exit.add:focus-visible { outline-color: var(--paper); }
 
-/* One-line confirms inside the card: Add (under the title), Remove (over the footer) */
+/* Confirms inside the card: Create or the install guide (under the title), Remove (over the footer) */
 .ask { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 8px 0 0; padding: 5px 6px 5px 10px;
        border: 1px solid var(--rule-2); background: var(--panel-2); font-size: 0.82rem; color: var(--paper); }
 .ask .ask-btns { display: inline-flex; gap: 6px; }
 .ask .ask-err { flex-basis: 100%; font-size: 0.78rem; color: var(--grey); }
+.ask .ask-body { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; width: 100%; }
+.ask .ask-title { flex-basis: 100%; font-weight: 600; color: var(--paper); }
+.ask .ask-line { flex: 1 1 14em; color: var(--grey); }
+.ask .ask-steps { flex-basis: 100%; margin: 2px 0 2px; padding-left: 1.3em; color: var(--grey); }
+.ask .ask-steps li + li { margin-top: 2px; }
+/* The integration notice: one quiet line above the grid, with its x */
+.ha-notice { margin: 14px 0 0; display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--dim); }
+.ha-notice a { color: var(--grey); }
+.notice-x { cursor: pointer; background: transparent; border: 0; color: var(--dim); font-size: 1rem; line-height: 1; padding: 2px 4px; }
+.notice-x:hover { color: var(--paper); }
 .ask.remove { margin: 10px 0 0; }
 
 .c-where { font-family: var(--mono); font-size: 0.72rem; color: var(--dim); margin: 3px 0 0 18px; display: flex; flex-wrap: wrap; gap: 2px 12px; min-width: 0; }
