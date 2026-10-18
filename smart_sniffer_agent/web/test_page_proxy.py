@@ -98,7 +98,7 @@ def app(static_dir):
     proc, client = _start_proxy([
         f"--agent-port={self_agent.server_address[1]}",
         f"--mock-port={mock_port}",
-        "--app-version=0.3.0",
+        "--app-version=0.3.1",
         f"--rules-dir={RULES_DIR}",
         f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
         f"--token={APP_TOKEN}",

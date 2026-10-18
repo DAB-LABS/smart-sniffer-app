@@ -716,7 +716,7 @@ def proxy(backends, mock_agent, data_dir):
     proc, client = _start_proxy([
         f"--agent-port={agent_port}",
         f"--mock-port={mock_port}",
-        "--app-version=0.3.0",
+        "--app-version=0.3.1",
         f"--rules-dir={RULES_DIR}",
         f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
         f"--agent-host={AGENT_HOST}",
@@ -1094,7 +1094,7 @@ def test_app_info(proxy, mock_agent):
     assert status == 200
     replicas = info.pop("replicas")
     assert info == {
-        "app_version": "0.3.0",
+        "app_version": "0.3.1",
         "rules_version": info["rules_version"],  # from VERSION beside the rules, if any
         "agent_port": proxy.agent_port,
         "mock_port": proxy.mock_port,

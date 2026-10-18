@@ -1,14 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 -- 2026-10-17
+
+Adds **Agentic access**: everything the Control Center knows, as one JSON document for an AI assistant or a script. Disk space now shows for USB drives and the data disk, a Mac's filesystems sit on their drive's card, the page no longer opens blank while Home Assistant is busy, and the app ships with agent and rules from smart-sniffer v0.8.4.
 
 ### Added
 
-- **Disk space for USB drives and the data disk** -- USB drives Home Assistant mounts under `/media` get disk space bars on their cards and Disk Usage entities in the integration. So does the data disk, shown as `/data`, whether it is still on the boot drive or on a drive picked with **Move data disk**. The drives are found when the app starts; restart the app after plugging in a USB drive.
+- **Agentic access** -- a new footer link opens every agent's drives, verdicts, pools and filesystems as one JSON document, with a guide at the end for an AI reading it. **Copy**, **Download** and **Raw JSON** sit at the top. It needs your Home Assistant login, and tokens are never included.
+- **USB drives and the data disk had no disk space bars** -- drives Home Assistant mounts under `/media`, and the data disk as `/data`, now get bars on their cards and Disk Usage entities in the integration. Restart the app after plugging in a USB drive. Thanks to @ellman121 (#11).
 
 ### Changed
 
+- **A Mac's data volume showed as a card of its own** -- with agent 0.8.3, a macOS volume such as `/System/Volumes/Data` now sits on the card of the drive it lives on.
+- **The card's add icon talked about adding to Home Assistant, from inside Home Assistant** -- it now asks to **Create** sensors and alerts for the machine, says what each drive gets, and for replicas creates test sensors to delete when you are done.
+- **Without the integration, the page gave no way to get sensors** -- the grey icon now opens a short guide (install from HACS, restart, click again), and a one-line notice, dismissed once for every browser, points to the integration.
+- **A pool or filesystem card did not say which machine it was on** -- every card's label now names its machine, as drive cards already did, and "ZFS pool" or "Filesystem" moves to the line under the title. A field agent's machine can be renamed from any of its cards.
+- **Replicas looked like real drives at a glance** -- a replica card's REPLICA label is now a ghost, with a dotted frame and dimmer text. The rest of the card, health colours included, is unchanged.
+- **Bundled agent v0.8.4** -- the app ships smart-sniffer agent v0.8.4, and the Control Center judges drives with the v0.8.4 rules and replicas.
 - **New permission** -- `/media`, mounted read-only, to measure the USB drives' disk space.
+
+### Fixed
+
+- **The Control Center sometimes opened blank** -- this machine's drives waited for Home Assistant to answer several calls first, so a busy Home Assistant left the page empty for seconds. Now only the first read after the app starts waits for it, and until that reading arrives a card says "Reading this machine's drives."
 
 ## 0.3.0 -- 2026-10-12
 

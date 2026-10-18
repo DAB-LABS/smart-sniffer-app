@@ -2381,7 +2381,7 @@ def test_top_of_page(open_page):
     assert "rules from integration" not in p.page.locator("main").inner_text()
     vers = p.page.locator(".versions")
     words = vers.inner_text().replace("\n", " ").split()
-    assert words[:5] == ["app", "0.3.0", "agent", "0.8.1", "rules"] and len(words) == 6, words
+    assert words[:5] == ["app", "0.3.1", "agent", "0.8.1", "rules"] and len(words) == 6, words
     assert re.fullmatch(r"v?\d+(\.\d+)+\S*", words[5]), words
     rules = vers.locator("span[title]", has_text="rules")
     assert rules.get_attribute("title") == "Integration rules this app judges drives with"
