@@ -23,7 +23,7 @@ RUN apk add --no-cache \
 # the Go agent binary and the integration's rule modules below, so the app
 # always ships the agent of the version it names (never "latest"). SS_TAG is
 # bumped with each app release.
-ARG SS_TAG=v0.8.5
+ARG SS_TAG=v0.9.0
 
 # Download the Go agent binary from the SS_TAG release.
 # Architecture is detected from the running container via uname -m, which works

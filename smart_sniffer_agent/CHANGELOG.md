@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 -- Unreleased
+## 0.4.0 -- 2026-10-21
 
 SMART Sniffer is evolving, for the better. The Control Center now lives in the SMART Sniffer integration, with all your machines in one place. This App keeps watching this Home Assistant box's drives and shows them on its own page. Update the integration to 0.9 first, restart Home Assistant, then update this App. Your 0.3.x machines move to the integration by themselves; replicas need to be created again there.
 

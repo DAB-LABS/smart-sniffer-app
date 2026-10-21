@@ -836,7 +836,7 @@ def test_view_devstat_gap(mod):
     assert view["rows"][i] == {"key": "reported_unc", "name": "Reported uncorrectable",
                                "value": "not known", "mark": "unk", "expect": None,
                                "note": "no attribute 187"}
-    assert view["rows"][i + 1] == {"key": "reported_unc_devstat", "name": "Uncorrectable, page 4",
+    assert view["rows"][i + 1] == {"key": "reported_unc_devstat", "name": "Reported uncorrectable",
                                    "value": "18", "mark": "crit",
                                    "expect": "expected 0, from device statistics", "note": None}
     assert view["devstat"] == "present"

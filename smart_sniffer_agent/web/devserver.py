@@ -349,7 +349,7 @@ def stub_drive_view(drive: dict, verdict: dict | None) -> dict:
             if a is None:
                 if key == "reported_unc" and unc is not None:
                     row(key, name, None, note="no attribute 187", unknown=True)
-                    row("reported_unc_devstat", "Uncorrectable, page 4", f"{unc:,}")
+                    row("reported_unc_devstat", "Reported uncorrectable", f"{unc:,}")
                 continue
             raw = (a.get("raw") or {}).get("value")
             if key == "wear":

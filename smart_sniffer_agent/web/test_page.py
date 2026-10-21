@@ -957,7 +957,7 @@ def test_device_statistics_table_takes_the_stand_in_rows(open_page):
     attrs.wait_for()
     # The page 4 count is not in the attribute table but in Device
     # Statistics, under its own small heading, inside the same Details.
-    assert attrs.locator("tr", has_text="page 4").count() == 0
+    assert attrs.locator("tr", has_text="Reported uncorrectable").count() == 0
     assert c.locator(".details .devstat h4").inner_text().lower() == "device statistics"
     ds = c.locator("table.devstat-t")
     names = ds.locator("td.nm .lb").all_inner_texts()
