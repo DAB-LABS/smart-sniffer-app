@@ -8,26 +8,23 @@ configuration:
   scan_interval:
     name: Scan Interval
     description: How often to refresh SMART data from drives (in seconds)
-  mock_port:
-    name: Replica Agent Port
-    description: Port of the replica agent inside the app. Not exposed on your network.
   hosts:
     name: Field Agents
-    description: Other machines running the SMART Sniffer agent. Added from the Control Center.
+    description: Other machines running the SMART Sniffer agent, as App 0.3.x kept them. Each is handed to the SMART Sniffer integration (0.9 or later) and removed here once it has it; any left are still waiting. Add machines in the integration's Control Center now.
   card_order:
     name: Card Order
-    description: The order of the cards in the Control Center. Set by dragging the cards there.
+    description: The card order App 0.3.x kept. A field machine's part goes to the SMART Sniffer integration with it; this box's part stays here. Not used by the App's page.
   hidden_cards:
     name: Hidden Cards
-    description: Cards hidden with the eye in the Control Center. Shown again from there.
+    description: The cards hidden in App 0.3.x. A field machine's go to the SMART Sniffer integration with it; this box's stay here. Not used by the App's page.
   thresholds:
     name: Thresholds
-    description: Alert thresholds of drives that are not in Home Assistant, one line per card and label. Set from a drive's Details in the Control Center; a drive in Home Assistant keeps its thresholds in the integration.
+    description: Alert thresholds App 0.3.x kept, one line per card and label. This box's still judge its cards on the App's page; a field machine's go to the SMART Sniffer integration with it.
   card_names:
     name: Card Names
-    description: Names given to cards in the Control Center, one line per card. A drive or pool in Home Assistant takes the name there too, as its device name.
+    description: The card names given in App 0.3.x. A field machine's go to the SMART Sniffer integration with it; this box's stay here. Not used by the App's page.
   host_names:
     name: Machine Names
-    description: Names given to field agents' machines in the Control Center, shown on every card of that machine.
+    description: The machine names given in App 0.3.x. Each goes to the SMART Sniffer integration with its machine. Not used by the App's page.
 network:
   9099/tcp: SMART Sniffer Agent API

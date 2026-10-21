@@ -47,11 +47,6 @@ profile smart_sniffer_agent flags=(attach_disconnected,mediate_deleted) {
   # Add-on data persistence
   /data/** rw,
 
-  # Replica files: the user's own in /share, the shipped ones in the image.
-  # Listed for the record; the file rule above already allows them.
-  /share/smart-sniffer/** rw,
-  /opt/replicas/** r,
-
   # USB drives HA mounts under /media, measured for disk space (statfs only).
   # Listed for the record; the file rule above already allows them.
   /media/** r,

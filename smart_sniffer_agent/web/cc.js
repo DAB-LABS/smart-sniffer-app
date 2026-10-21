@@ -1,16 +1,13 @@
-/* SMART Sniffer Control Center: the page's Alpine component, its API client
-   and its formatting. Served as a static file by the proxy; no build step.
+/* SMART Sniffer App page: the page's Alpine component, its API client and
+   its formatting. Served as a static file by the proxy; no build step.
 
-   One grid of cards: one per drive, per ZFS pool and per filesystem that
-   belongs to no drive, from this machine (HAOS), every field agent and the
-   replica agent, then the + card. The proxy does the judging: every drive
-   arrives with the integration's verdict, a "view" that names its rows and
-   their marks, its filesystems and a card id that stays the same across
-   reloads, so nothing here matches rules. The card order and the hidden
-   cards are kept by the proxy in the app options.
-
-   The page only reads the network when asked: Scan, Rescan and Check, and
-   reads of stored hosts. */
+   This box only, read only: one card per drive, ZFS pool and filesystem of
+   this app's own agent, then one card across the grid that leads to the
+   SMART Sniffer integration's Control Center, where every machine lives
+   (or says how to install or update the integration). The proxy does the
+   judging: every drive arrives with the integration's verdict, a "view"
+   that names its rows and their marks, its filesystems and a card id that
+   stays the same across reloads, so nothing here matches rules. */
 
 // Row keys of the drive view, and where each one sits in the raw table.
 const ATA_IDS = { reallocated: 5, pending: 197, offline_unc: 198, reported_unc: 187, cmd_timeout: 188,
@@ -18,45 +15,72 @@ const ATA_IDS = { reallocated: 5, pending: 197, offline_unc: 198, reported_unc: 
 // Device Statistics rows: page, offset, and the watched row they stand in for.
 const DEVSTAT_ROWS = { reported_unc_devstat: [4, 8, 'reported_unc'], reallocated_devstat: [3, 32, 'reallocated'],
   wear_devstat: [7, 8, 'wear'] };
+// Device Statistics entries by page:offset, as the Details table names them,
+// with how the value reads: count, hours, sectors (a size), temp (degrees C),
+// pct, minutes. null leaves an entry out; one not listed shows smartctl's
+// own name as a count. The same list as the integration's Control Center.
+const DEVSTAT_NAMES = {
+  '1:8': ['Power cycles', 'count'], '1:16': ['Power-on hours', 'hours'], '1:24': ['Data written', 'sectors'],
+  '1:32': ['Write commands', 'count'], '1:40': ['Data read', 'sectors'], '1:48': ['Read commands', 'count'],
+  '1:56': null, '1:64': ['Pending errors', 'count'],
+  '2:8': ['Free-fall events', 'count'], '2:16': ['Overlimit shock events', 'count'],
+  '3:8': ['Spindle motor hours', 'hours'], '3:16': ['Head flying hours', 'hours'], '3:24': ['Head load events', 'count'],
+  '3:32': ['Reallocated sectors', 'count'], '3:40': ['Read recovery attempts', 'count'],
+  '3:48': ['Mechanical start failures', 'count'], '3:56': ['Reallocation candidates', 'count'],
+  '3:64': ['High priority unloads', 'count'],
+  '4:8': ['Reported uncorrectable', 'count'], '4:16': ['Command resets', 'count'],
+  '4:24': ['Physical element status changes', 'count'],
+  '5:8': ['Temperature', 'temp'], '5:16': ['Temperature, short-term average', 'temp'],
+  '5:24': ['Temperature, long-term average', 'temp'], '5:32': ['Temperature, lifetime max', 'temp'],
+  '5:40': ['Temperature, lifetime min', 'temp'], '5:48': ['Highest short-term average', 'temp'],
+  '5:56': ['Lowest short-term average', 'temp'], '5:64': ['Highest long-term average', 'temp'],
+  '5:72': ['Lowest long-term average', 'temp'], '5:80': ['Time above the operating maximum', 'minutes'],
+  '5:88': ['Operating maximum', 'temp'], '5:96': ['Time below the operating minimum', 'minutes'],
+  '5:104': ['Operating minimum', 'temp'],
+  '6:8': ['Hardware resets', 'count'], '6:16': ['ASR events', 'count'], '6:24': ['Interface CRC errors', 'count'],
+  '7:8': ['Endurance used', 'pct'],
+};
+// Device Statistics entries the card's stat row already shows (current
+// temperature, power-on hours, data written, data read, endurance used):
+// left out of the Device Statistics table in Details.
+const DEVSTAT_IN_STATS = new Set(['5:8', '1:16', '1:24', '1:40', '7:8']);
 // The wear attribute names the rules read, as the proxy has them.
 const WEAR_NAMES = ['Wear_Leveling_Count', 'Media_Wearout_Indicator', 'SSD_Life_Left', 'Remaining_Lifetime_Perc',
   'Percent_Lifetime_Remain', 'Perc_Rated_Life_Remain', 'Percent_Life_Remaining'];
 const NVME_FIELDS = { critical_warning: 'critical_warning', media_errors: 'media_errors',
   available_spare: 'available_spare', wear: 'percentage_used' };
-const NONE = { kind: 'none', href: null };
-const COMPARE_WORDS = { gt: 'alert above', ge: 'alert at', lt: 'alert below' };
-const LONG_PRESS_MS = 450;
-const ARM_MS = 4000; // how long the trash's Remove? waits for its second click
-const TOAST_MS = 4000; // how long a removal's Home Assistant message shows
-const HA_NAME_FAILED = 'Saved in this app; Home Assistant did not take the name.';
+const POLL_MS = 30000; // this box's drives, read again while the page is open
+const DOWN_POLL_MS = 8000; // while its agent does not answer
 const enc = encodeURIComponent;
 // Where the integration comes from: its HACS page (through My Home
 // Assistant, which opens the user's own instance), or HACS itself first.
 const HACS_REPO_URL = 'https://my.home-assistant.io/redirect/hacs_repository/?owner=DAB-LABS&repository=smart-sniffer&category=integration';
 const HACS_DOCS_URL = 'https://hacs.xyz/docs/use/';
+// The integration's Control Center in the sidebar, unless it names another.
+const PANEL_PATH = '/smart-sniffer';
+// Open asks Home Assistant to go to the panel (home-assistant/navigate to
+// the parent frame). Where Home Assistant does not act on it within this
+// time, the top window goes there instead, as the plain link would.
+const NAVIGATE_FALLBACK_MS = 700;
 
-function parseBlock(text) {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/.exec(String(text).trim());
-  if (!m) return null;
-  const octets = m.slice(1, 5).map(Number);
-  const prefix = m[5] === undefined ? 32 : Number(m[5]);
-  if (octets.some((o) => o > 255) || prefix > 32) return null;
-  return { octets, prefix };
-}
-
-function block24(octets) {
-  return `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
-}
+// The card under the grid, by the integration's state (design rev 7, B2).
+const SEE_ALL = 'See all your machines in the SMART Sniffer Control Center';
+const GET_MORE = 'Get more out of SMART Sniffer';
+const LINK_CARDS = {
+  loaded: { title: SEE_ALL, body: '', open: true },
+  no_entries: { title: SEE_ALL, body: 'It opens once SMART Sniffer has its first machine. Create sensors and alerts for HAOS above, or add a machine in Settings, Devices & services.' },
+  restart: { title: SEE_ALL, body: 'Restart Home Assistant to finish the update.' },
+  panel_failed: { title: SEE_ALL, body: 'The Control Center did not start. Check the Home Assistant log.' },
+  // "this drive" or "these drives", by how many drives this box has.
+  missing: { title: GET_MORE, body: (one) => `Install the SMART Sniffer integration to get ${one ? 'this drive' : 'these drives'} with sensors and alerts, and to also add other machines.`, close: 'install' },
+  update: { title: GET_MORE, body: 'Update the SMART Sniffer integration to 0.9 to add your other machines and see them all in the Control Center.', close: 'update' },
+};
 
 function cc() {
   // Row heights while a card is open, kept off the reactive state: each
   // open card's closed height at the card width it was measured at, and
   // each closed card's content height when its row was last pinned.
   const rows = { closedH: {}, sig: {}, busy: false, queued: false, full: false, check: new Set() };
-  // Thresholds reads in flight, by card id, and a count per card that a
-  // save moves on, so a read begun before the save is not kept.
-  const thrReads = new Map();
-  const thrSeq = new Map();
   return {
     info: null,
     self: null,
@@ -66,64 +90,42 @@ function cc() {
     selfNext: 0,
     selfLastGood: null,
     selfLastAnswer: null,
-    replicas: null,
-    repBusy: false,
-    repFailed: false,
-    replicasNext: 0,
-    replicaFiles: null,
-    hosts: [],
-    hostsNext: 0,
-    hostData: {},
-    optimistic: {},
     ha: null,
-    noticeGone: false,
+    haNext: 0,
+    closed: {},
     haTimers: [],
     toastTimer: null,
-    scanTimer: null,
-    scanPolling: false,
     now: Date.now(),
-    // Cards: the stored order and hidden ids, cards removed while their
-    // source reads again, and the drag in progress.
-    order: [],
-    hidden: [],
-    // Names given here: card id -> name, field agent id -> name.
-    names: {},
-    hostNames: {},
-    gone: {},
-    showHidden: false,
     pageErr: '',
-    hostsErr: '',
-    drag: null,
-    dragOrder: null,
-    ui: { open: {}, cols: 1, confirm: null, arm: null, rename: null, pw: {}, pwState: {}, busy: {}, note: {}, thr: null, copied: '', copiedText: '', toast: '' },
-    // Each drive's thresholds as last read, by card id: { data, err }.
-    thrCache: {},
-    add: {
-      open: false, block: '', port: '9099', scan: null, scanId: null, last: null, wide: null, error: '',
-      ticks: {}, manualHost: '', manualPort: '9099', manualRows: [], checkMsg: null, checking: false,
-      repTicks: {}, upMsg: '', uploading: false, busy: false, err: '',
-    },
+    ui: { open: {}, confirm: null, copied: '', copiedText: '', toast: '', note: {}, pop: null },
+    popOpenedAt: 0,
 
     // ── Start and timers ────────────────────────────────────────────
     init() {
       this.loadInfo();
-      this.loadCards();
       this.loadSelf();
-      this.loadReplicas();
-      this.loadHosts();
       this.loadHa();
       setInterval(() => this.tick(), 1000);
-      this.watchCols();
       this.watchRows();
       document.addEventListener('visibilitychange', () => {
-        if (document.hidden) return;
-        this.tick();
-        this.resumeScan();
+        if (!document.hidden) this.tick();
       });
+      // The exact-number popover closes on any click outside it, a scroll
+      // or Escape.
+      document.addEventListener('click', (e) => {
+        if (!this.ui.pop) return;
+        if (e.target.closest && (e.target.closest('.numpop') || e.target.closest('.bign'))) return;
+        this.ui.pop = null;
+      }, true);
+      // A scroll that lands just after the popover opened is the one that
+      // brought the value into view (a tap at the edge, the keyboard's focus
+      // scroll): it keeps the popover open.
+      window.addEventListener('scroll', () => {
+        if (this.ui.pop && Date.now() - this.popOpenedAt > 300) this.ui.pop = null;
+      }, { passive: true });
       document.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape') return;
-        if (this.ui.confirm) this.closeConfirm();
-        if (this.ui.arm) this.disarm();
+        if (e.key === 'Escape' && this.ui.pop) this.ui.pop = null;
+        if (e.key === 'Escape' && this.ui.confirm) this.closeConfirm();
       });
     },
 
@@ -132,11 +134,7 @@ function cc() {
       this.now = Date.now();
       if (document.hidden) return;
       if (!this.selfBusy && this.now >= this.selfNext) this.loadSelf();
-      if (!this.repBusy && this.now >= this.replicasNext) this.loadReplicas();
-      if (this.hostsNext && this.now >= this.hostsNext) {
-        this.loadHosts();
-        this.loadHa();
-      }
+      if (this.haNext && this.now >= this.haNext) this.loadHa();
     },
 
     // Home Assistant ingress serves the page at /api/hassio_ingress/<token>/,
@@ -165,31 +163,16 @@ function cc() {
     // ── Loads ───────────────────────────────────────────────────────
     async loadInfo() {
       const r = await this.request('app/info');
-      if (r.ok && r.data) {
-        this.info = r.data;
-        this.hostsNext = Date.now() + (r.data.refresh_minutes || 15) * 60000;
-      }
+      if (r.ok && r.data) this.info = r.data;
     },
 
-    async loadCards() {
-      const r = await this.request('cards');
-      if (r.ok && r.data) {
-        this.order = r.data.order || [];
-        this.hidden = r.data.hidden || [];
-        if (!this.ui.rename) {
-          this.names = r.data.names || {};
-          this.hostNames = r.data.host_names || {};
-        }
-        if (!this.hidden.length) this.showHidden = false;
-      }
-    },
-
+    // This box's drives every 30 seconds; every 8 while its agent does not
+    // answer, so the page comes back as soon as the app has started.
     async loadSelf() {
       this.selfBusy = true;
       const r = await this.request('fleet/hosts/self/drives');
       this.selfBusy = false;
       this.selfLoaded = true;
-      this.selfNext = Date.now() + 8000;
       if (r.ok && r.data) {
         this.self = r.data;
         this.selfFailed = false;
@@ -203,61 +186,19 @@ function cc() {
       } else {
         this.selfFailed = true;
       }
+      this.selfNext = Date.now() + (this.agentDown ? DOWN_POLL_MS : POLL_MS);
     },
 
-    async loadReplicas() {
-      this.repBusy = true;
-      const r = await this.request('fleet/hosts/replicas/drives');
-      this.repBusy = false;
-      this.replicasNext = Date.now() + 8000;
-      if (r.ok && r.data) {
-        this.replicas = r.data;
-        this.repFailed = r.data.status !== 'ok';
-      } else {
-        this.repFailed = true;
-      }
-    },
-
-    async loadReplicaFiles() {
-      const r = await this.request('replicas');
-      if (r.ok && r.data) this.replicaFiles = r.data;
-      else this.replicaFiles = { agent: 'down', folder: { status: 'missing' }, files: [] };
-    },
-
-    async loadHosts() {
-      this.hostsNext = Date.now() + ((this.info && this.info.refresh_minutes) || 15) * 60000;
-      const r = await this.request('fleet/hosts');
-      if (!r.ok || !r.data) {
-        this.hostsErr = 'The stored field agents could not be read. The Supervisor did not answer.';
-        return;
-      }
-      this.hostsErr = '';
-      this.hosts = r.data.hosts || [];
-      const migrating = this.hosts.some((h) => h.hidden);
-      await Promise.all(this.hosts.map((h) => this.loadHost(h.id)));
-      // A machine hidden as a whole becomes hidden cards on its first read.
-      if (migrating) this.loadCards();
-    },
-
-    async loadHost(id) {
-      const r = await this.request(`fleet/hosts/${enc(id)}/drives`);
-      if (r.ok && r.data) this.hostData[id] = r.data;
-    },
-
+    // The integration's state, with the page's own poll.
     async loadHa() {
-      const r = await this.request('ha/devices');
+      this.haNext = Date.now() + POLL_MS;
+      const r = await this.request('ha/integration');
       if (r.ok && r.data) this.ha = r.data;
     },
 
     haSoon() {
       this.haTimers.forEach(clearTimeout);
       this.haTimers = [setTimeout(() => this.loadHa(), 3000), setTimeout(() => this.loadHa(), 12000)];
-    },
-
-    refresh() {
-      this.loadHosts();
-      this.loadHa();
-      this.loadCards();
     },
 
     // ── App pages in Home Assistant ─────────────────────────────────
@@ -274,34 +215,31 @@ function cc() {
       if (!slug) return legacy ? '/hassio/dashboard' : '/config/apps';
       return legacy ? `/hassio/addon/${enc(slug)}/${page}` : `/config/app/${enc(slug)}/${page}`;
     },
-    get integrationInstalled() {
-      if (this.ha && this.ha.reachable !== false && typeof this.ha.installed === 'boolean') return this.ha.installed;
-      return !!(this.info && this.info.integration_installed === true);
-    },
-    get integrationUrl() {
-      return (this.ha && this.ha.integration_url) || '/config/integrations/integration/smart_sniffer';
-    },
 
     // ── Formatting ──────────────────────────────────────────────────
     num(n) {
       return typeof n === 'number' ? n.toLocaleString('en-US') : String(n);
     },
-    tb(bytes) {
-      if (typeof bytes !== 'number') return '';
-      const v = bytes / 1e12;
-      return `${v >= 100 ? v.toFixed(1) : v.toFixed(2)} TB`;
-    },
-    // Disk space: decimal units, as df -H and the agent's totals.
-    bytes(n) {
-      if (typeof n !== 'number') return '';
-      const units = [[1e12, 'TB'], [1e9, 'GB'], [1e6, 'MB'], [1e3, 'kB']];
-      for (const [size, unit] of units) {
-        if (n >= size) {
-          const v = n / size;
-          return `${v >= 100 ? Math.round(v) : v.toFixed(1).replace(/\.0$/, '')} ${unit}`;
-        }
+    // The one rule for a shortened number, everywhere on the page (the
+    // stat row, the attribute table, Device Statistics, disk space): the
+    // largest unit that leaves at least 1, then three significant figures
+    // ("5.10 TB", "19.8 TB", "898 GB", "344 M"). Below the smallest unit
+    // the number as it is. Only what is shown changes.
+    scaled(n, units, below) {
+      if (typeof n !== 'number' || !Number.isFinite(n)) return '';
+      for (let i = 0; i < units.length; i += 1) {
+        const [size, unit] = units[i];
+        if (n < size) continue;
+        const v = Number((n / size).toPrecision(3));
+        // 999.6 GB rounds to 1000: say 1.00 TB instead.
+        if (v >= 1000 && i > 0) return `${(n / units[i - 1][0]).toPrecision(3)} ${units[i - 1][1]}`;
+        return `${(n / size).toPrecision(3)} ${unit}`;
       }
-      return `${n} B`;
+      return below(n);
+    },
+    // Sizes: decimal units, as df -H, the drive makers and the agent's totals.
+    bytes(n) {
+      return this.scaled(n, [[1e15, 'PB'], [1e12, 'TB'], [1e9, 'GB'], [1e6, 'MB'], [1e3, 'kB']], (x) => `${x} B`);
     },
     ago(t) {
       const ms = typeof t === 'number' ? t : Date.parse(t);
@@ -351,87 +289,37 @@ function cc() {
     },
 
     // ── The cards ───────────────────────────────────────────────────
-    // A card: { id, kind, src, it, h, fs }. kind is drive, pool,
-    // filesystem, machine (a field agent with nothing to show: waiting for
-    // its password, never read, not answering), down (this app's agent
-    // not answering before its first answer) or loading (this app's agent
-    // not asked yet: its first answer is still on the way). src is self, field or replicas.
-    cardsFrom(src, data, h) {
+    // A card: { id, kind, src, it, fs }. kind is drive, pool, filesystem,
+    // down (this app's agent not answering before its first answer) or
+    // loading (its first answer is still on the way). src is always self.
+    cardsFrom(src, data) {
       const out = [];
       ((data && data.items) || []).forEach((it) => {
-        out.push({ id: it.card_id || `${src === 'field' ? h.id : src}|${it.id}`, kind: it.type, src, it, h, fs: null });
+        out.push({ id: it.card_id || `${src}|${it.id}`, kind: it.type, src, it, fs: null });
       });
       ((data && data.filesystem_cards) || []).forEach((f) => {
-        out.push({ id: f.card_id, kind: 'filesystem', src, it: f, h, fs: f.filesystem });
+        out.push({ id: f.card_id, kind: 'filesystem', src, it: f, fs: f.filesystem });
       });
       return out;
     },
-    get allCards() {
-      const out = [];
-      // Until this machine's agent first answers, one card says it is
-      // being read, as a field agent's does, so the page is never blank.
-      if (!this.selfLoaded) out.push({ id: 'self', kind: 'loading', src: 'self', it: null, h: null, fs: null });
-      if (this.selfLoaded) {
-        const live = this.self && this.self.status === 'ok' ? this.self : null;
-        const data = live || this.selfLastGood;
-        if (data && ((data.items || []).length || (data.filesystem_cards || []).length)) {
-          out.push(...this.cardsFrom('self', data, null));
-        } else if (this.agentDown) {
-          out.push({ id: 'self', kind: 'down', src: 'self', it: null, h: null, fs: null });
-        }
-      }
-      this.hosts.forEach((h) => {
-        const d = this.hostData[h.id];
-        const cards = this.pending(h) ? [] : this.cardsFrom('field', d, h);
-        if (cards.length) out.push(...cards);
-        else if (!(d && d.status === 'ok')) out.push({ id: h.id, kind: 'machine', src: 'field', it: null, h, fs: null });
-      });
-      if (this.replicas) out.push(...this.cardsFrom('replicas', this.replicas, null));
-      return out.filter((c) => !this.gone[c.id]);
-    },
-    // The stored order first; cards it does not know keep their place among
-    // themselves, after it and before the + card.
-    get orderedCards() {
-      const cards = this.allCards;
-      const order = this.dragOrder || this.order;
-      const at = new Map(order.map((id, i) => [id, i]));
-      return cards.map((c, i) => ({ c, i, o: at.has(c.id) ? at.get(c.id) : Infinity }))
-        .sort((a, b) => (a.o - b.o) || (a.i - b.i)).map((x) => x.c);
-    },
+    // In the agent's order. Until the agent first answers, one card says it
+    // is being read, so the page is never blank.
     get shownCards() {
-      return this.orderedCards.filter((c) => this.showHidden || !this.isHidden(c));
-    },
-    isHidden(c) {
-      return this.hidden.includes(c.id);
-    },
-    get hiddenCount() {
-      const ids = new Set(this.allCards.map((c) => c.id));
-      return this.hidden.filter((id) => ids.has(id)).length;
-    },
-    toggleShowHidden() {
-      if (!this.hiddenCount && !this.showHidden) return;
-      this.showHidden = !this.showHidden;
+      if (!this.selfLoaded) return [{ id: 'self', kind: 'loading', src: 'self', it: null, fs: null }];
+      const live = this.self && this.self.status === 'ok' ? this.self : null;
+      const data = live || this.selfLastGood;
+      if (data && ((data.items || []).length || (data.filesystem_cards || []).length)) {
+        return this.cardsFrom('self', data);
+      }
+      if (this.agentDown) return [{ id: 'self', kind: 'down', src: 'self', it: null, fs: null }];
+      return [];
     },
     cardClass(c) {
       return {
-        machine: ['machine', 'down', 'loading'].includes(c.kind),
+        machine: ['down', 'loading'].includes(c.kind),
         stale: this.unanswered(c),
-        'is-hidden': this.isHidden(c),
-        'drop-gap': !!(this.drag && this.drag.id === c.id),
         open: this.isOpen(c),
       };
-    },
-    // The grid's column count, kept up to date, so the open + card can
-    // tell how wide to be.
-    watchCols() {
-      const grid = document.querySelector('.grid');
-      if (!grid) return;
-      const read = () => {
-        const n = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length || 1;
-        if (n !== this.ui.cols) this.ui.cols = n;
-      };
-      read();
-      if (window.ResizeObserver) new ResizeObserver(read).observe(grid);
     },
     // A card with Details open grows down; every other card in its grid
     // row keeps the height that row had while it was closed, so nothing
@@ -602,14 +490,11 @@ function cc() {
       this.pinRows();
     },
 
-    // Where a card comes from.
-    machine(c) {
-      if (c.src === 'self') return 'HAOS';
-      if (c.src === 'replicas') return 'REPLICA';
-      return this.hostName(c.h).toUpperCase();
+    // Every card's pill names its machine: HAOS. A pool or filesystem card
+    // says what it is on the line under its title (kindWord).
+    machine() {
+      return 'HAOS';
     },
-    // Every card's pill names its machine; a pool or filesystem card says
-    // what it is on the line under its title (kindWord).
     pill(c) {
       return this.machine(c);
     },
@@ -618,162 +503,35 @@ function cc() {
       if (c.kind === 'filesystem') return 'Filesystem';
       return null;
     },
-    // The name the card had before anyone renamed it: the model, the pool's
-    // name, the mount point.
+    // The card's name: the model, the pool's name, the mount point.
     baseTitle(c) {
       if (c.kind === 'down') return "This app's agent is not answering";
       if (c.kind === 'loading') return "This machine's drives";
-      if (c.kind === 'machine') return this.hostName(c.h);
       if (c.kind === 'filesystem') return c.fs.mountpoint;
       if (c.kind === 'pool') return c.it.pool.name;
-      return (c.it.drive && c.it.drive.model) || (c.it.lab && c.it.lab.name) || c.it.id;
+      return (c.it.drive && c.it.drive.model) || c.it.id;
     },
-    // Shown: the Home Assistant device's own name when the user gave it one,
-    // else the name given here, else the original.
     title(c) {
-      if (['down', 'loading', 'machine'].includes(c.kind)) return this.baseTitle(c);
-      const ha = this.haNames(c);
-      return (ha && ha.name_by_user) || this.names[c.id] || this.baseTitle(c);
+      return this.baseTitle(c);
     },
-    renamed(c) {
-      return ['drive', 'pool'].includes(c.kind) && this.title(c) !== this.baseTitle(c);
+    renamed() {
+      return false;
     },
     modelLine(c) {
       return `${c.kind === 'pool' ? 'Pool' : 'Model'}: ${this.baseTitle(c)}`;
     },
-
-    // ── Rename in place ─────────────────────────────────────────────
-    // A card's title (drive, pool, filesystem), and a field agent's machine:
-    // its pill, or the title of its card while it has nothing else to show.
-    canRename(c) {
-      return ['drive', 'pool', 'filesystem', 'machine'].includes(c.kind);
-    },
-    canRenameHost(c) {
-      return c.src === 'field' && ['drive', 'machine', 'pool', 'filesystem'].includes(c.kind);
-    },
-    renaming(c, what) {
-      const r = this.ui.rename;
-      return !!(r && r.id === c.id && r.what === what);
-    },
-    // A click or tap on the title or an editable pill opens the field in
-    // the element's own box, so nothing around it moves: the title's field
-    // keeps the title's height, the pill's keeps the pill's width.
-    startRename(c, what, ev) {
-      if (what === 'title' && !this.canRename(c)) return;
-      if (what === 'pill' && !this.canRenameHost(c)) return;
-      if (this.ui.rename) this.finishRename(true);
-      const el = ev && ev.currentTarget;
-      const box = el ? (what === 'title' ? el.closest('.c-title') : el).getBoundingClientRect() : null;
-      const host = what === 'pill' || c.kind === 'machine';
-      const value = host ? this.hostName(c.h) : this.title(c);
-      const kb = !!(ev && ev.type === 'keydown');
-      this.ui.rename = { id: c.id, what, host, value, was: value, kb, t0: Date.now(),
-                         h: box ? box.height : 0, w: box ? box.width : 0 };
-      this.$nextTick(() => {
-        const f = document.querySelector(`article.card[data-card="${CSS.escape(c.id)}"] .name-in`);
-        if (f) { f.focus(); f.select(); }
-      });
-    },
-    // Enter or F2 on the focused title or pill starts editing.
-    nameKey(e, c, what) {
-      if (e.key !== 'Enter' && e.key !== 'F2') return;
-      e.preventDefault();
-      this.startRename(c, what, e);
-    },
-    // The second click of a double-click that opened the field keeps the
-    // whole name selected instead of picking one word.
-    renameDown(e) {
-      const r = this.ui.rename;
-      if (r && e.detail > 1 && Date.now() - r.t0 < 700) { e.preventDefault(); e.target.select(); }
-    },
-    renameKey(e) {
-      if (e.key === 'Enter') { e.preventDefault(); this.finishRename(true, true); }
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.finishRename(false, true); }
-    },
-    finishRename(save, byKey) {
-      const r = this.ui.rename;
-      if (!r) return;
-      this.ui.rename = null;
-      // Ended from the keyboard: focus goes back to what was renamed.
-      if (byKey && r.kb) {
-        this.$nextTick(() => {
-          const card = document.querySelector(`article.card[data-card="${CSS.escape(r.id)}"]`);
-          const back = card && card.querySelector(r.what === 'pill' ? '.pill-ed' : '.t-name');
-          if (back) back.focus({ preventScroll: true });
-        });
-      }
-      const name = String(r.value || '').replace(/\s+/g, ' ').trim();
-      if (!save || name === r.was) return;
-      const c = this.allCards.find((x) => x.id === r.id);
-      if (!c) return;
-      if (r.host) this.saveHostName(c.h, name);
-      else this.saveCardName(c, name);
-    },
-    async saveHostName(h, name) {
-      const was = this.hostNames[h.id];
-      if (name) this.hostNames[h.id] = name; else delete this.hostNames[h.id];
-      this.pageErr = '';
-      const r = await this.request(`hosts/${enc(h.id)}/name`, { method: 'PUT', body: { name } });
-      if (!r.ok) {
-        if (was) this.hostNames[h.id] = was; else delete this.hostNames[h.id];
-        this.pageErr = 'That name was not saved. Try again.';
-      }
-    },
-    async saveCardName(c, name) {
-      const was = this.names[c.id];
-      const ha = this.haNames(c);
-      const haWas = ha ? ha.name_by_user : null;
-      if (name) this.names[c.id] = name; else delete this.names[c.id];
-      if (ha) ha.name_by_user = name || null;
-      this.ui.note[`nm:${c.id}`] = '';
-      this.pageErr = '';
-      const r = await this.request(`cards/${enc(c.id)}/name`, { method: 'PUT', body: { name } });
-      if (!r.ok) {
-        if (was) this.names[c.id] = was; else delete this.names[c.id];
-        if (ha) ha.name_by_user = haWas;
-        this.pageErr = 'That name was not saved. Try again.';
-        return;
-      }
-      if (ha && r.data && r.data.home_assistant === 'failed') {
-        ha.name_by_user = haWas;
-        this.ui.note[`nm:${c.id}`] = HA_NAME_FAILED;
-      }
-    },
-    // The names Home Assistant has for a card's device, when it has one.
-    haNames(c) {
-      if (!['drive', 'pool'].includes(c.kind) || this.glyph(c).kind !== 'blue') return null;
-      const t = this.ha && this.ha.targets && this.ha.targets[this.target(c)];
-      const key = this.haKey(c);
-      return (t && t.names && key && t.devices && t.devices[key] && t.names[key]) || null;
-    },
-    haKey(c) {
-      const it = c.it;
-      return c.kind === 'pool' ? `pool:${it.pool.name}` : it.drive && (it.drive.serial || `id:${it.id}`);
-    },
     footNote(c) {
-      return this.ui.note[`dl:${c.id}`] || this.ui.note[`rm:${c.id}`] || this.ui.note[`nm:${c.id}`] || '';
+      return this.ui.note[`dl:${c.id}`] || '';
     },
     // The where line, as parts shown with a gap between them.
     where(c) {
       const it = c.it || {};
-      const addr = c.h ? `${c.h.address}:${c.h.port}` : '';
       if (c.kind === 'down' || c.kind === 'loading') return [this.agentAddress];
-      if (c.kind === 'machine') return [addr];
       // A filesystem or pool card starts with what it is; its pill names
       // the machine, as a drive card's does.
-      if (c.kind === 'filesystem') {
-        return [this.kindWord(c), c.src === 'field' ? addr : null, c.fs.device, c.fs.fstype].filter(Boolean);
-      }
-      if (c.kind === 'pool') {
-        const layout = this.poolLayout(it);
-        // A replica's scenario is the picker drawn ahead of these parts.
-        if (c.src === 'replicas') return [this.kindWord(c), this.scenOn(c) ? null : this.scenarioName(it), layout].filter(Boolean);
-        if (c.src === 'self') return [this.kindWord(c), layout].filter(Boolean);
-        return [this.kindWord(c), addr, layout].filter(Boolean);
-      }
-      if (c.src === 'replicas') return this.scenOn(c) ? [] : [this.scenarioName(it) || (it.lab && it.lab.name) || ''];
+      if (c.kind === 'filesystem') return [this.kindWord(c), c.fs.device, c.fs.fstype].filter(Boolean);
+      if (c.kind === 'pool') return [this.kindWord(c), this.poolLayout(it)].filter(Boolean);
       const drive = it.drive || {};
-      if (c.src === 'field') return [addr, drive.device_path].filter(Boolean);
       return [drive.device_path, this.proto(drive)].filter(Boolean);
     },
     proto(drive) {
@@ -789,14 +547,72 @@ function cc() {
         if (p.last_scrub_end) out.push(`scrub ${this.ago(p.last_scrub_end)}`);
         return out.filter(Boolean);
       }
+      return [];
+    },
+    // A drive's stat row: Temp, Powered, Written, Read, Worn, each a tiny
+    // label over its value (number, then its unit). A value the drive does
+    // not report is left out, tile and all; none at all, no row. A
+    // temperature of 0 C is taken as not reported (virtual and unknown
+    // disks send 0 for "no sensor"). Powered, written and read keep the
+    // exact number behind them (x). Plain: no colours.
+    stats(c) {
       if (c.kind !== 'drive') return [];
+      const it = c.it || {};
       const s = (it.view && it.view.stats) || {};
       const out = [];
-      if (typeof s.temp_c === 'number') out.push(`${s.temp_c} C`);
-      if (typeof s.power_on_hours === 'number') out.push(`${this.num(s.power_on_hours)} h`);
-      const w = this.vol(it, 'written');
-      if (w) out.push(`${this.tb(w.bytes)} written`);
+      const tile = (k, text, x) => {
+        const m = /^(-?[\d.,]+)(\s*)(.*)$/.exec(text);
+        out.push({ k, n: m ? m[1] : text, u: m ? `${m[2]}${m[3]}` : '', x: x || '' });
+      };
+      if (typeof s.temp_c === 'number' && Number.isFinite(s.temp_c) && s.temp_c !== 0) tile('Temp', `${s.temp_c} C`);
+      if (typeof s.power_on_hours === 'number') {
+        tile('Powered', this.hoursText(s.power_on_hours), `${this.num(s.power_on_hours)} hours powered on`);
+      }
+      ['written', 'read'].forEach((which) => {
+        const b = this.volBytes(it, which);
+        if (b !== null) tile(which === 'written' ? 'Written' : 'Read', this.bytes(b), `${this.num(b)} bytes ${which}`);
+      });
+      const worn = this.worn(it);
+      if (worn !== null) tile('Worn', `${worn}%`);
       return out;
+    },
+    // Bytes written or read: the agent's volume (Device Statistics, the
+    // vendor attribute or the NVMe log), else the NVMe log's data units or
+    // the drive's Total LBAs attribute (241, 242) times its sector size.
+    volBytes(it, which) {
+      const v = this.vol(it, which);
+      if (v) return v.bytes;
+      const sd = this.smartOf(it);
+      const log = sd.nvme_smart_health_information_log;
+      const units = log && log[`data_units_${which}`];
+      if (typeof units === 'number' && units >= 0) return units * 512000;
+      const id = which === 'written' ? 241 : 242;
+      const a = ((sd.ata_smart_attributes || {}).table || []).find((x) => x.id === id && /LBA/i.test(String(x.name)));
+      const raw = a && a.raw && a.raw.value;
+      if (typeof raw === 'number' && raw >= 0) return raw * ((Number(sd.logical_block_size)) || 512);
+      return null;
+    },
+    // Percent of rated endurance used: the NVMe log's percentage_used or the
+    // ATA Device Statistics Percentage Used Endurance Indicator (page 7).
+    // Never worked out from a vendor's wear attribute.
+    worn(it) {
+      const log = this.smartOf(it).nvme_smart_health_information_log;
+      if (log && typeof log.percentage_used === 'number') return log.percentage_used;
+      const e = this.devEntry(it, 7, 8);
+      return e && typeof e.value === 'number' ? e.value : null;
+    },
+    smartOf(it) {
+      return (it && it.drive && it.drive.smart_data) || {};
+    },
+    // Device Statistics as the agent sent them, when it read them.
+    devPages(it) {
+      const ds = (it && it.drive && it.drive.device_statistics) || {};
+      return ds.status === 'present' && Array.isArray(ds.pages) ? ds.pages.filter((p) => p && Array.isArray(p.table)) : [];
+    },
+    devEntry(it, page, offset) {
+      const p = this.devPages(it).find((x) => x.number === page);
+      const e = p && p.table.find((x) => x.offset === offset);
+      return e && e.flags && e.flags.valid === true ? e : null;
     },
 
     // Health: attention, maybe, ok, unknown; null for a card with no health line.
@@ -834,9 +650,6 @@ function cc() {
         }
       }
       this.ui.open[c.id] = !this.ui.open[c.id];
-      if (!this.ui.open[c.id] && this.thrEditing(c)) this.ui.thr = null;
-      // Read its thresholds now, so edit mode opens with them at hand.
-      if (this.ui.open[c.id] && this.canTune(c)) this.thrRead(c);
     },
 
     // The problem window: every flagged row, no paging.
@@ -882,25 +695,39 @@ function cc() {
       const v = it.view && it.view.volumes && it.view.volumes[which];
       return v && typeof v.bytes === 'number' ? v : null;
     },
-    volNote(vol) {
-      const src = String(vol.source || '');
-      if (src.includes('attribute')) return `from attribute ${vol.attribute_id || 241}`;
-      if (src.includes('nvme')) return 'from the NVMe log';
-      return 'from Device Statistics';
+    // The top of a drive's Details: what it is and how it is attached. A
+    // field the drive's data does not have is left out. Model, serial and
+    // firmware (t) open the exact-number popover with the full text and Copy.
+    ident(c) {
+      const it = c.it || {};
+      const d = it.drive || {};
+      const sd = this.smartOf(it);
+      const out = [];
+      const model = d.model || sd.model_name;
+      if (model) out.push({ k: 'Model', v: String(model), t: true });
+      const serial = d.serial || sd.serial_number;
+      if (serial) out.push({ k: 'Serial', v: String(serial), t: true });
+      if (sd.firmware_version) out.push({ k: 'Firmware', v: String(sd.firmware_version), t: true });
+      const cap = (sd.user_capacity && sd.user_capacity.bytes) || sd.nvme_total_capacity;
+      if (typeof cap === 'number' && cap > 0) out.push({ k: 'Capacity', v: this.bytes(cap), x: `${this.num(cap)} bytes` });
+      const link = this.link(d, sd);
+      if (link) out.push({ k: 'Interface', v: link });
+      return out;
     },
-    // The Device Statistics row: a value ("present", "absent", "off",
-    // "unavailable", "not applicable") and the note for after the label.
-    devstat(it) {
-      const ds = (it.drive && it.drive.device_statistics) || {};
-      const view = it.view || {};
-      const v = String(view.devstat || ds.status || 'absent');
-      const reason = view.devstat_reason || ds.reason || '';
-      if (v === 'not_applicable') {
-        const nvme = view.protocol === 'nvme' || (it.drive && it.drive.protocol === 'NVMe');
-        return { value: 'not applicable', note: nvme ? 'NVMe' : '' };
+    // NVMe; SATA with the link speed smartctl reports (and the drive's top
+    // speed when the link runs slower); else the protocol the agent names.
+    link(d, sd) {
+      const dev = sd.device || {};
+      const proto = String(d.protocol || dev.protocol || '');
+      if (sd.nvme_smart_health_information_log || /nvme/i.test(proto) || dev.type === 'nvme') return 'NVMe';
+      if (/^ata$/i.test(proto) || dev.type === 'sat' || dev.type === 'ata') {
+        const speed = sd.interface_speed || {};
+        const cur = speed.current && speed.current.string;
+        const max = speed.max && speed.max.string;
+        if (cur) return max && max !== cur ? `SATA ${cur} (max ${max})` : `SATA ${cur}`;
+        return max ? `SATA, max ${max}` : 'SATA';
       }
-      if (v === 'off' || v === 'unavailable') return { value: v, note: reason };
-      return { value: v, note: '' };
+      return proto;
     },
     unsupportedNote(c) {
       return c.kind === 'drive' && this.health(c) === 'unknown' && !!c.it.verdict;
@@ -912,10 +739,12 @@ function cc() {
       return 'none';
     },
     // Details holds one table. An ATA drive: its attribute table, with each
-    // watched row's mark and note on the attribute it reads, a watched
-    // attribute the drive does not report as a row of its own, and a Device
-    // Statistics reading after the row it stands in for. An NVMe drive: its
-    // health log, the same way. Anything else: the watched rows.
+    // watched row's mark and note on the attribute it reads, and a watched
+    // attribute the drive does not report as a row of its own. A Device
+    // Statistics reading that stands in for one is marked in the Device
+    // Statistics table below (devstatTable); only when the pages are not at
+    // hand does it sit here, after the row it stands in for. An NVMe drive:
+    // its health log, the same way. Anything else: the watched rows.
     detailTable(it) {
       const kind = this.reportKind(it);
       const sd = (it.drive && it.drive.smart_data) || {};
@@ -930,17 +759,20 @@ function cc() {
         const missing = r.value === 'not known';
         extras.push({ key: `r:${r.key}:${r.name}`, id: (r.key !== 'wear' && ATA_IDS[r.key]) || '', name: r.name, value: missing ? '' : r.value,
           worst: '', thresh: '', raw: missing ? '' : r.value, missing, gap: 'not reported', note: this.rowNote(r),
-          mark: r.mark === 'crit' || r.mark === 'warn' ? r.mark : null, sortId,
-          edit: r.key === 'reported_unc_devstat' ? 'devstat' : null, rawValue: this.devstatValue(it, r) });
+          mark: r.mark === 'crit' || r.mark === 'warn' ? r.mark : null, sortId });
       };
       if (kind === 'ata') {
         const pad = (n) => (typeof n === 'number' ? String(n).padStart(3, '0') : '');
         ((sd.ata_smart_attributes || {}).table || []).forEach((a) => entries.push({
           key: `a:${a.id}`, id: a.id, name: a.name, value: pad(a.value), worst: pad(a.worst), thresh: pad(a.thresh),
           raw: (a.raw && (a.raw.string ?? String(a.raw.value))) || '', rawValue: a.raw ? a.raw.value : '',
-          mark: null, note: '', edit: 'ata', field: a.name,
+          mark: null, note: '', field: a.name,
         }));
         this.rows(it).forEach((r) => {
+          // In the Device Statistics table, unless that entry is one the
+          // stat row shows (endurance used): then it stays a row here.
+          const at = DEVSTAT_ROWS[r.key];
+          if (this.devRowEntry(it, r) && !DEVSTAT_IN_STATS.has(`${at[0]}:${at[1]}`)) return;
           const id = r.key === 'wear' ? null : ATA_IDS[r.key];
           const hit = r.value === 'not known' ? null : r.key === 'wear'
             ? entries.find((e) => WEAR_NAMES.includes(e.name)) : entries.find((e) => e.id === id);
@@ -954,202 +786,153 @@ function cc() {
           const at = entries.findIndex((e) => typeof e.id === 'number' && e.sortId === undefined && e.id > x.sortId);
           if (at < 0) entries.push(x); else entries.splice(at, 0, x);
         });
-        return { kind, rows: entries };
+        return { kind, rows: this.cleanRaw(kind, entries, sd) };
       }
       if (kind === 'nvme') {
         const log = sd.nvme_smart_health_information_log || {};
         Object.entries(log).forEach(([k, v]) => entries.push({
           key: `n:${k}`, name: k, value: Array.isArray(v) ? v.join(' ') : String(v), mark: null, note: '',
-          edit: typeof v === 'number' ? 'nvme' : null, field: k, rawValue: v,
+          field: k, rawValue: v,
         }));
         this.rows(it).forEach((r) => {
           const hit = r.value === 'not known' ? null : entries.find((e) => e.field === NVME_FIELDS[r.key]);
           if (hit) place(r, hit); else extra(r, 1000);
         });
-        extras.forEach((x) => { x.edit = null; entries.push(x); });
-        return { kind, rows: entries };
+        extras.forEach((x) => entries.push(x));
+        return { kind, rows: this.cleanRaw(kind, entries, sd) };
       }
       // An unsupported drive: its watched rows are not known, not missing.
       this.rows(it).forEach((r) => extra(r, 1000));
-      extras.forEach((x) => { x.edit = null; x.gap = 'not known'; });
-      return { kind, rows: extras };
+      extras.forEach((x) => { x.gap = 'not known'; });
+      return { kind, rows: this.cleanRaw(kind, extras, sd) };
     },
-    // The number behind a Device Statistics row, for a replica's input.
-    devstatValue(it, r) {
-      const at = DEVSTAT_ROWS[r.key];
-      if (!at) return '';
-      const page = (((it.drive && it.drive.device_statistics) || {}).pages || []).find((p) => p.number === at[0]);
-      const e = page && (page.table || []).find((x) => x.offset === at[1]);
-      return e ? e.value : String(r.value).replace(/,/g, '');
-    },
-
-    // ── Thresholds ──────────────────────────────────────────────────
-    // A drive's thresholds, edited in its open Details. The proxy keeps
-    // them where they live: in Home Assistant for a drive in it, else in
-    // the app's options.
-    canTune(c) {
-      return c.kind === 'drive' && !!(c.it.verdict && (c.it.verdict.limits || []).length) && !c.it.stale;
-    },
-    // The edit state, never null, for the template's bindings.
-    get thrS() {
-      return this.ui.thr || { values: {}, data: null, busy: false, err: '', loading: false };
-    },
-    thrSet(label, value) {
-      if (this.ui.thr) this.ui.thr.values[label] = value;
-    },
-    thrEditing(c) {
-      return !!(this.ui.thr && this.ui.thr.id === c.id);
-    },
-    // Edit mode shows in place of the card's table once the thresholds are
-    // at hand; while they are still being read the table stays and only the
-    // tune button shows it is waiting.
-    thrShown(c) {
-      return this.thrEditing(c) && !this.ui.thr.loading;
-    },
-    thrWaiting(c) {
-      return this.thrEditing(c) && this.ui.thr.loading;
-    },
-    // Read a drive's thresholds into its own cache entry; one read at a time
-    // per card. Nothing else on the page changes.
-    thrRead(c) {
-      if (thrReads.has(c.id)) return thrReads.get(c.id);
-      const id = c.id;
-      const seq = thrSeq.get(id) || 0;
-      const read = this.request(`cards/${enc(id)}/thresholds`).then((r) => {
-        if (thrReads.get(id) === read) thrReads.delete(id);
-        const entry = this.thrCache[id] || (this.thrCache[id] = { data: null, err: '' });
-        if ((thrSeq.get(id) || 0) !== seq) return entry;
-        if (r.ok && r.data) { entry.data = r.data; entry.err = ''; } else entry.err = 'The thresholds could not be read. Try again.';
-        const t = this.ui.thr;
-        if (t && t.id === id && t.loading) {
-          t.loading = false;
-          if (entry.err) t.err = entry.err;
-          else this.thrLoad(t, entry.data);
+    // What the Raw (or Value) cell shows, the exact number in its tooltip
+    // and in a small popover on click or tap (with Copy). Counts of LBAs
+    // (Total LBAs Written and Read, 241 and 242 on most drives) as a size:
+    // LBAs times the drive's logical sector size (512 when it does not say);
+    // NVMe data units the same way (one unit is 512,000 bytes); power-on
+    // hours as days; other large counts with separators, or M, B, T past a
+    // million. Only what is shown changes: the data, sensors and Agentic
+    // access keep the numbers as the drive gave them.
+    cleanRaw(kind, rows, sd) {
+      const sector = (sd && Number(sd.logical_block_size)) || 512;
+      rows.forEach((e) => {
+        const text = kind === 'ata' ? e.raw : e.value;
+        e.disp = text;
+        e.exact = '';
+        if (e.missing || !e.field) return;
+        const n = typeof e.rawValue === 'number' ? e.rawValue : NaN;
+        if (!Number.isFinite(n) || n < 0 || !/^\d+$/.test(String(text).trim())) return;
+        const field = String(e.field);
+        if (kind === 'ata' && /LBA/i.test(field)) {
+          e.disp = this.bytes(n * sector);
+          e.exact = `${this.num(n)} LBAs`;
+        } else if (kind === 'nvme' && /^data_units_(read|written)$/.test(field)) {
+          e.disp = this.bytes(n * 512000);
+          e.exact = `${this.num(n)} data units`;
+        } else if ((kind === 'ata' && (e.id === 9 || /^Power_On_Hours/i.test(field))) || (kind === 'nvme' && field === 'power_on_hours')) {
+          e.disp = this.hoursText(n);
+          e.exact = `${this.num(n)} hours`;
+        } else if (n >= 10000) {
+          e.disp = this.compact(n);
+          e.exact = this.num(n);
         }
-        return entry;
       });
-      thrReads.set(id, read);
-      return read;
+      return rows;
     },
-    toggleThr(c) {
-      if (this.thrEditing(c)) { this.ui.thr = null; return; }
-      const entry = this.thrCache[c.id];
-      const ready = !!(entry && entry.data);
-      this.ui.thr = { id: c.id, loading: !ready, data: null, values: {}, busy: false, err: '' };
-      if (ready) this.thrLoad(this.ui.thr, entry.data);
-      else this.thrRead(c);
+    // A table name in pieces, each ending at an underscore, so it can wrap
+    // there (a <wbr> after each piece) and never inside a word.
+    nameParts(name) {
+      return String(name ?? '').split(/(?<=_)/);
     },
-    thrLoad(t, data) {
-      t.data = data;
-      t.values = {};
-      (data.labels || []).forEach((l) => { t.values[l.label] = String(l.value); });
+    // Hours as days ("887 d"), under 48 hours as hours.
+    hoursText(h) {
+      return h < 48 ? `${this.num(h)} h` : `${this.num(Math.round(h / 24))} d`;
     },
-    // The rows edit mode shows: the labels the drive reports (and any with
-    // an override), in the order of the drive's watched rows.
-    thrRows(c) {
-      const t = this.ui.thr;
-      if (!t || !t.data) return [];
-      const keys = this.rows(c.it).map((r) => r.key);
-      const at = (l) => { const i = keys.indexOf(l.row); return i < 0 ? 1000 : i; };
-      return (t.data.labels || []).filter((l) => l.reading !== null && l.reading !== undefined || l.overridden)
-        .map((l, i) => ({ l, i })).sort((a, b) => (at(a.l) - at(b.l)) || (a.i - b.i)).map((x) => x.l);
+    // A large count: separators up to a million, then M, B or T, by the
+    // same rule as a size.
+    compact(n) {
+      return this.scaled(n, [[1e12, 'T'], [1e9, 'B'], [1e6, 'M']], (x) => this.num(x));
     },
-    thrMark(c, l) {
-      if (!l.flagged) return '';
-      const row = this.rows(c.it).find((r) => r.key === l.row);
-      return row && row.mark === 'warn' ? 'warn' : (row && row.mark === 'crit' ? 'crit' : 'warn');
-    },
-    thrReading(l) {
-      if (l.reading === null || l.reading === undefined) return 'not reported';
-      return `${this.num(l.reading)}${l.unit || ''}`;
-    },
-    thrWord(l) {
-      return COMPARE_WORDS[l.compare] || 'alert above';
-    },
-    thrWhere() {
-      const t = this.ui.thr;
-      if (!t || !t.data) return '';
-      return t.data.source === 'integration' ? 'Saved in Home Assistant' : 'Saved in this app';
-    },
-    thrFlagged(c) {
-      return this.thrRows(c).filter((l) => l.flagged);
-    },
-    // A field whose text is not the value saved: changed here, not yet sent.
-    thrPending(l) {
-      const t = this.ui.thr;
-      return !!(t && t.data && String(t.values[l.label] ?? '').trim() !== String(l.value));
-    },
-    thrAnyPending(c) {
-      return this.thrRows(c).some((l) => this.thrPending(l));
-    },
-    async thrSend(c, method, path, body) {
-      const t = this.ui.thr;
-      if (!t || t.busy) return;
-      t.busy = true;
-      t.err = '';
-      const r = await this.request(`cards/${enc(c.id)}/thresholds${path}`, body === undefined ? { method } : { method, body });
-      t.busy = false;
-      if (!r.ok || !r.data) {
-        const msg = r.data && r.data.message;
-        t.err = r.status === 502 ? `Home Assistant did not save them${msg ? `: ${msg}` : ''}.`
-          : r.status === 400 && msg ? `Not saved: ${msg}.` : 'They were not saved. Try again.';
-        return;
-      }
-      this.ui.thr = null;
-      thrSeq.set(c.id, (thrSeq.get(c.id) || 0) + 1);
-      thrReads.delete(c.id);
-      const entry = this.thrCache[c.id] || (this.thrCache[c.id] = { data: null, err: '' });
-      entry.data = r.data;
-      entry.err = '';
-      if (c.src === 'self') await this.loadSelf();
-      else if (c.src === 'replicas') await this.loadReplicas();
-      else await this.loadHost(c.h.id);
-      // The drive judged again: its readings in the thresholds too.
-      if (this.isOpen(c)) this.thrRead(c);
-    },
-    thrSave(c) {
-      const t = this.ui.thr;
-      if (!t || !t.data) return;
-      const values = {};
-      for (const l of this.thrRows(c)) {
-        const text = String(t.values[l.label] ?? '').trim();
-        if (!/^\d+$/.test(text)) { t.err = `${l.name}: a whole number from 0 up.`; return; }
-        values[l.label] = Number(text);
-      }
-      this.thrSend(c, 'PUT', '', { values });
-    },
-    // Accept and Reset only fill the fields; Save is what writes. Accept
-    // gives each flagged reading's field the value the proxy's accept
-    // would store: the reading, or one more for an "alert at" threshold.
-    thrAccept(c) {
-      const t = this.ui.thr;
-      if (!t || !t.data || t.busy) return;
-      t.err = '';
-      this.thrFlagged(c).forEach((l) => {
-        const reading = Number(l.reading);
-        t.values[l.label] = String(l.compare === 'ge' ? reading + 1 : reading);
+    // The exact number behind a shown one, in a small popover by it. Copy
+    // takes its digits; a text value (model, serial, firmware, host, port)
+    // passes its own copy text, the whole value.
+    showExact(ev, text, copyText) {
+      const el = ev.currentTarget;
+      const r = el.getBoundingClientRect();
+      if (this.ui.pop && this.ui.pop.el === el) { this.ui.pop = null; return; }
+      const left = Math.max(8, Math.min(r.left, window.innerWidth - 240));
+      const copy = copyText === undefined ? String(text).replace(/[^0-9]/g, '') : String(copyText);
+      this.popOpenedAt = Date.now();
+      this.ui.pop = { el, text, copy, x: left, y: r.bottom + 4 };
+      // Then by its real width: under the value where it fits, else as far
+      // right as the window allows (a long value never runs off the edge).
+      this.$nextTick(() => {
+        const box = document.querySelector('.numpop');
+        if (!box || !this.ui.pop || this.ui.pop.el !== el) return;
+        const x = Math.max(8, Math.min(r.left, window.innerWidth - box.getBoundingClientRect().width - 8));
+        if (x !== this.ui.pop.x) this.ui.pop.x = x;
       });
     },
-    thrReset() {
-      const t = this.ui.thr;
-      if (!t || !t.data || t.busy) return;
-      t.err = '';
-      (t.data.labels || []).forEach((l) => { t.values[l.label] = String(l.default); });
+    closeExact() {
+      this.ui.pop = null;
+    },
+    // The Device Statistics entry a watched row reads (the integration's
+    // stand-in for a missing attribute), when the pages have it.
+    devRowEntry(it, r) {
+      const at = DEVSTAT_ROWS[r.key];
+      return at ? this.devEntry(it, at[0], at[1]) : null;
+    },
+    // The Device Statistics table: every valid entry of the pages the agent
+    // read, by a plain name, its value shown by the same rules as the
+    // attribute table (sizes, days, large counts, each with the exact number
+    // behind it). A watched row that reads an entry marks it here.
+    devstatTable(it) {
+      const pages = this.devPages(it);
+      if (!pages.length) return [];
+      const ds = it.drive.device_statistics || {};
+      const sector = Number(ds.logical_block_size) || Number(this.smartOf(it).logical_block_size) || 512;
+      const marks = {};
+      this.rows(it).forEach((r) => {
+        const at = DEVSTAT_ROWS[r.key];
+        if (at) marks[`${at[0]}:${at[1]}`] = r;
+      });
+      const out = [];
+      pages.forEach((p) => p.table.forEach((e) => {
+        if (!e || !e.flags || e.flags.valid !== true || typeof e.value !== 'number') return;
+        const key = `${p.number}:${e.offset}`;
+        const known = DEVSTAT_NAMES[key];
+        if (known === null) return; // not a reading (the drive's clock)
+        if (DEVSTAT_IN_STATS.has(key)) return; // in the card's stat row
+        const [name, unit] = known || [String(e.name || key), 'count'];
+        const row = { key: `d:${key}`, name, title: `${e.name || name} (page ${p.number})`, disp: '', exact: '', mark: null, note: '' };
+        const n = e.value;
+        if (unit === 'sectors') { row.disp = this.bytes(n * sector); row.exact = `${this.num(n)} sectors`; }
+        else if (unit === 'hours') { row.disp = this.hoursText(n); row.exact = `${this.num(n)} hours`; }
+        else if (unit === 'temp') row.disp = `${n} C`;
+        else if (unit === 'pct') row.disp = `${n}%`;
+        else if (unit === 'minutes') row.disp = `${this.num(n)} min`;
+        else if (n >= 10000) { row.disp = this.compact(n); row.exact = this.num(n); }
+        else row.disp = this.num(n);
+        const r = marks[key];
+        if (r) {
+          if (r.mark === 'crit' || r.mark === 'warn') row.mark = r.mark;
+          row.note = this.rowNote(r).replace(/(, )?from device statistics/, '');
+        }
+        out.push(row);
+      }));
+      return out;
     },
 
     // ── Connect by hand ─────────────────────────────────────────────
-    // What to type into the integration to add a machine by hand: this
-    // app's agent as Home Assistant reaches it, or a field agent's address.
+    // What to type into the integration to add this box by hand: this
+    // app's agent as Home Assistant reaches it.
     connect(c) {
-      if (!['drive', 'pool'].includes(c.kind) || c.src === 'replicas') return null;
+      if (!['drive', 'pool'].includes(c.kind)) return null;
       const i = this.info || {};
-      if (c.src === 'self') {
-        const fields = [{ k: 'Host', v: i.hostname || '' }, { k: 'Port', v: String(i.agent_port || 9099) }];
-        if (i.mdns_name) fields.push({ k: 'mDNS', v: i.mdns_name });
-        return { fields: fields.filter((f) => f.v), password: false };
-      }
-      if (!c.h) return null;
-      return { fields: [{ k: 'Host', v: c.h.address }, { k: 'Port', v: String(c.h.port) }], password: !!c.h.has_password };
+      const fields = [{ k: 'Host', v: i.hostname || '' }, { k: 'Port', v: String(i.agent_port || 9099) }];
+      if (i.mdns_name) fields.push({ k: 'mDNS', v: i.mdns_name });
+      return { fields: fields.filter((f) => f.v), password: false };
     },
     // This app's agent, for the line at the top of the page.
     get topAgent() {
@@ -1179,6 +962,12 @@ function cc() {
           sel.addRange(range);
           try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
         }
+      }
+      // Copied: nothing stays selected, so a phone leaves no selection
+      // handles over the value. Not copied: the value stays selected, to
+      // copy by hand.
+      if (ok) {
+        try { window.getSelection().removeAllRanges(); } catch (e) { /* nothing to clear */ }
       }
       this.ui.copied = key;
       this.ui.copiedText = ok ? 'copied' : 'selected';
@@ -1262,172 +1051,33 @@ function cc() {
       return f.status === 'unavailable' ? 0 : Math.min(100, Math.max(0, Number(f.use_percent) || 0));
     },
 
-    // ── Footer and corner icons ─────────────────────────────────────
-    unanswered(c) {
-      if (c.src === 'self') return this.agentDown;
-      if (c.src === 'field') {
-        const d = this.hostData[c.h.id];
-        return !!(d && d.status === 'unreachable');
-      }
-      return this.repFailed;
+    // ── Footer and corner icon ──────────────────────────────────────
+    unanswered() {
+      return this.agentDown;
     },
     lastSeen(c) {
-      let at = null;
-      if (c.src === 'self') {
-        at = this.agentDown ? this.selfLastAnswer
-          : (c.it && c.it.drive && c.it.drive.last_updated) || (this.self && this.self.read_at);
-      } else if (c.src === 'field') {
-        const d = this.hostData[c.h.id];
-        if (!d) {
-          const added = Date.parse(c.h.added_at);
-          return !added || this.now - added < 60000 ? 'Added just now' : `Added ${this.ago(added)}`;
-        }
-        at = d.status === 'ok' ? d.read_at : d.last_answer;
-      } else {
-        at = this.replicas && (this.replicas.read_at || this.replicas.last_answer);
-      }
+      const at = this.agentDown ? this.selfLastAnswer
+        : (c.it && c.it.drive && c.it.drive.last_updated) || (this.self && this.self.read_at);
       const when = at ? this.ago(at) : 'not yet';
       return `Last seen: ${when}${this.unanswered(c) ? ', not answering' : ''}`;
     },
     canDownload(c) {
       return c.kind === 'drive' || c.kind === 'pool';
     },
-    canHide(c) {
-      return c.src !== 'replicas' && c.kind !== 'down' && c.kind !== 'loading';
-    },
-    canRemove(c) {
-      return c.src !== 'self';
-    },
-    removeText(c) {
-      if (c.src === 'replicas') return 'Remove this replica?';
-      if (c.kind === 'pool') return 'Remove this pool?';
-      if (c.kind === 'filesystem') return 'Remove this filesystem?';
-      if (c.kind === 'machine') return `Remove ${this.hostName(c.h)}?`;
-      return 'Remove this drive?';
-    },
-
-    async setHidden(c, hidden) {
-      const was = this.hidden.slice();
-      this.hidden = hidden ? was.concat([c.id]) : was.filter((id) => id !== c.id);
-      if (!this.hiddenCount) this.showHidden = false;
-      this.pageErr = '';
-      const r = await this.request(`cards/${enc(c.id)}`, { method: 'PATCH', body: { hidden } });
-      if (!r.ok) {
-        this.hidden = was;
-        this.pageErr = 'That change was not saved. Try again.';
-      }
-    },
-
-    // The trash: the first click turns it into Remove? in the same place,
-    // the second removes the card. A card in Home Assistant (blue exit
-    // icon) arms two buttons instead, growing left: Remove here, and the
-    // same with what Home Assistant can do (ha_removal from /ha/devices:
-    // delete its device or the machine's entry, or disable its device).
-    // A replica in Home Assistant keeps the single Remove?, and its second
-    // click takes the replica's device and entities out of Home Assistant
-    // too (ha_removal "replica").
-    // Leaving them, Esc, focus going elsewhere or ARM_MS put the trash back.
-    armed(c) {
-      return !!(this.ui.arm && this.ui.arm.id === c.id);
-    },
-    haRemoval(c) {
-      if (this.glyph(c).kind !== 'blue') return null;
-      const mode = this.ha && this.ha.ha_removal && this.ha.ha_removal[c.id];
-      return ['delete', 'disable', 'entry', 'replica'].includes(mode) ? mode : null;
-    },
-    armedHa(c) {
-      return this.armed(c) && !!this.ui.arm.ha && this.ui.arm.ha !== 'replica';
-    },
-    armedLabel(c) {
-      const also = this.ui.arm && this.ui.arm.ha === 'replica' ? ' It leaves Home Assistant too.' : '';
-      return `${this.removeText(c)} Press again to remove.${also}`;
-    },
-    haRemoveText() {
-      const a = this.ui.arm;
-      return a && a.ha === 'disable' ? 'Remove here + disable entities' : 'Remove here + delete entities';
-    },
-    trashClick(c) {
-      if (this.armed(c)) { this.confirmRemove(c, this.ui.arm.ha === 'replica' ? 'replica' : null); return; }
-      this.disarm();
-      this.ui.confirm = null;
-      const arm = { id: c.id, busy: false, timer: null, ha: this.haRemoval(c) };
-      arm.timer = setTimeout(() => { if (this.ui.arm && this.ui.arm.id === c.id && !this.ui.arm.busy) this.disarm(); }, ARM_MS);
-      this.ui.arm = arm;
-      this.ui.note[`rm:${c.id}`] = '';
-    },
-    disarm(c) {
-      const a = this.ui.arm;
-      if (!a || a.busy || (c && a.id !== c.id)) return;
-      clearTimeout(a.timer);
-      this.ui.arm = null;
-    },
-    // Focus moving between the two armed buttons keeps them armed.
-    rmFocusOut(c, e) {
-      if (e.currentTarget.contains(e.relatedTarget)) return;
-      this.disarm(c);
-    },
     showToast(text) {
       clearTimeout(this.toastTimer);
       this.ui.toast = text;
-      this.toastTimer = setTimeout(() => { this.ui.toast = ''; }, TOAST_MS);
-    },
-    haRemovedText(c, data) {
-      if (data && data.home_assistant === 'disabled') {
-        return `Disabled in Home Assistant. It cannot be deleted while the agent still sees the ${c.kind === 'pool' ? 'pool' : 'drive'}.`;
-      }
-      if (data && data.home_assistant === 'deleted') return 'Deleted from Home Assistant.';
-      if (c.src === 'replicas') return 'Removed here. Home Assistant kept its entities; remove them there.';
-      const reason = String((data && data.ha_error) || 'no answer').replace(/[.\s]+$/, '');
-      return `Removed here. Home Assistant did not take the change: ${reason}.`;
-    },
-    async confirmRemove(c, ha) {
-      const a = this.ui.arm;
-      if (!a || a.busy) return;
-      clearTimeout(a.timer);
-      a.busy = true;
-      const path = `cards/${enc(c.id)}` + (ha ? `?ha=${enc(ha)}` : '');
-      const r = await this.request(path, { method: 'DELETE' });
-      a.busy = false;
-      this.ui.arm = null;
-      if (!r.ok) {
-        const key = `rm:${c.id}`;
-        this.ui.note[key] = 'It was not removed. Try again.';
-        setTimeout(() => { this.ui.note[key] = ''; }, 5000);
-        return;
-      }
-      this.gone[c.id] = true;
-      this.order = this.order.filter((id) => id !== c.id);
-      this.hidden = this.hidden.filter((id) => id !== c.id);
-      // A replica says nothing when Home Assistant let it go too.
-      if (ha && !(ha === 'replica' && r.data && r.data.home_assistant === 'deleted')) {
-        this.showToast(this.haRemovedText(c, r.data));
-      }
-      if (c.src === 'replicas') {
-        await this.loadReplicas();
-      } else if (r.data && r.data.host_removed) {
-        this.hosts = this.hosts.filter((h) => h.id !== c.h.id);
-        delete this.hostData[c.h.id];
-      } else {
-        await this.loadHost(c.h.id);
-      }
-      delete this.gone[c.id];
-      // The machine's last card, and what Home Assistant has, changed.
-      if (this.ha && this.ha.installed === true) this.loadHa();
+      this.toastTimer = setTimeout(() => { this.ui.toast = ''; }, 4000);
     },
 
+    // The card as a JSON file: what the agent sent for it.
     async download(c) {
       const key = `dl:${c.id}`;
       this.ui.note[key] = '';
       try {
         const resp = await fetch(`${this.baseUrl}cards/${enc(c.id)}/file`);
         if (!resp.ok) {
-          let code = '';
-          try { code = (await resp.json()).error; } catch (e) { code = ''; }
-          this.ui.note[key] = {
-            replica_folder_unavailable: 'Your replica folder is not available.',
-            unsupported_drive: 'This drive has no SMART data to copy.',
-            not_answering: 'The agent did not answer.',
-          }[code] || 'It was not saved. Try again.';
+          this.ui.note[key] = 'It was not saved. Try again.';
           setTimeout(() => { this.ui.note[key] = ''; }, 5000);
           return;
         }
@@ -1446,79 +1096,84 @@ function cc() {
       } catch (e) { /* the next read shows the state */ }
     },
 
-    // ── Exit icon and its confirm ───────────────────────────────────
-    target(c) {
-      if (c.src === 'self') return 'self';
-      if (c.src === 'replicas') return 'replicas';
-      return c.h.id;
+    // ── The integration ─────────────────────────────────────────────
+    get integrationInstalled() {
+      const s = this.ha && this.ha.reachable !== false ? this.ha.state : null;
+      return !!s && s !== 'missing';
     },
-    glyph(c) {
-      if (!['drive', 'pool'].includes(c.kind)) return NONE;
+    get integrationUrl() {
+      return (this.ha && this.ha.integration_url) || '/config/integrations/integration/smart_sniffer';
+    },
+    get panelPath() {
+      const p = this.ha && this.ha.panel_path;
+      return typeof p === 'string' && /^\/[a-z0-9][a-z0-9_-]*$/.test(p) ? p : PANEL_PATH;
+    },
+    // The card under the grid: null while the integration's state is not
+    // known, or once its install or update card is closed.
+    get linkCard() {
       const ha = this.ha;
-      if (!ha || ha.reachable === false) return NONE;
-      // Not installed: the grey icon still shows, and opens the install guide.
-      if (ha.installed === false) return { kind: 'grey', href: null };
-      if (ha.installed !== true) return NONE;
-      const t = ha.targets && ha.targets[this.target(c)];
-      if (!t) return { kind: 'grey', href: null };
-      const key = this.haKey(c);
-      const dev = key && t.devices && t.devices[key];
-      if (dev) return { kind: 'blue', href: `/config/devices/device/${dev}` };
-      if (ha.lookup === 'entries_only') return { kind: 'blue', href: t.entry_url };
-      return { kind: 'grey', href: null };
-    },
-    // The confirm under a card's title: what Create makes, in the user's
-    // words. The page lives inside Home Assistant, so it never says "add to
-    // Home Assistant".
-    askText(c) {
-      if (c.src === 'replicas') {
-        const others = ((this.replicas && this.replicas.items) || []).length - 1;
-        const entry = this.ha && this.ha.targets && this.ha.targets.replicas;
-        const more = !entry && others > 0 ? `The other ${this.plural(others, 'replica comes', 'replicas come')} too. ` : '';
-        return { title: 'Create test sensors for the replicas?',
-                 line: `${more}Delete them from the integration when you're done testing.` };
+      if (!ha || ha.reachable === false || !ha.state) return null;
+      const state = ha.state === 'loaded' && ha.panel === false ? 'panel_failed' : ha.state;
+      const base = LINK_CARDS[state];
+      if (!base) return null;
+      if (base.close && ((ha.dismissed || {})[base.close] || this.closed[base.close])) return null;
+      const data = this.self || this.selfLastGood;
+      const drives = ((data && data.items) || []).filter((i) => i.type === 'drive').length;
+      const body = typeof base.body === 'function' ? base.body(drives === 1) : base.body;
+      const card = { state, title: base.title, body, open: !!base.open, close: base.close || null, link: null };
+      if (state === 'missing') {
+        card.link = { text: 'How to install', href: ha.hacs === false ? HACS_DOCS_URL : HACS_REPO_URL };
+      } else if (state === 'update') {
+        card.link = { text: 'Open in HACS', href: HACS_REPO_URL };
       }
-      const data = c.src === 'self' ? (this.self || this.selfLastGood) : this.data(c.h);
+      return card;
+    },
+    async dismissCard(which) {
+      this.closed[which] = true;
+      const r = await this.request('app/notice/dismiss', { method: 'POST', body: { notice: which } });
+      if (r.ok && this.ha) this.ha.dismissed = { ...(this.ha.dismissed || {}), [which]: true };
+    },
+    // Open: Home Assistant goes to the integration's panel. Framed in Home
+    // Assistant, the page asks it with home-assistant/navigate; when Home
+    // Assistant does not act on that, the top window goes there as the
+    // plain link does. In its own tab the link is all there is.
+    openPanel(ev) {
+      const path = this.panelPath;
+      let parent = null;
+      try { parent = window.parent !== window ? window.parent : null; } catch (e) { parent = null; }
+      if (!parent) return;
+      ev.preventDefault();
+      try {
+        parent.postMessage({ type: 'home-assistant/navigate', path }, window.location.origin);
+      } catch (e) { /* the fallback below goes there */ }
+      setTimeout(() => {
+        let at = null;
+        try { at = window.top.location.pathname; } catch (e) { at = null; }
+        if (at === path) return;
+        try { window.top.location.assign(path); } catch (e) { window.open(path, '_top'); }
+      }, NAVIGATE_FALLBACK_MS);
+    },
+
+    // ── Create sensors and alerts for HAOS ──────────────────────────
+    get createShown() {
+      return !!(this.ha && this.ha.reachable !== false && this.ha.create);
+    },
+    // The confirm under the line: what Create makes, in the user's words.
+    // The page lives inside Home Assistant, so it never says "add to Home
+    // Assistant".
+    askText() {
+      const data = this.self || this.selfLastGood;
       const n = ((data && data.items) || []).filter((i) => i.type === 'drive').length;
       const what = 'health sensors for dashboards and automations, and an alert when it needs attention.';
       let line = `Each of its ${n} drives gets ${what}`;
       if (n === 1) line = `Its drive gets ${what}`;
       if (n === 0) line = `It gets ${what}`;
-      return { title: `Create sensors and alerts for ${this.machine(c)}?`, line };
+      return { title: 'Create sensors and alerts for HAOS?', line };
     },
-    // Without the integration the same icon opens a short install guide.
-    // Home Assistant cannot tell an integration downloaded but not yet
-    // restarted from one never installed, so the guide always starts at
-    // installing it (or HACS first, when HACS is not set up either).
-    guideSteps() {
-      const noHacs = !!(this.ha && this.ha.hacs === false);
-      return {
-        first: noHacs ? 'Install HACS, then the SMART Sniffer integration.' : 'Install it from HACS.',
-        href: noHacs ? HACS_DOCS_URL : HACS_REPO_URL,
-        link: noHacs ? 'How to install HACS' : 'Open in HACS',
-      };
-    },
-    get noticeShown() {
-      const ha = this.ha;
-      return !!(ha && ha.reachable !== false && ha.installed === false && !ha.notice_dismissed && !this.noticeGone);
-    },
-    async dismissNotice() {
-      this.noticeGone = true;
-      const r = await this.request('app/notice/dismiss', { method: 'POST', body: {} });
-      if (r.ok && this.ha) this.ha.notice_dismissed = true;
-    },
-    askAdd(c) {
-      this.disarm();
-      if (this.ui.confirm && this.ui.confirm.id === c.id) { this.closeConfirm(); return; }
-      if (this.ha && this.ha.installed === false) {
-        this.ui.confirm = { id: c.id, guide: true, busy: false, err: '' };
-        return;
-      }
-      const ask = this.askText(c);
-      this.ui.confirm = { id: c.id, target: this.target(c), text: ask.title, line: ask.line, busy: false, err: '' };
-    },
-    asking(c) {
-      return !!(this.ui.confirm && this.ui.confirm.id === c.id);
+    askCreate() {
+      if (this.ui.confirm) { this.closeConfirm(); return; }
+      const ask = this.askText();
+      this.ui.confirm = { target: 'self', text: ask.title, line: ask.line, busy: false, err: '' };
     },
     closeConfirm() {
       this.ui.confirm = null;
@@ -1528,11 +1183,13 @@ function cc() {
       if (!c || c.busy) return;
       c.busy = true;
       c.err = '';
-      const r = await this.request('ha/add', { method: 'POST', body: { target: c.target } });
+      const r = await this.request('ha/add', { method: 'POST', body: { target: 'self' } });
       c.busy = false;
       const result = r.data && r.data.result;
-      if (r.ok && ['created', 'already_added', 'reloaded'].includes(result)) {
+      if (r.ok && ['created', 'already_added'].includes(result)) {
         this.ui.confirm = null;
+        // The line goes at once; the card follows the integration.
+        if (this.ha) this.ha.create = false;
         this.loadHa();
         this.haSoon();
         return;
@@ -1540,493 +1197,10 @@ function cc() {
       const why = r.data && (r.data.message || r.data.error);
       c.err = {
         cannot_connect: 'Home Assistant could not reach this agent.',
-        integration_not_loaded: 'The integration is not installed. Install it from HACS and restart Home Assistant.',
+        integration_not_loaded: 'The integration is not loaded yet. Restart Home Assistant and try again.',
         invalid_auth: 'Home Assistant refused the password.',
         unreachable: 'Home Assistant is not answering.',
       }[why] || 'Home Assistant did not create them. The App log may say why.';
-    },
-
-    // ── Field agents ────────────────────────────────────────────────
-    data(h) {
-      return this.hostData[h.id] || null;
-    },
-    status(h) {
-      const d = this.data(h);
-      if (d) return d.status;
-      const o = this.optimistic[h.id];
-      return o && o.auth === 'password' && !h.has_password ? 'password_needed' : 'reading';
-    },
-    pending(h) {
-      const s = this.status(h);
-      return s === 'password_needed' || s === 'password_refused';
-    },
-    hostName(h) {
-      const d = this.data(h);
-      const o = this.optimistic[h.id];
-      return this.hostNames[h.id] || (d && d.agent && d.agent.hostname) || (o && o.hostname) || h.address;
-    },
-    machineText(c) {
-      const h = c.h;
-      const s = this.status(h);
-      if (this.pending(h)) return '';
-      if (s === 'unreachable') return 'Not answering, and not seen yet.';
-      if (s === 'reading') return 'Reading its drives.';
-      return 'It reports no drives.';
-    },
-    pwRefused(h) {
-      return this.ui.pwState[h.id] === 'refused' || (this.status(h) === 'password_refused' && !this.ui.pwState[h.id]);
-    },
-    pwMessage(h) {
-      const s = this.ui.pwState[h.id];
-      if (s === 'noanswer') return 'That agent is not answering. Try again in a moment.';
-      if (s === 'error') return 'The password was not saved. Try again.';
-      return '';
-    },
-    async authenticate(h) {
-      const pw = this.ui.pw[h.id] || '';
-      if (!pw) return;
-      this.ui.busy[`pw:${h.id}`] = true;
-      const r = await this.request(`fleet/hosts/${enc(h.id)}`, { method: 'PATCH', body: { password: pw } });
-      this.ui.busy[`pw:${h.id}`] = false;
-      if (r.ok) {
-        this.ui.pw[h.id] = '';
-        this.ui.pwState[h.id] = null;
-        if (r.data && r.data.host) Object.assign(h, r.data.host);
-        await this.loadHost(h.id);
-        return;
-      }
-      const code = r.data && r.data.error;
-      this.ui.pwState[h.id] = code === 'password_refused' ? 'refused' : code === 'not_answering' ? 'noanswer' : 'error';
-    },
-
-    // ── Replica scenarios ──────────────────────────────────────────
-    scenOptions(it) {
-      const opts = (it.lab && it.lab.scenario && it.lab.scenario.options) || [];
-      // A pool offers Healthy, Degraded and Faulted.
-      return it.pool ? opts.filter((o) => o.id !== 'vanished') : opts;
-    },
-    scenCurrent(it) {
-      return (it.lab && it.lab.scenario && it.lab.scenario.current) || '';
-    },
-    scenarioName(it) {
-      const cur = this.scenCurrent(it);
-      const o = ((it.lab && it.lab.scenario && it.lab.scenario.options) || []).find((x) => x.id === cur);
-      return o ? o.label : '';
-    },
-    // What the picker shows: the scenario's name, or "Choose scenario" for a
-    // replica that has none yet (one carried over from the 0.2.x mock drives).
-    scenLabel(it) {
-      return this.scenarioName(it) || 'Choose scenario';
-    },
-    // The picker on a replica's where line, in place of the scenario's name.
-    scenOn(c) {
-      return c.src === 'replicas' && c.kind !== 'filesystem' && !!c.it && this.scenOptions(c.it).length > 0;
-    },
-    pickScenario(c, id) {
-      const o = this.scenOptions(c.it).find((x) => x.id === id);
-      if (o) this.applyPreset(c, o);
-    },
-    mockPath(it) {
-      return it.pool ? `mock/pools/${enc(it.pool.name)}` : `mock/drives/${enc(it.drive.id)}`;
-    },
-    async applyPreset(c, o) {
-      const it = c.it;
-      if (this.ui.busy[`scen:${c.id}`] || o.id === this.scenCurrent(it)) return;
-      this.ui.busy[`scen:${c.id}`] = true;
-      await this.request(`${this.mockPath(it)}/scenario`, { method: 'POST', body: { id: o.id } });
-      await this.loadReplicas();
-      this.ui.busy[`scen:${c.id}`] = false;
-    },
-    async editRaw(it, kind, field, text) {
-      const n = Number(String(text).trim());
-      if (!Number.isFinite(n)) return;
-      if (kind === 'ata' || kind === 'nvme') await this.request(`${this.mockPath(it)}/smart`, { method: 'PATCH', body: { [field]: n } });
-      else if (kind === 'devstat') await this.request(`${this.mockPath(it)}/devstat`, { method: 'PATCH', body: { reported_uncorrectable: n } });
-      this.loadReplicas();
-    },
-
-    // ── Drag to reorder ─────────────────────────────────────────────
-    // Pointer events, not HTML5 drag and drop, so it works on touch in the
-    // Home Assistant app. A mouse drags from the grip at once; a finger
-    // must hold the grip first, so a scroll never moves a card.
-    gripDown(e, c) {
-      if (e.button !== undefined && e.button !== 0) return;
-      const el = e.currentTarget.closest('article');
-      if (e.pointerType !== 'touch') {
-        e.preventDefault();
-        this.startDrag(c, el, e.clientX, e.clientY);
-        return;
-      }
-      const x0 = e.clientX;
-      const y0 = e.clientY;
-      let timer = null;
-      const stop = () => {
-        clearTimeout(timer);
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', stop);
-        window.removeEventListener('pointercancel', stop);
-      };
-      const move = (ev) => { if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 8) stop(); };
-      timer = setTimeout(() => { stop(); this.startDrag(c, el, x0, y0); }, LONG_PRESS_MS);
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', stop);
-      window.addEventListener('pointercancel', stop);
-    },
-    startDrag(c, el, x, y) {
-      if (this.drag || !el) return;
-      const r = el.getBoundingClientRect();
-      const lifted = el.cloneNode(true);
-      lifted.classList.add('lifted');
-      lifted.removeAttribute('data-card');
-      Object.assign(lifted.style, { width: `${r.width}px`, height: `${r.height}px`, left: `${r.left}px`, top: `${r.top}px` });
-      document.getElementById('drag-layer').appendChild(lifted);
-      const start = this.orderedCards.map((x2) => x2.id);
-      this.dragOrder = start.slice();
-      const onMove = (ev) => this.dragMove(ev);
-      const onUp = () => this.dragEnd();
-      this.drag = { id: c.id, offX: x - r.left, offY: y - r.top, lifted, start, onMove, onUp };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-      window.addEventListener('pointercancel', onUp);
-    },
-    dragMove(ev) {
-      const d = this.drag;
-      if (!d) return;
-      ev.preventDefault();
-      d.lifted.style.left = `${ev.clientX - d.offX}px`;
-      d.lifted.style.top = `${ev.clientY - d.offY}px`;
-      const edge = 60;
-      if (ev.clientY < edge) window.scrollBy(0, -12);
-      else if (ev.clientY > window.innerHeight - edge) window.scrollBy(0, 12);
-      for (const el of document.querySelectorAll('.grid > article[data-card]')) {
-        const id = el.dataset.card;
-        if (id === d.id) continue;
-        const r = el.getBoundingClientRect();
-        if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) continue;
-        const before = ev.clientX < r.left + r.width / 2;
-        const order = this.dragOrder.filter((x) => x !== d.id);
-        const at = order.indexOf(id) + (before ? 0 : 1);
-        order.splice(at, 0, d.id);
-        if (order.join('\n') !== this.dragOrder.join('\n')) this.dragOrder = order;
-        break;
-      }
-    },
-    dragEnd() {
-      const d = this.drag;
-      if (!d) return;
-      window.removeEventListener('pointermove', d.onMove);
-      window.removeEventListener('pointerup', d.onUp);
-      window.removeEventListener('pointercancel', d.onUp);
-      d.lifted.remove();
-      const order = this.dragOrder;
-      this.drag = null;
-      this.dragOrder = null;
-      if (order.join('\n') !== d.start.join('\n')) this.saveOrder(order);
-    },
-    // The grip by keyboard: arrows move the card one place.
-    gripKey(e, c) {
-      const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
-      if (!step) return;
-      e.preventDefault();
-      const shown = this.shownCards.map((x) => x.id);
-      const i = shown.indexOf(c.id);
-      const j = i + step;
-      if (i < 0 || j < 0 || j >= shown.length) return;
-      const order = this.orderedCards.map((x) => x.id).filter((x) => x !== c.id);
-      const at = order.indexOf(shown[j]) + (step > 0 ? 1 : 0);
-      order.splice(at, 0, c.id);
-      this.saveOrder(order);
-      this.$nextTick(() => {
-        const el = document.querySelector(`.grid > article[data-card="${CSS.escape(c.id)}"] .grip`);
-        if (el) el.focus();
-      });
-    },
-    async saveOrder(order) {
-      const was = this.order;
-      this.order = order;
-      this.pageErr = '';
-      const r = await this.request('cards/order', { method: 'PUT', body: { order } });
-      if (!r.ok) {
-        this.order = was;
-        this.pageErr = 'The new order was not saved. Try again.';
-      }
-    },
-
-    // ── The + card ──────────────────────────────────────────────────
-    defaultBlock() {
-      const b = this.info && this.info.network && this.info.network.block;
-      if (b) return b;
-      const p = parseBlock(window.location.hostname);
-      return p ? block24(p.octets) : '';
-    },
-    async openAdd() {
-      this.add.open = true;
-      if (!this.add.block) this.add.block = this.defaultBlock();
-      this.loadReplicaFiles();
-      if (this.add.block) this.scan();
-    },
-    closeAdd() {
-      this.stopScan();
-      Object.assign(this.add, {
-        open: false, scan: null, last: null, wide: null, error: '', ticks: {}, manualRows: [], checkMsg: null,
-        manualHost: '', repTicks: {}, upMsg: '', err: '',
-      });
-    },
-    get scanLabel() {
-      const l = this.add.last;
-      return l && l.block === this.add.block.trim() && l.port === String(this.add.port).trim() ? 'Rescan' : 'Scan';
-    },
-    fieldsChanged() {
-      if (this.scanLabel === 'Rescan') return;
-      this.stopScan();
-      this.add.scan = null;
-      this.add.wide = null;
-      this.add.error = '';
-    },
-    suggestBlock(parsed) {
-      const own = this.info && this.info.network && this.info.network.address;
-      const p = own ? parseBlock(own) : null;
-      return block24(p ? p.octets : parsed.octets);
-    },
-    stopScan() {
-      const id = this.add.scanId;
-      if (id && this.add.scan && this.add.scan.state === 'running') {
-        this.request(`fleet/scan/${enc(id)}`, { method: 'DELETE' });
-      }
-      this.add.scanId = null;
-    },
-    async scan() {
-      const block = this.add.block.trim();
-      const portText = String(this.add.port).trim();
-      const port = Number(portText);
-      this.stopScan();
-      this.add.error = '';
-      this.add.wide = null;
-      this.add.scan = null;
-      const parsed = parseBlock(block);
-      if (!parsed) { this.add.error = 'That is not a network block. Write it as 10.0.10.0/24.'; return; }
-      if (!Number.isInteger(port) || port < 1 || port > 65535) { this.add.error = 'The port is a number from 1 to 65535.'; return; }
-      if (parsed.prefix < 22) {
-        this.add.wide = { addresses: 2 ** (32 - parsed.prefix) - 2, suggest: this.suggestBlock(parsed) };
-        return;
-      }
-      this.add.last = { block, port: portText };
-      this.add.scan = { state: 'running', probed: 0, total: 0, found: [], block, port };
-      const r = await this.request('fleet/scan', { method: 'POST', body: { block, port } });
-      if (r.status === 422 && r.data && r.data.error === 'too_wide') {
-        this.add.scan = null;
-        this.add.last = null;
-        this.add.wide = { addresses: r.data.addresses, suggest: r.data.suggest };
-        return;
-      }
-      if (!r.ok || !r.data) {
-        this.add.scan = null;
-        this.add.error = r.data && r.data.error === 'bad_block' ? 'That is not a network block. Write it as 10.0.10.0/24.'
-          : 'The scan did not start. Try again.';
-        return;
-      }
-      this.add.scanId = r.data.scan_id;
-      this.add.scan.total = r.data.total;
-      this.pollScan(r.data.scan_id);
-    },
-    // One poll every 400 ms while the page is visible. A hidden page waits;
-    // when it shows again resumeScan() polls at once so the bar catches up.
-    pollScan(id, delay = 400) {
-      clearTimeout(this.scanTimer);
-      this.scanTimer = setTimeout(async () => {
-        this.scanTimer = null;
-        if (this.add.scanId !== id) return;
-        if (document.hidden) { this.pollScan(id); return; }
-        this.scanPolling = true;
-        const r = await this.request(`fleet/scan/${enc(id)}`);
-        this.scanPolling = false;
-        if (this.add.scanId !== id) return;
-        if (!r.ok || !r.data) {
-          if (this.add.scan) this.add.scan.state = 'done';
-          this.add.scanId = null;
-          return;
-        }
-        (r.data.found || []).forEach((row) => {
-          if (!row.added && !(row.id in this.add.ticks)) this.add.ticks[row.id] = true;
-        });
-        this.add.scan = r.data;
-        if (r.data.state === 'running') this.pollScan(id);
-        else this.add.scanId = null;
-      }, delay);
-    },
-    resumeScan() {
-      // A request already on its way schedules the next poll itself.
-      if (this.add.scanId && !this.scanPolling) this.pollScan(this.add.scanId, 0);
-    },
-    useSuggest() {
-      this.add.block = this.add.wide.suggest;
-      this.scan();
-    },
-    get scanPct() {
-      const s = this.add.scan;
-      if (!s) return 0;
-      if (s.state !== 'running') return 100;
-      return s.total ? Math.min(100, Math.round((100 * s.probed) / s.total)) : 0;
-    },
-    get foundCount() {
-      return ((this.add.scan && this.add.scan.found) || []).filter((r) => !r.added).length;
-    },
-    // Rows the scan listed that are on the board already, named after the
-    // new count so a scan of known machines does not read as nothing found.
-    get addedCount() {
-      return ((this.add.scan && this.add.scan.found) || []).filter((r) => r.added).length;
-    },
-    get scanNone() {
-      const s = this.add.scan;
-      return !!s && s.state !== 'running' && !(s.found || []).length;
-    },
-    get pickRows() {
-      const seen = new Set();
-      const out = [];
-      [...((this.add.scan && this.add.scan.found) || []), ...this.add.manualRows].forEach((r) => {
-        if (seen.has(r.id)) return;
-        seen.add(r.id);
-        out.push(r);
-      });
-      return out;
-    },
-    driveCount(n) {
-      return typeof n === 'number' ? this.plural(n, 'drive', 'drives') : '';
-    },
-    // Check one machine by hand. It always answers in a line under the
-    // fields: a machine already in the list is ticked, scrolled to and
-    // flashed there; a new one joins the list, ticked; a stored machine with
-    // cards is already on the page; else nothing answered, or what answered
-    // is not an agent. The list drops a second row for a machine it has, so
-    // without this line a Check of a listed machine showed nothing at all.
-    async check() {
-      const host = this.add.manualHost.trim();
-      const port = Number(String(this.add.manualPort).trim()) || 9099;
-      if (!host || this.add.checking) return;
-      this.add.checkMsg = null;
-      this.add.checking = true;
-      const r = await this.request('fleet/probe', { method: 'POST', body: { host, port } });
-      this.add.checking = false;
-      if (!(r.ok && r.data && r.data.id)) {
-        const notAgent = r.status === 404 && r.data && r.data.error === 'not_an_agent';
-        this.add.checkMsg = notAgent
-          ? { text: `${host}:${port} answered, but it is not a SMART Sniffer agent.`, muted: false }
-          : { text: `Nothing answered at ${host}:${port}.`, muted: true };
-        return;
-      }
-      const row = r.data;
-      this.add.manualHost = '';
-      if (row.added) {
-        this.add.checkMsg = { text: `${host} is already on the page.`, muted: false };
-        return;
-      }
-      const same = (x) => x.id === row.id || (Number(x.port) === Number(row.port)
-        && [row.address, row.resolved].filter(Boolean).map((a) => String(a).toLowerCase())
-          .includes(String(x.address).toLowerCase()));
-      const listed = this.pickRows.find((x) => !x.added && same(x));
-      if (listed) {
-        this.add.ticks[listed.id] = true;
-        this.add.checkMsg = { text: `${host} is in the list above, ticked.`, muted: false };
-        this.flashRow(listed.id);
-        return;
-      }
-      this.add.manualRows = this.add.manualRows.concat([row]);
-      this.add.ticks[row.id] = true;
-      this.add.checkMsg = { text: `Added ${host} to the list, ticked.`, muted: false };
-    },
-    // Scroll a Network row into view and pulse its outline once.
-    flashRow(id) {
-      this.$nextTick(() => {
-        const el = [...document.querySelectorAll('.pick-row')].find((e) => e.dataset.id === id);
-        if (!el) return;
-        el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-        el.classList.remove('flash');
-        void el.offsetWidth;  // restart the animation on a second Check
-        el.classList.add('flash');
-        el.addEventListener('animationend', () => el.classList.remove('flash'), { once: true });
-      });
-    },
-    get folderOk() {
-      const f = this.replicaFiles && this.replicaFiles.folder;
-      if (f && f.status) return f.status === 'ok';
-      return !this.info || !this.info.replicas || this.info.replicas.folder === 'ok';
-    },
-    get pickFiles() {
-      const files = ((this.replicaFiles && this.replicaFiles.files) || []).filter((f) => f.valid !== false && f.name);
-      const shipped = files.filter((f) => f.source === 'shipped').sort((a, b) => (a.order || 0) - (b.order || 0));
-      const user = files.filter((f) => f.source !== 'shipped').sort((a, b) => a.name.localeCompare(b.name));
-      return shipped.concat(user);
-    },
-    get tickedHosts() {
-      return this.pickRows.filter((r) => !r.added && this.add.ticks[r.id]);
-    },
-    get tickedFiles() {
-      return this.pickFiles.filter((f) => this.add.repTicks[f.id]).map((f) => f.id);
-    },
-    get tickCount() {
-      return this.tickedHosts.length + this.tickedFiles.length;
-    },
-    get tickedLock() {
-      return this.tickedHosts.some((r) => r.auth === 'password');
-    },
-    upload(ev) {
-      const file = ev.target.files && ev.target.files[0];
-      ev.target.value = '';
-      if (!file) return;
-      this.add.upMsg = '';
-      if (file.size > 1024 * 1024) { this.add.upMsg = 'That file is over 1 MB.'; return; }
-      const reader = new FileReader();
-      reader.onload = async () => {
-        let doc;
-        try { doc = JSON.parse(reader.result); } catch (e) { this.add.upMsg = 'That file is not JSON.'; return; }
-        this.add.uploading = true;
-        const r = await this.request('replicas', { method: 'POST', body: doc });
-        this.add.uploading = false;
-        if (r.ok && r.data && r.data.id) {
-          if (!this.replicaFiles) this.replicaFiles = { files: [] };
-          this.replicaFiles.files = this.replicaFiles.files.filter((f) => f.id !== r.data.id).concat([r.data]);
-          this.add.repTicks[r.data.id] = true;
-          return;
-        }
-        const code = r.data && r.data.error;
-        this.add.upMsg = code === 'replica_folder_unavailable' ? 'Your replica folder is not available.'
-          : code === 'too_large' ? 'That file is over 1 MB.'
-            : (r.data && r.data.message) || 'That is not a replica file.';
-      };
-      reader.readAsText(file);
-    },
-    async addTicked() {
-      const rows = this.tickedHosts;
-      const files = this.tickedFiles;
-      if (!rows.length && !files.length) return;
-      this.add.busy = true;
-      this.add.err = '';
-      if (rows.length) {
-        const r = await this.request('fleet/hosts', { method: 'POST',
-          body: { hosts: rows.map((x) => ({ address: x.address, port: x.port })) } });
-        if (!r.ok) {
-          this.add.busy = false;
-          const code = r.data && r.data.error;
-          this.add.err = code === 'supervisor_unavailable' ? 'The Supervisor is not available, so field agents cannot be saved.'
-            : 'The field agents were not saved. Try again.';
-          return;
-        }
-        rows.forEach((x) => { this.optimistic[x.id] = x; });
-        const known = new Set(this.hosts.map((h) => h.id));
-        this.hosts = this.hosts.concat(((r.data && r.data.added) || []).filter((h) => !known.has(h.id)));
-      }
-      if (files.length) {
-        const r = await this.request('replicas/add', { method: 'POST', body: { files } });
-        if (!r.ok) {
-          this.add.busy = false;
-          this.add.err = 'The replicas were not added. Try again.';
-          return;
-        }
-      }
-      this.add.busy = false;
-      this.closeAdd();
-      if (rows.length) this.loadHosts();
-      if (files.length) this.loadReplicas();
     },
   };
 }

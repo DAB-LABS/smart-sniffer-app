@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from pathlib import Path
 
 import pytest
 
@@ -166,14 +168,77 @@ def test_main_writes_an_empty_list_when_nothing_is_found(tmp_path):
     assert json.loads(out.read_text()) == {"filesystems": []}
 
 
-def test_main_fails_with_one_line_when_a_file_cannot_be_read_or_written(tmp_path, capsys):
-    """run.sh logs the error and starts the agent without --config."""
+def test_main_fails_with_one_line_when_a_file_cannot_be_read_or_written(tmp_path, capsys, monkeypatch):
+    """An unreadable mount table still writes the config, with no
+    filesystems (2: disk space is off, the token applies); a config that
+    cannot be written is 1, and run.sh starts the agent without --config."""
+    monkeypatch.setenv("AGENT_TOKEN", "secret")
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text(REAL_PI)
+    out = tmp_path / "agent-config.yaml"
 
-    assert mounts.main(["--out", str(tmp_path / "agent-config.yaml"),
-                        "--mountinfo", str(tmp_path / "missing")]) == 1
+    assert mounts.main(["--out", str(out), "--mountinfo", str(tmp_path / "missing")]) == 2
+    assert json.loads(out.read_text()) == {"filesystems": [], "token": "secret"}
     assert mounts.main(["--out", str(tmp_path / "no-dir" / "agent-config.yaml"),
                         "--mountinfo", str(mountinfo)]) == 1
     errors = capsys.readouterr().err.splitlines()
     assert len(errors) == 2 and all("No such file or directory" in e for e in errors)
+
+
+# ── the token ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("token", ["s3cret", "two words * and $HOME ?", "p\u00e4ss\"w'rd"])
+def test_main_writes_the_token_from_the_environment_root_only(tmp_path, monkeypatch, token):
+    monkeypatch.setenv("AGENT_TOKEN", token)
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(REAL_PI)
+    out = tmp_path / "agent-config.yaml"
+    out.write_text("{}")
+    out.chmod(0o644)  # as an older version left it
+
+    assert mounts.main(["--out", str(out), "--mountinfo", str(mountinfo)]) == 0
+    config = json.loads(out.read_text(encoding="utf-8"))
+    assert config["token"] == token and len(config["filesystems"]) == 2
+    assert out.stat().st_mode & 0o777 == 0o600
+
+
+def test_main_writes_no_token_when_none_is_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_TOKEN", "")
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(REAL_PI)
+    out = tmp_path / "agent-config.yaml"
+    assert mounts.main(["--out", str(out), "--mountinfo", str(mountinfo)]) == 0
+    assert "token" not in json.loads(out.read_text())
+    assert out.stat().st_mode & 0o777 == 0o600
+
+
+# ── run.sh and config.yaml ──────────────────────────────────────────────────
+
+RUN_SH = (Path(__file__).resolve().parent / "run.sh").read_text(encoding="utf-8")
+CONFIG_YAML = (Path(__file__).resolve().parent / "config.yaml").read_text(encoding="utf-8")
+
+
+def test_token_option_is_a_password():
+    schema = CONFIG_YAML.split("\nschema:\n", 1)[1]
+    assert re.search(r'^  token: "password\?"$', schema, re.M)
+    assert re.search(r'^  token: ""$', CONFIG_YAML.split("\nschema:\n", 1)[0], re.M)
+
+
+def test_run_sh_never_puts_the_token_on_a_command_line():
+    assert "--token" not in RUN_SH
+    # The token reaches mounts.py and proxy.py in the environment only.
+    uses = [ln.strip() for ln in RUN_SH.splitlines()
+            if "${TOKEN}" in ln and not ln.strip().startswith("#")]
+    assert all(ln.startswith(("if bashio::var.has_value", "bashio::var.has_value",
+                              'MOUNT_LINES="$(AGENT_TOKEN="${TOKEN}" python3 /opt/mounts.py ',
+                              'AGENT_TOKEN="${TOKEN}" python3 /opt/web/proxy.py '))
+               for ln in uses), uses
+    assert sum('AGENT_TOKEN="${TOKEN}"' in ln for ln in uses) == 2
+
+
+def test_run_sh_quotes_its_argument_arrays():
+    assert RUN_SH.startswith("#!/usr/bin/with-contenv bashio\n")
+    assert '/usr/bin/smartha-agent "${AGENT_ARGS[@]}" &' in RUN_SH
+    assert 'python3 /opt/web/proxy.py "${PROXY_ARGS[@]}" &' in RUN_SH
+    assert not re.search(r"\$\{?(AGENT|PROXY)_ARGS\}?(?!\[@\])", RUN_SH.replace('"${AGENT_ARGS[@]}"', "")
+                         .replace('"${PROXY_ARGS[@]}"', ""))

@@ -1,6 +1,6 @@
 name: "SMART Sniffer App"
-description: "Drive health for this machine and your other machines, on its own page. The SMART Sniffer integration adds entities, history, notifications and automations."
-version: "0.3.1"
+description: "Drive health for the drives in this Home Assistant box, on its own page. The SMART Sniffer integration adds your other machines, entities, history, notifications and automations."
+version: "0.4.0-dev"
 slug: "smart_sniffer_agent"
 url: "https://github.com/DAB-LABS/smart-sniffer-app"
 arch:
@@ -29,20 +29,23 @@ privileged:
 # Users must also disable Protection Mode in the app settings for drive access.
 full_access: true
 
-# Supervisor API access: the HA hostname for a unique mDNS name, network info
-# for the scan prefill, and the app's own options, where field agents are
-# stored
+# Supervisor API access: the HA hostname for a unique mDNS name, the app's own
+# options, and the discovery message for the integration
 hassio_api: true
 
-# Home Assistant Core API access: adds this app's agents, replicas and field
-# agents to the integration, and finds their device pages
+# Home Assistant Core API access: tells which SMART Sniffer integration is
+# installed, and adds this box to it
 homeassistant_api: true
 
-# /share: the user's replica files live in /share/smart-sniffer/replicas, so
-# they survive app updates and can be dropped in over Samba or SSH
-# /media: USB drives HA mounts there, measured for disk space
+# Supervisor discovery: tells integration 0.9 and later where this box's agent
+# is (host and port only). Posted only while that integration is installed.
+discovery:
+  - smart_sniffer
+
+# /media: USB drives HA mounts there, measured for disk space. /share is no
+# longer mapped: replicas moved into the integration, and the files users
+# kept in /share/smart-sniffer/replicas stay where they are.
 map:
-  - share:rw
   - media:ro
 
 # AppArmor — custom profile (apparmor.txt) provides the Protection Mode toggle
@@ -54,18 +57,21 @@ map:
 ingress: true
 ingress_port: 8099
 ingress_entry: /
-panel_icon: mdi:harddisk
-panel_title: "SMART Sniffer"
+panel_icon: mdi:harddisk-plus
+panel_title: "SMART Sniffer App"
 
 # Health monitoring
 watchdog: "http://[HOST]:[PORT:9099]/api/health"
 
-# User-configurable options
+# User-configurable options. hosts, card_order, hidden_cards, thresholds,
+# card_names and host_names are what 0.3.x kept for the field machines and
+# cards; 0.4.0 hands the field machines' part to the integration (v0.9 and
+# later) and removes it here as the integration confirms it. This box's own
+# entries stay, and its thresholds are still read.
 options:
   port: 9099
   token: ""
   scan_interval: 60
-  mock_port: 9100
   hosts: []
   card_order: []
   hidden_cards: []
@@ -74,9 +80,8 @@ options:
   host_names: []
 schema:
   port: port
-  token: "str?"
+  token: "password?"
   scan_interval: "int(10,3600)"
-  mock_port: port
   hosts:
     - address: str
       port: port

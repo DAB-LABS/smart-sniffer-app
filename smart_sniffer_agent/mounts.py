@@ -7,11 +7,18 @@ Assistant gives the app (/data, and /media and /share with what is mounted
 under them), one per device, and writes them as the agent's config:
 
   filesystems: [{path, uuid, device, fstype}, ...]
+  token: the app's token option, when one is set
 
-The file is JSON, which the agent's YAML parser reads as it is. It is always
-written, with an empty list when nothing is found, since the agent refuses to
-start when --config names a missing file. Each mount kept is printed as one
-line for the app log.
+The token comes from the AGENT_TOKEN environment variable, so it is never on
+a command line, and the file is readable by root only. The file is JSON,
+which the agent's YAML parser reads as it is. It is always written, with an
+empty list when nothing is found, since the agent refuses to start when
+--config names a missing file. Each mount kept is printed as one line for
+the app log.
+
+Exit status: 0 written; 2 written without filesystems, as the mount table
+could not be read (disk space is off, the token still applies); 1 not
+written.
 
 /data, /media and /share all sit on the data disk (the boot drive, or the
 drive picked with Move data disk), so they collapse to /data.
@@ -29,7 +36,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 MOUNTINFO = "/proc/self/mountinfo"
 BY_UUID = "/dev/disk/by-uuid"
@@ -97,10 +104,23 @@ def uuid_for(device: str, by_uuid_dir: str = BY_UUID) -> str:
                  if os.path.basename(os.path.realpath(os.path.join(by_uuid_dir, n))) == target), "")
 
 
-def agent_config(mounts: list[Mount], uuid_lookup: Callable[[str], str] = uuid_for) -> dict[str, list[dict[str, str]]]:
-    """The agent's config for these mounts."""
-    return {"filesystems": [{"path": m.path, "uuid": uuid_lookup(m.device),
-                             "device": m.device, "fstype": m.fstype} for m in mounts]}
+def agent_config(mounts: list[Mount], uuid_lookup: Callable[[str], str] = uuid_for,
+                 token: str = "") -> dict[str, Any]:
+    """The agent's config for these mounts, and the token when there is one."""
+    config: dict[str, Any] = {"filesystems": [{"path": m.path, "uuid": uuid_lookup(m.device),
+                                               "device": m.device, "fstype": m.fstype}
+                                              for m in mounts]}
+    if token:
+        config["token"] = token
+    return config
+
+
+def write_private(path: str, text: str) -> None:
+    """Write the file readable by root only, also when it was there before."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(text)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -110,16 +130,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--by-uuid", default=BY_UUID, help=f"UUID links to read (default {BY_UUID})")
     args = parser.parse_args(argv)
 
+    status = 0
     try:
         mounts = select_mounts(parse_mountinfo(Path(args.mountinfo).read_text(encoding="utf-8", errors="replace")))
-        config = agent_config(mounts, lambda device: uuid_for(device, args.by_uuid))
-        Path(args.out).write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    except OSError as err:
+        print(err, file=sys.stderr)
+        mounts, status = [], 2
+    config = agent_config(mounts, lambda device: uuid_for(device, args.by_uuid),
+                          os.environ.get("AGENT_TOKEN", ""))
+    try:
+        write_private(args.out, json.dumps(config, indent=2, ensure_ascii=False) + "\n")
     except OSError as err:
         print(err, file=sys.stderr)
         return 1
     for m in mounts:
         print(f"{m.path} on {m.device} ({m.fstype})")
-    return 0
+    return status
 
 
 if __name__ == "__main__":

@@ -3,12 +3,12 @@
 The dev harness answers like the proxy but serves its files its own way, so a
 page that works there can still fail in the app: on the test box the proxy
 let browsers keep cc.js for a day, and a browser that had seen the old page
-ran yesterday's script against the new markup and drew nothing but the +
-card. These tests run the page in Chromium against proxy.py with the fake
-Supervisor and agents of test_proxy.py and the replica mock agent.
+ran yesterday's script against the new markup and drew nothing. These tests
+run the page in Chromium against proxy.py with the fake Supervisor (and its
+Core websocket) and agent of test_proxy.py.
 
-Needs what test_page.py needs (Playwright, VENDOR_DIR) and what the replica
-tests of test_proxy.py need (SS_RULES_DIR or SS_MOCK).
+Needs what test_page.py needs (Playwright, VENDOR_DIR) and the integration's
+rules (SS_RULES_DIR), as test_proxy.py does.
 """
 
 from __future__ import annotations
@@ -17,8 +17,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
 import time
 import urllib.error
@@ -31,22 +29,17 @@ playwright_api = pytest.importorskip("playwright.sync_api")
 
 from test_proxy import (  # noqa: E402 -- after the skip
     APP_TOKEN,
-    FIELD_PASSWORD,
-    MOCK_AGENT,
     RULES_DIR,
     STATE,
     TOKEN,
     AgentState,
     FakeSupervisor,
-    _device,
     _entry,
-    _free_port,
-    _mock_has_replicas,
     _serve,
     _start_proxy,
     _stop_proxy,
-    _wait_for_port,
     agent_handler,
+    raw_request,
     simple_drive,
 )
 
@@ -57,12 +50,11 @@ VENDORED = ("alpine.min.js", "tailwind.min.js")
 pytestmark = [
     pytest.mark.skipif(not (VENDOR and all((Path(VENDOR) / n).is_file() for n in VENDORED)),
                        reason="set VENDOR_DIR to a folder with alpine.min.js and tailwind.min.js"),
-    pytest.mark.skipif(not _mock_has_replicas(), reason=f"replica mock agent not found ({MOCK_AGENT})"),
+    pytest.mark.skipif(not (RULES_DIR / "smart_sniffer" / "attention.py").is_file(),
+                       reason=f"integration rules not found ({RULES_DIR})"),
 ]
 
 SELF = AgentState(token=APP_TOKEN, drives=[simple_drive("sda", "HAOS-DISK-1")])
-NAS = AgentState(token=FIELD_PASSWORD, hostname="nas-01",
-                 drives=[simple_drive("sda", "NAS-A"), simple_drive("sdb", "NAS-B")])
 
 
 @pytest.fixture(scope="module")
@@ -83,92 +75,32 @@ def app(static_dir):
     STATE.reset()
     supervisor = _serve(FakeSupervisor)
     self_agent = _serve(agent_handler(SELF))
-    nas = _serve(agent_handler(NAS))
-    STATE.options["hosts"] = [{"address": "127.0.0.1", "port": nas.server_address[1],
-                               "password": FIELD_PASSWORD}]
-    work = Path(tempfile.mkdtemp(prefix="ss-mock-"))
-    (work / "user").mkdir()
-    (work / "data").mkdir()
-    mock_port = _free_port()
-    mock = subprocess.Popen(
-        [sys.executable, str(MOCK_AGENT), f"--port={mock_port}", "--host=127.0.0.1", "--no-mdns",
-         "--replicas", str(MOCK_AGENT.parent / "replicas"), "--user-replicas", str(work / "user")],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    _wait_for_port(mock_port, mock)
+    work = Path(tempfile.mkdtemp(prefix="ss-data-"))
     proc, client = _start_proxy([
         f"--agent-port={self_agent.server_address[1]}",
-        f"--mock-port={mock_port}",
-        "--app-version=0.3.1",
+        "--app-version=0.4.0-dev",
         f"--rules-dir={RULES_DIR}",
         f"--supervisor-url=http://127.0.0.1:{supervisor.server_address[1]}",
-        f"--token={APP_TOKEN}",
-        f"--data-dir={work / 'data'}",
+        f"--data-dir={work}",
         f"--static-dir={static_dir}",
         "--ha-cache-seconds=0",
-    ], TOKEN)
-    client.nas = f"127.0.0.1:{nas.server_address[1]}"  # type: ignore[attr-defined]
+    ], TOKEN, APP_TOKEN)
     yield client
     output = _stop_proxy(proc)
-    assert TOKEN not in output
-    mock.terminate()
-    mock.wait(5)
-    for server in (supervisor, self_agent, nas):
+    assert TOKEN not in output and APP_TOKEN not in output
+    for server in (supervisor, self_agent):
         server.shutdown()
     shutil.rmtree(work, ignore_errors=True)
     STATE.reset()
 
 
-# Watches every card but one and the grid while that card goes in and out of
-# threshold edit mode: an element added to or removed from another card, a
-# style or class change on one, a change to the grid's children, or a busy
-# mark or the page's error line anywhere outside the card is recorded.
-# Text-only changes (the cards' "seen" clocks) are allowed.
-WATCH_OTHERS = """(cid) => {
-  const grid = document.querySelector('.grid');
-  const mine = grid.querySelector(`[data-card="${CSS.escape(cid)}"]`);
-  const seen = window.__seen = [];
-  const kids = [...grid.children];
-  const els = (list) => [...list].filter((n) => n.nodeType === 1).length;
-  const obs = [];
-  kids.filter((e) => e !== mine && e.dataset && e.dataset.card).forEach((e) => {
-    const o = new MutationObserver((ms) => ms.forEach((m) => {
-      if (m.type === 'childList' && (els(m.addedNodes) || els(m.removedNodes))) seen.push(`subtree ${e.dataset.card}`);
-      if (m.type === 'attributes' && m.target === e) seen.push(`${m.attributeName} ${e.dataset.card}`);
-    }));
-    o.observe(e, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
-    obs.push(o);
-  });
-  const g = new MutationObserver((ms) => ms.forEach(() => seen.push('grid children')));
-  g.observe(grid, { childList: true });
-  obs.push(g);
-  let on = true;
-  const frame = () => {
-    if (!on) return;
-    const busy = [...document.querySelectorAll('[aria-busy="true"]')].filter((e) => !mine.contains(e));
-    if (busy.length) seen.push('busy outside the card');
-    const err = document.querySelector('.page-err');
-    if (err && err.offsetParent) seen.push('page error line');
-    if (!mine.querySelector('table.attrs')) seen.push('the card lost its table');
-    requestAnimationFrame(frame);
-  };
-  frame();
-  window.__stop = () => {
-    on = false;
-    obs.forEach((o) => o.disconnect());
-    const now = [...grid.children];
-    if (now.length !== kids.length || now.some((e, i) => e !== kids[i])) seen.push('grid children');
-    return seen;
-  };
-}"""
-
 class Tab:
     """One browser profile on the proxy, with the page's errors and failed
     requests collected."""
 
-    def __init__(self, browser, base: str):
+    def __init__(self, browser, base: str, width: int = 1280):
         self.base = base
-        self.ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+        self.ctx = browser.new_context(viewport={"width": width, "height": 900}, accept_downloads=True)
         self.page = self.ctx.new_page()
         self.errors: list[str] = []
         self.failed: list[str] = []
@@ -188,26 +120,87 @@ class Tab:
 
 @pytest.fixture
 def tab(browser, app):
+    STATE.reset()
     t = Tab(browser, app.base)
     yield t
     t.close()
 
 
-def test_cards_render_and_a_replica_adds(tab, app):
-    tab.load()
-    tab.page.wait_for_selector('article.card[data-card="self|HAOS-DISK-1"]', timeout=10000)
-    for serial in ("NAS-A", "NAS-B"):
-        tab.card(f"{app.nas}|{serial}").wait_for(timeout=10000)
-    assert "nas-01" in tab.card(f"{app.nas}|NAS-A").inner_text().lower()
+def _loaded(**info) -> None:
+    STATE.info = {"version": "0.9.2", "panel": True, "panel_path": "/smart-sniffer",
+                  "haos_entry": True, **info}
+    STATE.manifest_version = "0.9.2"
 
-    tab.page.get_by_role("button", name="Add a drive, or a replica for testing").click()
-    region = tab.page.get_by_role("region", name="Add", exact=True)
-    region.locator(".replica-pick label").first.wait_for(timeout=10000)
-    region.locator(".replica-pick label").first.click()
-    region.locator(".add-foot .btn-primary").click()
-    tab.page.wait_for_selector('article.card[data-card^="replicas|"]', timeout=10000)
+
+def test_this_box_read_only_with_the_control_center_card(tab, app):
+    _loaded()
+    tab.load()
+    card = tab.card("self|HAOS-DISK-1")
+    card.wait_for(timeout=10000)
+    assert card.locator(".pill").inner_text() == "HAOS"
+    # Read only: nothing to drag, rename, hide, remove or tune.
+    for gone in (".grip", ".t-name", ".exit", ".trash", ".tune", ".pill-ed"):
+        assert card.locator(gone).count() == 0, gone
+    assert tab.page.locator(".card.ghost, .card.ghost-open").count() == 0
+    link = tab.page.locator("section.link-card")
+    link.wait_for(timeout=10000)
+    assert link.locator(".lc-title").inner_text() == "See all your machines in the SMART Sniffer Control Center"
+    assert link.get_by_role("link", name="Open").get_attribute("href") == "/smart-sniffer"
+    assert link.get_by_role("link", name="Open").get_attribute("target") == "_top"
     assert not tab.errors, tab.errors
     assert not tab.failed, tab.failed
+
+
+def test_create_line_through_the_proxy(tab, app):
+    _loaded(haos_entry=False)
+    STATE.flow_step = {"type": "create_entry", "result": {"entry_id": "new-self"}}
+    tab.load()
+    line = tab.page.get_by_role("button", name="Create sensors and alerts for HAOS")
+    line.wait_for(timeout=10000)
+    line.click()
+    ask = tab.page.locator(".create .ask")
+    assert ask.locator(".ask-title").inner_text() == "Create sensors and alerts for HAOS?"
+    assert ask.locator(".ask-line").inner_text().startswith("Its drive gets health sensors")
+    ask.get_by_role("button", name="Create").click()
+    line.wait_for(state="detached", timeout=10000)
+    posts = [c for c in STATE.calls if c[1] == "/core/api/config/config_entries/flow/flow123"]
+    assert posts and posts[0][2]["token"] == APP_TOKEN
+    assert not tab.errors, tab.errors
+
+
+def test_card_file_downloads(tab, app):
+    _loaded()
+    tab.load()
+    card = tab.card("self|HAOS-DISK-1")
+    card.wait_for(timeout=10000)
+    with tab.page.expect_download() as dl:
+        card.get_by_role("button", name="Download this card as a file").click()
+    assert dl.value.suggested_filename == "drive-Model-sda.json"
+    doc = json.loads(Path(dl.value.path()).read_text())
+    assert doc["drive"]["serial"] == "HAOS-DISK-1"
+    assert not tab.errors, tab.errors
+
+
+def test_install_card_closes_for_every_browser(browser, app):
+    STATE.reset()
+    first = Tab(browser, app.base)
+    try:
+        first.load()
+        card = first.page.locator("section.link-card")
+        card.wait_for(timeout=10000)
+        assert card.locator(".lc-title").inner_text() == "Get more out of SMART Sniffer"
+        card.get_by_role("button", name="Close").click()
+        card.wait_for(state="detached", timeout=5000)
+        assert not first.errors, first.errors
+    finally:
+        first.close()
+    other = Tab(browser, app.base)
+    try:
+        other.load()
+        other.page.wait_for_timeout(1200)
+        assert other.page.locator("section.link-card").count() == 0
+    finally:
+        other.close()
 
 
 def test_a_new_script_reaches_a_browser_that_saw_the_old_one(tab, static_dir):
@@ -243,205 +236,35 @@ def test_assets_are_versioned_and_revalidated(app, static_dir):
         pytest.fail("expected 304")
     except urllib.error.HTTPError as err:
         assert err.code == 304
+    # The pages of 0.3.x are gone with their routes.
+    for path in ("/agentic-access", "/agentic.html", "/agentic.js"):
+        try:
+            with urllib.request.urlopen(app.base + path) as resp:
+                assert b"agentic" not in resp.read().lower(), path  # the SPA fallback only
+        except urllib.error.HTTPError as err:
+            assert err.code == 404, path
 
 
-def test_check_answers_against_the_proxy(tab, app):
-    """Check by hand, through proxy.py's probe route: every outcome says so
-    in a line under the fields."""
-    other = _serve(agent_handler(AgentState(hostname="spare-01", drives=[simple_drive("sda", "SPARE-A")])))
-    stranger = _serve(agent_handler(AgentState(mode="notagent")))
-    try:
-        tab.load()
-        tab.page.get_by_role("button", name="Add a drive, or a replica for testing").click()
-        region = tab.page.get_by_role("region", name="Add", exact=True)
-        msg = region.locator(".check-msg")
-
-        def check(port: int, text: str) -> None:
-            region.get_by_label("Host or IP").fill("127.0.0.1")
-            region.get_by_label("Port", exact=True).nth(1).fill(str(port))
-            region.get_by_role("button", name="Check").click()
-            msg.filter(has_text=text).wait_for(timeout=10000)
-
-        spare = other.server_address[1]
-        check(spare, "Added 127.0.0.1 to the list, ticked.")
-        row = region.locator(".pick-row", has_text=f"127.0.0.1:{spare}")
-        assert row.locator("input").is_checked()
-        row.click()
-        check(spare, "127.0.0.1 is in the list above, ticked.")
-        assert row.locator("input").is_checked() and region.locator(".pick-row").count() >= 1
-        check(int(app.nas.split(":")[1]), "127.0.0.1 is already on the page.")
-        free = _free_port()
-        check(free, f"Nothing answered at 127.0.0.1:{free}.")
-        check(stranger.server_address[1], f"127.0.0.1:{stranger.server_address[1]} answered, but it is not a SMART Sniffer agent.")
-        assert not tab.errors, tab.errors
-    finally:
-        other.shutdown()
-        stranger.shutdown()
-
-
-def test_rename_reaches_home_assistant_and_reads_back(tab, app):
-    """A drive in Home Assistant: the page's rename goes through proxy.py's
-    websocket client to the fake Core, and a name set in Home Assistant
-    shows on the next refresh. The machine pill renames every card of it."""
-    info = json.load(urllib.request.urlopen(app.base + "/app/info"))
-    STATE.entries = [_entry("e-agent", f"SMART Sniffer ({info['hostname']}:{info['agent_port']})")]
-    STATE.devices = [_device("dev-haos", "e-agent", serial="HAOS-DISK-1")]
-    STATE.ws_mode, STATE.ws_commands = "ok", []
-    try:
-        tab.load()
-        card = tab.card("self|HAOS-DISK-1")
-        card.locator("a.exit").wait_for(timeout=10000)
-        card.locator(".t-name").dblclick()
-        card.locator("input.name-in").fill("Boot disk")
-        tab.page.keyboard.press("Enter")
-        tab.page.wait_for_function("() => document.querySelector('[data-card=\"self|HAOS-DISK-1\"] h3').textContent === 'Boot disk'")
-        tab.page.wait_for_timeout(500)
-        assert STATE.ws_commands and STATE.ws_commands[-1]["name_by_user"] == "Boot disk"
-        assert STATE.devices[0]["name_by_user"] == "Boot disk"
-        assert STATE.options["card_names"] == [{"card": "self|HAOS-DISK-1", "name": "Boot disk"}]
-        assert card.locator(".act-note").is_hidden()
-        # Renamed in Home Assistant: the page shows it after Refresh.
-        STATE.devices[0]["name_by_user"] = "Named in HA"
-        tab.page.get_by_role("button", name="Refresh").click()
-        tab.page.wait_for_function("() => document.querySelector('[data-card=\"self|HAOS-DISK-1\"] h3').textContent === 'Named in HA'")
-        card.locator(".chev").click()
-        assert card.locator(".c-model").inner_text().startswith("Model: ")
-        # Home Assistant refusing: the app keeps the name and says so.
-        STATE.ws_mode = "refuse"
-        STATE.devices[0]["name_by_user"] = None
-        tab.page.get_by_role("button", name="Refresh").click()
-        tab.page.wait_for_function("() => document.querySelector('[data-card=\"self|HAOS-DISK-1\"] h3').textContent === 'Boot disk'")
-        card.locator(".t-name").dblclick()
-        card.locator("input.name-in").fill("Second name")
-        tab.page.keyboard.press("Enter")
-        card.locator(".act-note").filter(has_text="Home Assistant did not take the name").wait_for(timeout=5000)
-        assert card.locator("h3.c-title").inner_text() == "Second name"
-        # The machine pill: every card of nas-01 follows.
-        nas = [tab.card(f"{app.nas}|{s}") for s in ("NAS-A", "NAS-B")]
-        nas[0].locator(".pill").dblclick()
-        nas[0].locator("input.name-in").fill("Basement")
-        tab.page.keyboard.press("Enter")
-        tab.page.wait_for_timeout(300)
-        assert [c.locator(".pill").inner_text() for c in nas] == ["BASEMENT", "BASEMENT"]
-        assert STATE.options["host_names"] == [{"host": app.nas, "name": "Basement"}]
-        tab.load()
-        tab.card(f"{app.nas}|NAS-B").locator(".pill").filter(has_text="BASEMENT").wait_for(timeout=10000)
-        assert not tab.errors, tab.errors
-    finally:
-        STATE.entries, STATE.devices, STATE.ws_mode = [], [], "ok"
-        STATE.options.pop("card_names", None)
-        STATE.options.pop("host_names", None)
-
-
-def test_threshold_accept_fills_and_save_writes(tab, app):
-    """Against the real proxy: Accept current readings only fills the
-    fields with what the proxy's accept would store, no request; Save is the
-    one write, a PUT, and the card is judged with it."""
-    drives = SELF.drives
-    SELF.drives = [simple_drive("sda", "HAOS-DISK-1", {"Reallocated_Sector_Ct": 7, "Current_Pending_Sector": 2})]
-    sent: list[tuple[str, str, str | None]] = []
-    tab.page.on("request", lambda r: "/thresholds" in r.url and sent.append((r.method, r.url, r.post_data)))
-    try:
-        tab.load()
-        card = tab.card("self|HAOS-DISK-1")
-        card.locator(".h-att").wait_for(timeout=10000)
-        card.locator(".chev").click()
-        card.get_by_role("button", name="Edit thresholds").click()
-        card.locator("table.thr-t").wait_for(timeout=10000)
-        field = {"Reallocated sectors": card.get_by_label("Threshold of Reallocated sectors, alert above"),
-                 "Pending sectors": card.get_by_label("Threshold of Pending sectors, alert above")}
-        assert [f.input_value() for f in field.values()] == ["0", "0"]
-        card.get_by_role("button", name="Accept current readings").click()
-        assert [f.input_value() for f in field.values()] == ["7", "2"]
-        assert card.locator(".thr-pending").inner_text() == "Not saved yet"
-        assert card.locator(".ask").count() == 0
-        tab.page.wait_for_timeout(300)
-        assert [s for s in sent if s[0] != "GET"] == []
-        # Reset only fills the defaults; still nothing sent.
-        card.get_by_role("button", name="Reset to defaults").click()
-        assert [f.input_value() for f in field.values()] == ["0", "0"]
-        assert card.locator(".thr-pending").inner_text() == ""
-        card.get_by_role("button", name="Accept current readings").click()
-        assert [s for s in sent if s[0] != "GET"] == []
-        # Save: one PUT with every field, and the card is OK now.
-        assert card.locator(".thr-btns button").last.inner_text() == "Save"
-        card.get_by_role("button", name="Save", exact=True).click()
-        card.locator(".h-ok").wait_for(timeout=10000)
-        writes = [s for s in sent if s[0] != "GET"]
-        assert len(writes) == 1 and writes[0][0] == "PUT" and writes[0][1].endswith("/thresholds")
-        values = json.loads(writes[0][2])["values"]
-        assert values["Reallocated Sector Count"] == 7 and values["Current Pending Sector Count"] == 2
-        assert {(o["label"], o["value"]) for o in STATE.options["thresholds"]} == {
-            ("Reallocated Sector Count", 7), ("Current Pending Sector Count", 2)}
-        assert card.locator("table.thr-t").count() == 0
-        assert not tab.errors, tab.errors
-    finally:
-        SELF.drives = drives
-        STATE.options.pop("thresholds", None)
-
-
-def test_threshold_edit_touches_only_its_card(tab, app):
-    """Against the real proxy: the thresholds are read when Details opens,
-    edit mode then makes no request, and going in and out of it leaves every
-    other card, the grid and the page as they were."""
-    drives = SELF.drives
-    SELF.drives = [simple_drive("sda", "HAOS-DISK-1", {"Reallocated_Sector_Ct": 7})]
-    gets: list[str] = []
-    tab.page.on("request", lambda r: "/thresholds" in r.url and r.method == "GET" and gets.append(r.url))
-    try:
-        tab.load()
-        cid = "self|HAOS-DISK-1"
-        card = tab.card(cid)
-        card.locator(".h-att").wait_for(timeout=10000)
-        for serial in ("NAS-A", "NAS-B"):
-            tab.card(f"{app.nas}|{serial}").wait_for(timeout=10000)
-        assert gets == []
-        card.locator(".chev").click()
-        tab.page.wait_for_function(f"() => Alpine.$data(document.body).thrCache[{json.dumps(cid)}]?.data",
-                                   timeout=10000)
-        assert len(gets) == 1
-        tab.page.evaluate(WATCH_OTHERS, cid)
-        card.get_by_role("button", name="Edit thresholds").click()
-        assert card.locator("table.thr-t").count() == 1
-        tab.page.wait_for_timeout(200)
-        card.get_by_role("button", name="Stop editing thresholds").click()
-        assert card.locator("table.thr-t").count() == 0
-        tab.page.wait_for_timeout(300)
-        assert tab.page.evaluate("window.__stop()") == []
-        assert len(gets) == 1
-        assert not tab.errors, tab.errors
-    finally:
-        SELF.drives = drives
-
-
-def test_agentic_access_from_the_footer(tab, app):
-    """The footer's Agentic access link opens the proxy's own page in a new
-    tab, its JSON parses and holds the fake agents, and no token is in it."""
+def test_page_answers_ingress_and_loopback_only(tab, app):
+    """The browser here is on loopback, as Home Assistant's ingress gateway is
+    in the app: the page loads. A client on the network (127.0.0.2 stands in
+    for one) gets 403 for the page, its scripts and every route."""
+    _loaded()
     tab.load()
-    tab.page.wait_for_selector('article.card[data-card="self|HAOS-DISK-1"]', timeout=10000)
-    tab.card(f"{app.nas}|NAS-A").wait_for(timeout=10000)
-    with tab.ctx.expect_page() as info:
-        tab.page.locator("footer.app-foot").get_by_role("link", name="Agentic access").click()
-    ax = info.value
-    ax.wait_for_selector("pre.ax-json")
-    assert ax.url == app.base + "/agentic-access"
-    text = ax.locator("pre.ax-json").inner_text()
-    doc = json.loads(text)
-    agents = {a["id"]: a for a in doc["agents"]}
-    assert list(agents)[0] == "self" and list(agents)[-1] == "replicas"
-    assert [d["data"]["serial"] for d in agents["self"]["drives"]] == ["HAOS-DISK-1"]
-    assert [d["data"]["serial"] for d in agents[app.nas]["drives"]] == ["NAS-A", "NAS-B"]
-    assert agents[app.nas]["has_token"] is True
-    for secret in (APP_TOKEN, FIELD_PASSWORD, TOKEN):
-        assert secret not in ax.content()
-    with ax.expect_download() as dl:
-        ax.get_by_role("button", name="Download").click()
-    assert dl.value.suggested_filename == f"smart-sniffer-{doc['generated_at'][:10]}.json"
+    tab.card("self|HAOS-DISK-1").wait_for(timeout=10000)
     assert not tab.errors, tab.errors
+    for path in ("/", "/cc.js", "/cc.css", "/app/info", "/api/health",
+                 "/fleet/hosts/self/drives", "/ha/integration"):
+        status, raw = raw_request(app.base, "GET", path, source="127.0.0.2")
+        assert status == 403, path
+        assert json.loads(raw)["error"] == "forbidden"
+    status, _ = raw_request(app.base, "POST", "/ha/add", b'{"target": "self"}', source="127.0.0.2")
+    assert status == 403
+    assert raw_request(app.base, "GET", "/")[0] == 200
 
 
 # Home Assistant slow, as when it is busy or just restarted: every /core/*
-# call answers late, and the lookup is cached 1 s.
+# call answers late.
 CORE_DELAY = 0.5
 
 
@@ -453,35 +276,29 @@ class SlowCoreSupervisor(FakeSupervisor):
 
 
 def test_drives_show_without_waiting_on_home_assistant(browser, static_dir):
-    """A page opened after the Home Assistant lookup went past its time
-    shows this machine's drives at once; the lookup is read behind them.
-    Before 0.3.1 the page waited for six slow Core calls (blank)."""
+    """This box's drives show at once; the integration's card follows when
+    Home Assistant answers."""
     STATE.reset()
+    STATE.entries = [_entry("e1", "SMART Sniffer (nas.lan:9099)")]
     slow = _serve(SlowCoreSupervisor)
     agent = _serve(agent_handler(SELF))
     work = Path(tempfile.mkdtemp(prefix="ss-slow-"))
     proc, client = _start_proxy([
         f"--agent-port={agent.server_address[1]}",
-        f"--mock-port={_free_port()}",
-        "--app-version=0.3.1",
+        "--app-version=0.4.0-dev",
         f"--rules-dir={RULES_DIR}",
         f"--supervisor-url=http://127.0.0.1:{slow.server_address[1]}",
-        f"--token={APP_TOKEN}",
         f"--data-dir={work}",
         f"--static-dir={static_dir}",
         "--ha-cache-seconds=1",
-    ], TOKEN)
+    ], TOKEN, APP_TOKEN)
     try:
-        # The first lookup after the app starts is read now.
-        with urllib.request.urlopen(client.base + "/fleet/hosts/self/drives", timeout=30) as resp:
-            assert json.loads(resp.read())["status"] == "ok"
-        time.sleep(1.3)  # now past its time
         t = Tab(browser, client.base)
         try:
             start = time.monotonic()
             t.load()
             t.page.wait_for_selector('article.card[data-card="self|HAOS-DISK-1"]', timeout=10000)
-            assert time.monotonic() - start < 1.5 + CORE_DELAY
+            assert time.monotonic() - start < 1.5
             assert not t.errors, t.errors
         finally:
             t.close()

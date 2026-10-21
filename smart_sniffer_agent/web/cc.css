@@ -53,7 +53,8 @@ img { display: block; }
 .head-side { display: flex; align-items: center; gap: 10px 18px; flex-wrap: wrap; }
 .versions { font-family: var(--mono); font-size: 0.76rem; color: var(--dim); display: flex; gap: 16px; }
 .versions b { color: var(--grey); font-weight: 500; }
-.head-tools { display: flex; gap: 8px; }
+/* The page name: "App", then "· HAOS" muted. */
+.page-name .pn-sub { color: var(--dim); }
 /* This app's agent: one quiet line under the header, its address and mDNS
    name each with a copy button. It wraps by whole items on a phone. */
 .agent-line { margin: 12px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; font-size: 0.76rem; color: var(--dim); }
@@ -214,6 +215,16 @@ button.exit { background: none; border: 0; padding: 0; cursor: pointer; font: in
 .scen:disabled { cursor: progress; color: var(--dim); }
 .scen option { background: var(--panel-2); color: var(--paper); }
 .c-vitals { font-family: var(--mono); font-size: 0.78rem; color: var(--grey); margin: 8px 0 0 18px; display: flex; flex-wrap: wrap; gap: 2px 16px; }
+/* A drive's stat row: a tiny uppercase label over each value, a hairline
+   between tiles. A missing value takes its tile away and the row closes up.
+   Tiles wrap whole; the hairline at the start of a line is clipped, so
+   there is never a separator with nothing before it. */
+.c-stats { margin: 8px 0 0 18px; overflow: hidden; }
+.st-row { display: flex; flex-wrap: wrap; row-gap: 6px; margin: 0 0 0 -9px; }
+.st-t { display: grid; padding: 0 8px; border-left: 1px solid var(--rule-2); min-width: 0; }
+.st-k { font: 600 0.58rem/1.25 var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+.st-v { margin: 0; font: 400 0.8rem/1.3 var(--mono); color: var(--paper); white-space: nowrap; }
+.st-v i { font-style: normal; color: var(--grey); }
 
 /* Disk space. No colour: a near-black track and a grey fill. Below 80% the
    figure sits outside; from 80% the percent sits inside a lighter fill in
@@ -313,7 +324,13 @@ table.attrs { width: 100%; border-collapse: collapse; font-family: var(--mono); 
 table.attrs th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--rule); background: var(--panel-2); font-family: var(--sans); }
 table.attrs td { padding: 2px 6px; color: var(--grey); border-bottom: 1px solid #151515; white-space: nowrap; vertical-align: top; }
 table.attrs td.nm, table.attrs th.nm { width: 100%; }
-table.attrs td.nm { white-space: normal; overflow-wrap: anywhere; }
+/* A name breaks only after an underscore (the page puts a <wbr> there) or
+   at a space, never inside a word: the name column takes the width its
+   longest piece needs and the value column gives way. */
+table.attrs td.nm { white-space: normal; overflow-wrap: break-word; }
+/* A very long raw value (an NVMe 128-bit counter, a list of numbers) wraps
+   in a box of its own width instead of widening the value column. */
+table.attrs td.c-raw .long { display: inline-block; width: 14ch; white-space: normal; overflow-wrap: anywhere; text-align: right; }
 table.attrs td.num, table.attrs th.num { text-align: right; }
 table.attrs tr.crit td { color: var(--att); font-weight: 600; }
 table.attrs tr.warn td { color: var(--maybe); font-weight: 600; }
@@ -336,11 +353,16 @@ table.attrs .raw-in { width: 96px; max-width: 96px; text-align: right; padding: 
                       background: transparent; color: inherit; font: inherit; line-height: inherit; cursor: text; }
 table.attrs .raw-in:hover { box-shadow: inset 0 -1px 0 var(--dim); }
 table.attrs .raw-in:focus { background: #000; color: var(--paper); border-radius: 3px; box-shadow: 0 0 0 1px var(--paper); }
-/* A one-column card or a phone: ID, Name, Value and Raw; long raw strings
-   wrap too. The Download keeps every column. */
+/* A one-column card or a phone: ID, Name, Value and Raw. A raw value of
+   20 characters or fewer stays on one line; a longer one wraps in its own
+   box (.long). The Download keeps every column. */
 @container (max-width: 459px) {
   table.attrs .c-worst, table.attrs .c-thresh { display: none; }
-  table.attrs td.c-raw { white-space: normal; }
+}
+/* The narrowest cards (three columns in a narrow window): tighter cells, so
+   a 20-character raw value still fits on its line. */
+@container (max-width: 299px) {
+  table.attrs th, table.attrs td { padding-left: 4px; padding-right: 4px; }
 }
 
 /* A field agent with nothing to show, and this app's agent not answering */
@@ -495,9 +517,16 @@ table.attrs .raw-in:focus { background: #000; color: var(--paper); border-radius
 @media (max-width: 760px) {
   .page { padding: 16px 16px 40px; }
   .brand .wordmark { width: 180px; }
-  .brand .page-name { display: none; }
   .head-side { width: 100%; justify-content: space-between; }
   .card.ghost { min-height: 140px; }
+  /* The page name stays on a phone, smaller, on its own line under the
+     wordmark (no rule before it), so the App and the Control Center still
+     tell themselves apart there. */
+  .page:not(.ax-page) > .app-head .brand { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center;
+                                           column-gap: 14px; row-gap: 3px; }
+  .page:not(.ax-page) > .app-head .brand .mark { grid-row: 1 / span 2; }
+  .page:not(.ax-page) > .app-head .brand .wordmark { align-self: end; }
+  .brand .page-name { align-self: start; font-size: 0.8rem; padding-left: 0; border-left: 0; }
 }
 /* Tap targets on touch screens: pad the buttons, not the glyphs */
 @media (pointer: coarse) {
@@ -545,8 +574,9 @@ table.attrs tr td.def { color: var(--dim); font-weight: 400; }
 /* A field changed but not saved: its text bold, in the main type. */
 table.attrs .thr-in.pending { color: var(--paper); font-weight: 700; }
 
-/* Connect by hand: what to type into the integration, each value with a
-   small copy button; quiet, in the summary area above the table. */
+/* Connect by hand: what to type into the integration; each value opens
+   the exact-number popover with Copy. Quiet, in the summary area above
+   the table. */
 .conn { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; font-size: 0.74rem; color: var(--dim);
         padding: 4px 0 5px; border-bottom: 1px solid #141414; min-width: 0; }
 .conn-h { color: var(--dim); flex-basis: 100%; }
@@ -565,17 +595,47 @@ table.attrs .thr-in.pending { color: var(--paper); font-weight: 700; }
 }
 
 /* ------------------------------------------------------------------
-   Agentic access (agentic.html): the whole data set as JSON. Dark like
-   the Control Center; the JSON block scrolls sideways, the page never.
+   App 0.4: this box only, read only. The card head keeps the title where
+   the grip left it; the Create line sits under DRIVES:; one card across
+   the grid leads to the integration's Control Center.
    ------------------------------------------------------------------ */
-.ax-page .brand { gap: 14px; }
-.ax-back { font-size: 0.95rem; color: var(--grey); }
-.ax-title { margin: 0; font-size: 0.95rem; font-weight: 600; color: var(--paper); padding-left: 14px; border-left: 1px solid var(--rule-2); line-height: 1.1; }
-.ax-lead { margin: 16px 0 0; font-size: 0.86rem; max-width: 82ch; }
-.ax-lead + .ax-lead { margin-top: 4px; }
-.ax-tools { margin: 16px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.ax-status { font-size: 0.74rem; color: var(--dim); }
-.ax-meta { margin: 12px 0 8px; font-size: 0.74rem; overflow-wrap: anywhere; }
-.ax-json { margin: 0; padding: 12px 14px; background: var(--panel); border: 1px solid var(--rule); border-radius: 3px;
-           font: 0.76rem/1.45 var(--mono); color: var(--grey); white-space: pre; overflow: auto; tab-size: 2;
-           max-width: 100%; max-height: 75vh; }
+.c-head.ro { grid-template-columns: minmax(0, 1fr) auto; padding-left: 18px; }
+.create { margin: 0 0 14px; }
+.create-line { margin: 0; font-size: 0.86rem; }
+.link-btn { background: none; border: 0; padding: 0; margin: 0; cursor: pointer; font: inherit; color: var(--paper);
+            text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
+.link-btn:hover, .link-btn[aria-expanded="true"] { text-decoration-color: var(--paper); }
+.create .ask { margin: 8px 0 0; max-width: 680px; }
+.card.link-card { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 20px;
+                  border-color: var(--rule); }
+.link-card .lc-text { flex: 1 1 22em; min-width: 0; }
+.link-card .lc-title { color: var(--paper); -webkit-line-clamp: unset; display: block; }
+.link-card .lc-body { margin: 4px 0 0; font-size: 0.86rem; color: var(--grey); max-width: 82ch; }
+.link-card .lc-act { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; }
+.link-card .lc-link { font-size: 0.86rem; color: var(--grey); }
+.link-card .lc-link:hover { color: var(--paper); }
+@media (max-width: 760px) {
+  .link-card .lc-act { margin-left: 0; }
+}
+
+/* A shown number with an exact one behind it (LBAs and data units as a
+   size, power-on hours as days, large counts): plain at rest. Where the
+   device can hover, hovering shows a dotted underline, the pointer and the
+   tooltip (its title); a click or tap opens the popover with the exact
+   number and Copy on every device. */
+.bign { white-space: nowrap; text-underline-offset: 3px; }
+@media (hover: hover) {
+  .bign:hover { cursor: pointer; text-decoration: underline dotted var(--dim); }
+}
+.bign:focus-visible { outline: 1px solid var(--grey); outline-offset: 2px; }
+/* The same for a text value (model, serial, firmware, host, port): it may
+   wrap like the text it replaces, and selects as text. */
+.bign.txt { white-space: normal; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+/* Device Statistics in Details: a small heading over a table in the
+   attribute table's style */
+.devstat { display: grid; gap: 4px; min-width: 0; }
+.sub-h { margin: 4px 0 0; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+.numpop { position: fixed; z-index: 45; display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  background: var(--panel-2); border: 1px solid var(--rule-2); border-radius: 4px; color: var(--paper);
+  font-size: 0.8rem; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6); max-width: calc(100vw - 16px); }
+.numpop .copied { color: var(--dim); }

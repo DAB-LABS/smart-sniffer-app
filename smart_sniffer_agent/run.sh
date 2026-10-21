@@ -4,26 +4,14 @@
 # ==============================================================================
 set -e
 
-APP_VERSION="0.3.1"
+APP_VERSION="0.4.0-dev"
 
 # ── Read configuration ───────────────────────────────────────────────────────
 PORT=$(bashio::config 'port')
 TOKEN=$(bashio::config 'token')
+bashio::var.has_value "${TOKEN}" || TOKEN=""
 SCAN_INTERVAL=$(bashio::config 'scan_interval')
-MOCK_PORT=$(bashio::config 'mock_port')
 INGRESS_PORT=8099
-
-# Replica files: the shipped ones are in the image, the user's own in /share
-# so they survive updates and can be dropped in over Samba or SSH.
-SHIPPED_REPLICAS="/opt/replicas"
-USER_REPLICAS="/share/smart-sniffer/replicas"
-
-# ── Validate configuration ───────────────────────────────────────────────────
-# The replica agent always runs, so the two ports must always differ.
-if [ "${PORT}" = "${MOCK_PORT}" ]; then
-    bashio::log.fatal "Replica agent port (${MOCK_PORT}) cannot be the same as agent port (${PORT})"
-    bashio::exit.nok
-fi
 
 # ── Preflight checks ────────────────────────────────────────────────────────
 bashio::log.info "Running preflight checks..."
@@ -154,11 +142,16 @@ fi
 # mounts.py writes that config from the mounts Home Assistant gives the app:
 # the data disk (/data, also after Move data disk) and USB drives under
 # /media. It is a snapshot, so a
-# drive plugged in later shows after an app restart. If it fails, the agent
-# starts without the config and disk space is off.
+# drive plugged in later shows after an app restart. If the mounts cannot be
+# read, disk space is off. The token option goes in the same config (root
+# only), handed to mounts.py in the environment so it is never on a command
+# line. If the config cannot be written, the agent starts without it, unless
+# a token is set: the agent never runs without the token it was given.
 AGENT_CONFIG="/data/agent-config.yaml"
 FS_COUNT=0
-if MOUNT_LINES="$(python3 /opt/mounts.py --out "${AGENT_CONFIG}" 2>&1)"; then
+MOUNTS_STATUS=0
+MOUNT_LINES="$(AGENT_TOKEN="${TOKEN}" python3 /opt/mounts.py --out "${AGENT_CONFIG}" 2>&1)" || MOUNTS_STATUS=$?
+if [ "${MOUNTS_STATUS}" -eq 0 ]; then
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         bashio::log.info "Disk space: ${line}"
@@ -167,88 +160,68 @@ if MOUNT_LINES="$(python3 /opt/mounts.py --out "${AGENT_CONFIG}" 2>&1)"; then
 else
     bashio::log.warning "Could not list the mounts. Disk space is off."
     bashio::log.warning "${MOUNT_LINES}"
-    AGENT_CONFIG=""
+    if [ "${MOUNTS_STATUS}" -ne 2 ]; then
+        AGENT_CONFIG=""
+        if bashio::var.has_value "${TOKEN}"; then
+            bashio::exit.nok "Could not write the agent config that holds the token. The agent is not started."
+        fi
+    fi
 fi
 
 # ── Start the real Go agent ──────────────────────────────────────────────────
 bashio::log.info "Starting SMART Sniffer agent on port ${PORT}..."
 
-AGENT_ARGS="--port=${PORT} --scan-interval=${SCAN_INTERVAL}s"
+# Arrays, quoted on use, so a value with spaces or glob characters stays one
+# argument. The token is in the agent config, never on the command line.
+AGENT_ARGS=("--port=${PORT}" "--scan-interval=${SCAN_INTERVAL}s")
 if [ -n "${AGENT_CONFIG}" ]; then
-    AGENT_ARGS="${AGENT_ARGS} --config=${AGENT_CONFIG}"
+    AGENT_ARGS+=("--config=${AGENT_CONFIG}")
 fi
 if [ -n "${MDNS_NAME}" ]; then
     # Only pass --mdns-name if the agent binary supports it (v0.4.28+)
     if /usr/bin/smartha-agent --help 2>&1 | grep -q "mdns-name"; then
-        AGENT_ARGS="${AGENT_ARGS} --mdns-name=${MDNS_NAME}"
+        AGENT_ARGS+=("--mdns-name=${MDNS_NAME}")
     else
         bashio::log.warning "Agent binary does not support --mdns-name (needs v0.4.28+). Using default mDNS name."
         MDNS_NAME=""
     fi
 fi
 if bashio::var.has_value "${TOKEN}"; then
-    AGENT_ARGS="${AGENT_ARGS} --token=${TOKEN}"
     AUTH_STATUS="enabled"
 else
     AUTH_STATUS="disabled"
 fi
 
-/usr/bin/smartha-agent ${AGENT_ARGS} &
+/usr/bin/smartha-agent "${AGENT_ARGS[@]}" &
 AGENT_PID=$!
 
-# ── Start the replica agent ──────────────────────────────────────────────────
-# The replica agent serves the replicas (drives that are not real) to the
-# Control Center and, once added, to the integration. It always runs. It is
-# started with --no-mdns: advertising it would show every user a discovered
-# card for a fake agent.
-if ! mkdir -p "${USER_REPLICAS}" 2>/dev/null; then
-    bashio::log.warning "Cannot create ${USER_REPLICAS}. Is /share mounted? Saving and uploading replicas is off."
-fi
-
-bashio::log.info "Starting the replica agent on port ${MOCK_PORT}..."
-# The replica agent comes from the smart-sniffer release (see the
-# Dockerfile). Each option is passed only when that version supports it, so
-# an older one still starts.
-MOCK_HELP="$(python3 /opt/mock-agent.py --help 2>&1 || true)"
-MOCK_ARGS="--port=${MOCK_PORT} --no-mdns"
-if echo "${MOCK_HELP}" | grep -q -- "--data-dir"; then
-    MOCK_ARGS="${MOCK_ARGS} --data-dir /data"
-else
-    bashio::log.warning "Replica agent does not support --data-dir. Replica edits will not survive a restart."
-fi
-if echo "${MOCK_HELP}" | grep -q -- "--user-replicas"; then
-    MOCK_ARGS="${MOCK_ARGS} --replicas ${SHIPPED_REPLICAS} --user-replicas ${USER_REPLICAS}"
-else
-    bashio::log.warning "Replica agent does not read replica files. Starting it with its built-in drives."
-    MOCK_ARGS="${MOCK_ARGS} --preload sata_hdd,sata_ssd,nvme,usb_blocked"
-fi
-python3 /opt/mock-agent.py ${MOCK_ARGS} &
-MOCK_PID=$!
-SHIPPED_COUNT=$(find "${SHIPPED_REPLICAS}" -maxdepth 1 -name '*.json' ! -name 'scenarios.json' 2>/dev/null | wc -l)
-USER_COUNT=$(find "${USER_REPLICAS}" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
+# ── Old replica data ─────────────────────────────────────────────────────────
+# Replicas moved into the SMART Sniffer integration and the replica agent of
+# 0.3.x is gone. Its state (/data/mock-drives.json, /data/mock-agent-id.json)
+# is left in place in this dev build, so going back to 0.3.1 keeps the
+# replicas; the release removes it. The user's own replica files in /share are
+# never touched (the app no longer maps /share).
 
 # ── Start the web UI proxy server ────────────────────────────────────────────
 bashio::log.info "Starting web UI proxy on port ${INGRESS_PORT}..."
 
 # SUPERVISOR_TOKEN is already in this environment (with-contenv) and the
-# proxy inherits it; it is never passed on the command line.
+# proxy inherits it; the agent token goes in AGENT_TOKEN. Neither is ever
+# passed on the command line.
 # The container's hostname is the name the integration connects to: the
 # app's slug with dashes, for example local-smart-sniffer-agent when the app
 # is installed as a local app. The page shows it and Add uses it.
 AGENT_HOST="$(hostname 2>/dev/null || true)"
-PROXY_ARGS="--port=${INGRESS_PORT} --agent-port=${PORT} --mock-port=${MOCK_PORT}"
-PROXY_ARGS="${PROXY_ARGS} --app-version=${APP_VERSION} --data-dir=/data"
+PROXY_ARGS=("--port=${INGRESS_PORT}" "--agent-port=${PORT}")
+PROXY_ARGS+=("--app-version=${APP_VERSION}" "--data-dir=/data")
 if [ -n "${AGENT_HOST}" ]; then
-    PROXY_ARGS="${PROXY_ARGS} --agent-host=${AGENT_HOST}"
+    PROXY_ARGS+=("--agent-host=${AGENT_HOST}")
 else
     bashio::log.warning "Could not read the container hostname. The Control Center will show the default host."
 fi
-PROXY_ARGS="${PROXY_ARGS} --mdns-name=${MDNS_NAME}"
-if bashio::var.has_value "${TOKEN}"; then
-    PROXY_ARGS="${PROXY_ARGS} --token=${TOKEN}"
-fi
+PROXY_ARGS+=("--mdns-name=${MDNS_NAME}")
 
-python3 /opt/web/proxy.py ${PROXY_ARGS} &
+AGENT_TOKEN="${TOKEN}" python3 /opt/web/proxy.py "${PROXY_ARGS[@]}" &
 WEBUI_PID=$!
 
 # ── Startup summary ─────────────────────────────────────────────────────────
@@ -258,7 +231,6 @@ bashio::log.info "Agent: running on port ${PORT}"
 bashio::log.info "Integration host: ${AGENT_HOST:-unknown}:${PORT}"
 bashio::log.info "mDNS: ${MDNS_NAME:-default (container hostname)}"
 bashio::log.info "Auth: ${AUTH_STATUS}"
-bashio::log.info "Replicas: agent on port ${MOCK_PORT}, ${SHIPPED_COUNT} shipped, ${USER_COUNT} in ${USER_REPLICAS}"
 bashio::log.info "Integration rules: $(cat /opt/ssrules/VERSION 2>/dev/null || echo 'not found')"
 bashio::log.info "Web UI: http://localhost:${INGRESS_PORT} (via ingress)"
 bashio::log.info "Drives detected: ${DRIVE_COUNT:-0}"
@@ -278,15 +250,6 @@ wait_and_monitor() {
         if ! kill -0 "${WEBUI_PID}" 2>/dev/null; then
             bashio::log.fatal "Web UI proxy (PID ${WEBUI_PID}) has died!"
             bashio::exit.nok
-        fi
-
-        # The replica agent: log and carry on, the real agent matters more
-        if [ -n "${MOCK_PID}" ]; then
-            if ! kill -0 "${MOCK_PID}" 2>/dev/null; then
-                bashio::log.warning "Replica agent (PID ${MOCK_PID}) has died. Replicas will be unavailable."
-                bashio::log.warning "The real agent continues to run. Restart the app to restore the replicas."
-                MOCK_PID=""  # Stop checking
-            fi
         fi
 
         sleep 5

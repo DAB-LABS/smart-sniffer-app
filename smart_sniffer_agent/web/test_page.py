@@ -1,4 +1,4 @@
-"""Page checks for the Control Center, run against devserver.py in Chromium.
+"""Page checks for the SMART Sniffer App page, run against devserver.py in Chromium.
 
 Development only, not part of the image. Needs pytest and Playwright, and the
 real Alpine and Tailwind files (the repo holds placeholders): put them in a
@@ -10,9 +10,10 @@ folder and set VENDOR_DIR.
                                   page-shots in the system's temp folder)
     SHOT_WIDTHS=1100,390          widths for the screenshots (default 1280,390)
 
-test_screenshots saves one picture per state of the card design, named by
-the state and the width: grid-1280.png is the whole grid at 1280 px. They are
-for looking at by eye; the other tests assert.
+test_screenshots saves one picture per state of the page, named by the
+state and the width: app-2-install-390.png is the page without the
+integration at 390 px. They are for looking at by eye; the other tests
+assert.
 """
 
 from __future__ import annotations
@@ -64,8 +65,8 @@ def server():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     env = dict(os.environ, QUIET="1", LATENCY="0.01")
-    for key in ("AGENT", "DRIVES", "VDISK", "RULES", "HA", "HA_LOOKUP", "HA_SELF", "ADD", "NETWORK", "SCAN",
-                "HOSTS", "POOL", "REPLICAS", "REPLICA_FOLDER", "HOSTNAME", "SLUG", "HA_VERSION", "MDNS"):
+    for key in ("AGENT", "DRIVES", "VDISK", "POOL", "RULES", "INTEGRATION", "HAOS_ENTRY", "PANEL_PATH",
+                "HACS", "ADD", "HOSTNAME", "SLUG", "HA_VERSION", "MDNS", "SELF_DELAY"):
         env.pop(key, None)
     proc = subprocess.Popen([sys.executable, str(WEB_DIR / "devserver.py"), "--port", str(port)], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -84,11 +85,13 @@ def server():
 class Page:
     """A page on the dev harness with a log of every request it made."""
 
-    def __init__(self, browser, server, flags: str = "", width: int = 1280):
+    def __init__(self, browser, server, flags: str = "", width: int = 1280, touch: bool = False):
         self.base = server
         self.flags = flags
         urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?{flags}", method="POST"), timeout=5)
-        self.ctx = browser.new_context(viewport={"width": width, "height": 900}, accept_downloads=True)
+        # touch: a phone (a touch screen that cannot hover).
+        self.ctx = browser.new_context(viewport={"width": width, "height": 900}, accept_downloads=True,
+                                       has_touch=touch, is_mobile=touch)
         self.page = self.ctx.new_page()
         self.requests: list[tuple[str, str, str | None]] = []
         self.errors: list[str] = []
@@ -97,6 +100,14 @@ class Page:
         self.page.goto(f"{server}/?{flags}")
         self.page.wait_for_function("() => window.Alpine && document.body._x_dataStack")
         self.page.wait_for_timeout(700)
+
+    def wait(self, fn, timeout: float = 8.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if fn():
+                return True
+            self.page.wait_for_timeout(50)
+        return False
 
     def api(self, method: str, path: str) -> list:
         return [r for r in self.requests if r[0] == method and re.search(path, r[1].split("?")[0])]
@@ -110,8 +121,8 @@ class Page:
 def open_page(browser, server):
     pages = []
 
-    def make(flags: str = "", width: int = 1280) -> Page:
-        p = Page(browser, server, flags, width)
+    def make(flags: str = "", width: int = 1280, touch: bool = False) -> Page:
+        p = Page(browser, server, flags, width, touch)
         pages.append(p)
         return p
 
@@ -132,33 +143,21 @@ def card_ids(p: Page) -> list:
     return p.page.eval_on_selector_all(".grid > article.card", "els => els.map((e) => e.dataset.card)")
 
 
-# Card ids of the harness's board world.
+def link_card(p: Page):
+    return p.page.locator("section.link-card")
+
+
+# Card ids of the harness's drives.
 NVME = "self|S5GXNF0R412233A"
 BARRACUDA = "self|ZFL0K7Q2"
-NAS = "10.0.10.20:9099"
-NAS_ATT = f"{NAS}|VK0ABCDE"
-NAS_MAYBE = f"{NAS}|VK0FGHIJ"
-NAS_USB = f"{NAS}|DD56419883961"
-NAS_POOL = f"{NAS}|pool:tank"
-NAS_FS = f"{NAS}|fs:fs-9daebfc0"
-STUDIO = "10.0.10.44:9099|0ba01c2d4e5f6a7b"
-BACKUP_PI = "10.0.10.52:9099"
-REP_FAILED = "replicas|MOCK-SATA-0001"
-REP_NVME = "replicas|MOCK-NVME-0001"
-REP_POOL = "replicas|pool:tank"
-NAS_OVER = f"{NAS}|ZA1B2C3D"  # in Home Assistant, 8 reallocated over its threshold of 5
-NAS_ACCEPTED = f"{NAS}|ZA1B2C3E"  # in Home Assistant, 2 reallocated within its threshold of 4
+RED = "self|WD-WCC7K1234567"
+POOL = "self|pool:tank"
 DIM = "rgb(143, 143, 143)"
-
-
-def last_is_plus(p: Page) -> bool:
-    return p.page.evaluate("""() => [...document.querySelector('.grid').children]
-        .filter((e) => e.tagName !== 'TEMPLATE').pop().classList.contains('ghost')""")
-
-
-def open_add(p: Page):
-    p.page.get_by_role("button", name="Add a drive, or a replica for testing").click()
-    p.page.wait_for_selector("[role=region][aria-label=Add]")
+HACS_REPO = ("https://my.home-assistant.io/redirect/hacs_repository/"
+             "?owner=DAB-LABS&repository=smart-sniffer&category=integration")
+HACS_DOCS = "https://hacs.xyz/docs/use/"
+SEE_ALL = "See all your machines in the SMART Sniffer Control Center"
+GET_MORE = "Get more out of SMART Sniffer"
 
 
 # ── Colour and text checks, run in the page ──────────────────────────────────
@@ -168,11 +167,11 @@ COLOUR_AUDIT = """
   const want = { att: 'rgb(204, 107, 99)', maybe: 'rgb(204, 159, 82)', ok: 'rgb(93, 163, 114)', blue: 'rgb(3, 169, 244)' };
   const allowed = {
     att: (el) => !!el.closest('.h-att, .h-fail b, .chev.attention, .hbox.attention, .agent-dot.down, .pw-row.crit .lb, .pw-row.crit .pw-val, '
-      + '.kv > div.crit .lb, .kv > div.crit .v, table.attrs tr.crit, .c-foot .icon.armed'),
+      + '.kv > div.crit .lb, .kv > div.crit .v, table.attrs tr.crit'),
     maybe: (el) => !!el.closest('.h-maybe, .chev.maybe, .hbox.maybe, .pw-row.warn .lb, .pw-row.warn .pw-val, '
       + '.kv > div.warn .lb, .kv > div.warn .v, table.attrs tr.warn'),
     ok: (el) => !!el.closest('.h-ok, .chev.ok, .hbox.ok, .agent-dot.up'),
-    blue: (el) => !!el.closest('.exit:not(.add)'),
+    blue: () => false,  // no exit icons on this page: nothing is blue
   };
   const bad = [];
   for (const el of document.body.querySelectorAll('*')) {
@@ -186,7 +185,6 @@ COLOUR_AUDIT = """
     for (const [name, rgb] of Object.entries(want)) {
       const hit = used.some((u) => u && u.startsWith(rgb));
       if (!hit) continue;
-      // A colour inherited by a wrapper that draws no text or box is not drawn.
       const drawn = cs.backgroundColor.startsWith(rgb) || used.slice(2).some((u) => u && u.startsWith(rgb))
         || (cs.color.startsWith(rgb) && [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()))
         || (el instanceof SVGElement);
@@ -205,8 +203,8 @@ def assert_colours(p: Page):
 
 def assert_no_dashes(p: Page):
     text = p.page.evaluate("document.body.innerText")
-    assert "\u2014" not in text and "\u2013" not in text, "an em-dash or en-dash in the page"
-    assert "\u2713" not in text and "\u2714" not in text, "a check mark in the page"
+    assert "—" not in text and "–" not in text, "an em-dash or en-dash in the page"
+    assert "✓" not in text and "✔" not in text, "a check mark in the page"
 
 
 def assert_no_scroll(p: Page):
@@ -214,8 +212,6 @@ def assert_no_scroll(p: Page):
     assert sw == vw, f"page is {sw} px wide at {vw} px"
 
 
-# Every visible element ends inside the viewport, unless an ancestor clips
-# or scrolls it (a wide table inside its wrapper, an ellipsis cell).
 OVERFLOW_AUDIT = """
 () => {
   const vw = document.documentElement.clientWidth;
@@ -228,7 +224,7 @@ OVERFLOW_AUDIT = """
   const out = [];
   for (const el of document.body.querySelectorAll('*')) {
     const r = el.getBoundingClientRect();
-    if (!r.width || !r.height || el.closest('#drag-layer')) continue;
+    if (!r.width || !r.height) continue;
     if ((r.right > vw + 0.5 || r.left < -0.5) && !clipped(el)) out.push(el.outerHTML.slice(0, 120));
   }
   return out;
@@ -265,1283 +261,262 @@ def health_words(p: Page) -> set:
 # ── Every switch set: colours, copy, width ───────────────────────────────────
 
 STATES = [
-    ("", {"Attention", "Maybe", "Health OK", "Health not known", "Health FAILED"}, (True, True)),
-    ("AGENT=down", {"Health not known", "Attention", "Maybe", "Health OK"}, (True, True)),
-    ("HA=not_installed", {"Attention", "Maybe", "Health OK"}, (False, True)),  # grey: the install guide
-    ("HA=unreachable", {"Attention", "Maybe", "Health OK"}, None),
-    ("HA_LOOKUP=entries_only", {"Attention", "Health OK"}, (True, True)),
-    ("HA_SELF=0&VDISK=1", {"Health not known", "Health OK", "Attention"}, (True, True)),
-    ("RULES=missing", {"Health not known"}, (True, True)),
-    ("POOL=degraded", {"Attention", "Maybe"}, (True, True)),
-    ("DRIVES=0", {"Attention", "Maybe"}, (True, True)),
-    ("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", {"Health OK"}, (False, True)),
+    ("", {"Attention", "Health OK"}),
+    ("DRIVES=mixed&POOL=degraded&VDISK=1", {"Attention", "Maybe", "Health OK", "Health not known"}),
+    ("AGENT=down", {"Attention", "Health OK"}),
+    ("INTEGRATION=missing", {"Attention", "Health OK"}),
+    ("INTEGRATION=missing&HACS=missing", {"Attention", "Health OK"}),
+    ("INTEGRATION=update", {"Attention", "Health OK"}),
+    ("INTEGRATION=no_entries", {"Attention", "Health OK"}),
+    ("INTEGRATION=restart", {"Attention", "Health OK"}),
+    ("INTEGRATION=panel_failed", {"Attention", "Health OK"}),
+    ("INTEGRATION=loaded&HAOS_ENTRY=0", {"Attention", "Health OK"}),
+    ("INTEGRATION=unreachable", {"Attention", "Health OK"}),
+    ("RULES=missing", {"Health not known"}),
+    ("DRIVES=0", set()),
 ]
 
 
-@pytest.mark.parametrize("flags,words,glyphs", STATES, ids=[s[0] or "board" for s in STATES])
-def test_state_rules(open_page, flags, words, glyphs):
-    """Health words, colours, exit icons, copy and phone width on each switch set."""
+@pytest.mark.parametrize("flags,words", STATES, ids=[s[0] or "board" for s in STATES])
+def test_state_rules(open_page, flags, words):
+    """Health words, colours, copy and phone width on each switch set,
+    Details closed and open."""
     for width in (1280, 390):
         p = open_page(flags, width)
         p.page.wait_for_timeout(300)
         assert words <= health_words(p), (words, health_words(p))
-        blue = p.page.locator("a.exit:visible").count()
-        grey = p.page.locator("button.exit.add:visible").count()
-        if glyphs is None:
-            assert blue == 0 and grey == 0
-        else:
-            assert (blue > 0, grey > 0) == glyphs, (blue, grey)
         assert p.page.locator("h2").count() == 0  # no section headings
-        assert_colours(p)
-        assert_no_dashes(p)
-        assert_no_scroll(p)
-        assert_inside_cards(p)
+        for check in (assert_colours, assert_no_dashes, assert_no_scroll, assert_inside_cards):
+            check(p)
         if width < 760:
             assert_no_overflow(p)
-        # Details open and the + card open must hold too.
-        for chev in p.page.locator(".chev").all()[:5]:
+        for chev in p.page.locator(".chev").all():
             chev.click()
-        open_add(p)
-        p.page.wait_for_timeout(600)
-        assert_colours(p)
-        assert_no_dashes(p)
-        assert_no_scroll(p)
-        assert_inside_cards(p)
+        p.page.wait_for_timeout(300)
+        for check in (assert_colours, assert_no_dashes, assert_no_scroll, assert_inside_cards):
+            check(p)
         if width < 760:
             assert_no_overflow(p)
 
 
-def test_colours(open_page):
+# ── This box only, read only ─────────────────────────────────────────────────
+
+def test_cards_are_this_box_read_only(open_page):
+    p = open_page("DRIVES=mixed&POOL=online&VDISK=1")
+    ids = card_ids(p)
+    assert ids[:3] == [NVME, BARRACUDA, RED] and POOL in ids
+    assert all(i.startswith("self|") for i in ids), ids
+    # Every pill is HAOS, fixed: no rename on it, never a ghost.
+    pills = p.page.locator("article.card .pill")
+    assert set(pills.all_inner_texts()) == {"HAOS"}
+    for pill in pills.all():
+        assert pill.get_attribute("tabindex") is None and pill.get_attribute("role") is None
+    assert p.page.locator(".pill-ghost, .pill-ed").count() == 0
+    # Omitted on each card: grip, rename, exit icon, eye, trash, tune and
+    # the thresholds view, Save as replica.
+    for gone in (".grip", ".t-name", "input.name-in", ".exit", ".exit-slot", ".icon.trash", ".rm-set",
+                 ".tune", ".thr", "input.raw-in", "select.scen"):
+        assert p.page.locator(gone).count() == 0, gone
+    assert p.page.get_by_role("button", name=re.compile("Hide|Remove|Save as replica|Edit thresholds")).count() == 0
+    # Omitted on the page: the + card, the hidden-cards eye, other machines.
+    assert p.page.locator(".card.ghost, .card.ghost-open, .eye-btn, #drag-layer").count() == 0
+    assert p.page.get_by_text("Add a drive, or a replica for testing").count() == 0
+    # Kept: the title is the model, Details opens, the download icon.
+    assert by_id(p, NVME).locator("h3.c-title").inner_text() == "Samsung SSD 980 PRO 1TB"
+    for cid in (NVME, BARRACUDA, POOL):
+        icon = by_id(p, cid).get_by_role("button", name="Download this card as a file")
+        assert icon.count() == 1 and icon.get_attribute("title") == "Download as a file"
+    # A filesystem card has no health line and no download.
+    fs = p.page.locator("article.card", has=p.page.locator(".c-where", has_text="Filesystem"))
+    assert fs.count() == 0 or fs.first.locator(".c-health, .icons button").count() == 0
+    # Editing anything is never asked of the proxy.
+    for chev in p.page.locator(".chev").all():
+        chev.click()
+    p.page.wait_for_timeout(300)
+    writes = [r for r in p.requests if r[0] in ("PUT", "PATCH", "DELETE")]
+    assert writes == []
+    assert not p.api("GET", r"/(cards|fleet/hosts|ha/devices|replicas)$")
+    assert not p.api("GET", r"/thresholds$")
+
+
+def test_title_and_where_line_where_the_grip_left_them(open_page):
+    # The read-only head keeps the title at the grip's old offset, in line
+    # with the where line and the stat row's labels under it.
     p = open_page()
-    colours = p.page.evaluate("""() => Object.fromEntries(['.h-ok', '.h-att', '.h-maybe', '.h-fail b',
-        '.chev.attention', '.chev.maybe', '.chev.ok', 'a.exit']
-        .map((s) => [s, getComputedStyle(document.querySelector(s)).color]))""")
-    assert colours == {".h-ok": OK, ".h-att": ATT, ".h-maybe": MAYBE, ".h-fail b": ATT,
-                       ".chev.attention": ATT, ".chev.maybe": MAYBE, ".chev.ok": OK, "a.exit": BLUE}
-    assert p.page.evaluate("getComputedStyle(document.querySelector('button.exit.add')).color") != BLUE
-    # The health box: a 1 px frame in the state colour at 25%, all the way
-    # round, and no fill; Health not known is grey (#8f8f8f) at 25%, dashed.
-    for cid, style, frame in ((NAS_ATT, "solid", "rgba(204, 107, 99, 0.25)"),
-                              (NAS_MAYBE, "solid", "rgba(204, 159, 82, 0.25)"),
-                              (NVME, "solid", "rgba(93, 163, 114, 0.25)"),
-                              (NAS_USB, "dashed", "rgba(143, 143, 143, 0.25)")):
-        assert by_id(p, cid).locator(".hbox").evaluate("e => getComputedStyle(e).backgroundColor") == "rgba(0, 0, 0, 0)", cid
-        box = by_id(p, cid).locator(".hbox").evaluate(BOX_STROKE)
-        assert box == [[frame, "1px", style]] * 4, (cid, box)
-    # The words in the box keep their full colour.
-    assert by_id(p, NAS_ATT).locator(".hbox .h-att").evaluate("e => getComputedStyle(e).color") == ATT
-    assert by_id(p, NAS_MAYBE).locator(".hbox .h-maybe").evaluate("e => getComputedStyle(e).color") == MAYBE
+    c = by_id(p, BARRACUDA)
+    title = c.locator("h3.c-title").bounding_box()["x"]
+    where = c.locator(".c-where").bounding_box()["x"]
+    vitals = c.locator(".c-stats .st-k").first.bounding_box()["x"]
+    edge = c.bounding_box()["x"]
+    assert abs(title - where) < 1 and abs(where - vitals) < 1, (title, where, vitals)
+    assert 30 < title - edge < 36, title - edge  # 1 px border, 14 px padding, 18 px
+
+
+def test_health_box_and_details(open_page):
+    p = open_page("DRIVES=mixed")
+    att = by_id(p, BARRACUDA)
+    box = att.locator(".hbox")
+    assert box.count() == 1 and box.locator(".c-health .h-att").count() == 1
+    assert box.locator(".pw-row").count() == 3 and box.locator(".pw-more").inner_text() == "and 1 more"
+    assert box.locator(".pw-row").first.inner_text().replace("\n", " ").startswith("Reallocated sectors (expected 0)")
+    maybe = by_id(p, RED)
+    assert maybe.locator(".h-maybe").count() == 1
+    assert maybe.locator(".pw-row.warn .lb").evaluate("e => getComputedStyle(e).color") == MAYBE
     assert by_id(p, NVME).locator(".hbox .h-ok").evaluate("e => getComputedStyle(e).color") == OK
-    # A flagged row's label and value are in its state colour; its note is not.
-    for mark, rgb, cid in (("crit", ATT, NAS_ATT), ("warn", MAYBE, NAS_MAYBE)):
-        row = by_id(p, cid).locator(f".pw-row.{mark}").first
-        assert row.locator(".lb").evaluate("e => getComputedStyle(e).color") == rgb
-        assert row.locator(".pw-val").evaluate("e => getComputedStyle(e).color") == rgb
-        assert row.locator("small").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
-    assert p.page.locator(".mk, .pw-row .mark").count() == 0
-    # Pills and the health box have sharp corners; cards round ones.
-    radii = p.page.evaluate("""() => ['.pill', '.hbox', '.card'].map((s) =>
-        getComputedStyle(document.querySelector(s)).borderTopLeftRadius)""")
-    assert radii[0] == "0px" and radii[1] == "0px" and radii[2] != "0px"
-
-
-BOX_STROKE = """e => ['Top', 'Right', 'Bottom', 'Left'].map((s) => {
-  const cs = getComputedStyle(e);
-  return [cs['border' + s + 'Color'], cs['border' + s + 'Width'], cs['border' + s + 'Style']];
-})"""
-
-# Elements inside a card's health box that scroll, or would.
-BOX_SCROLLERS = """els => els.flatMap((b) => [b, ...b.querySelectorAll('*')])
-  .filter((e) => { const cs = getComputedStyle(e);
-    return ['auto', 'scroll'].includes(cs.overflowX) || ['auto', 'scroll'].includes(cs.overflowY)
-      || e.scrollHeight > e.clientHeight + 1 && cs.overflowY !== 'visible'; })
-  .map((e) => e.outerHTML.slice(0, 80))"""
-
-
-def test_health_box(open_page):
-    """One framed box: health line and chevron, three rows and "and N more" closed, Details open."""
-    for width in (1280, 390):
-        p = open_page("", width)
-        att = by_id(p, NAS_ATT)
-        box = att.locator(".hbox")
-        assert box.count() == 1
-        # The health line and the chevron are in the box, the chevron at its top right.
-        assert box.locator(".c-health .h-att").count() == 1 and box.locator(".c-health .chev").count() == 1
-        b, ch = box.bounding_box(), box.locator(".chev").bounding_box()
-        assert b["x"] + b["width"] - (ch["x"] + ch["width"]) < 16 and ch["y"] - b["y"] < 16, (b, ch)
-        # Closed: the first three of five problem rows, then "and 2 more", muted.
-        assert box.locator(".pw-row").count() == 3
-        assert box.locator(".pw-row").first.inner_text().replace("\n", " ").startswith("Reallocated sectors (expected 0)")
-        more = box.locator(".pw-more")
-        assert more.inner_text() == "and 2 more"
-        assert more.evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE, OK)
-        # A card with three problem rows or fewer has no "and N more".
-        maybe = by_id(p, NAS_MAYBE)
-        assert 1 <= maybe.locator(".hbox .pw-row").count() <= 3 and maybe.locator(".pw-more").count() == 0
-        # A healthy card's box holds just Health OK and the chevron.
-        ok = by_id(p, NVME).locator(".hbox")
-        assert ok.locator(".pw, .pw-row, .details").count() == 0
-        assert ok.locator(".c-health").inner_text().strip() == "Health OK" and ok.locator(".chev").count() == 1
-        # Nothing in any box scrolls, closed.
-        assert p.page.eval_on_selector_all(".hbox", BOX_SCROLLERS) == []
-        # "and N more" opens Details, inside the same bordered element.
-        handle = box.element_handle()
-        more.click()
-        p.page.wait_for_timeout(200)
-        assert att.locator(".chev").get_attribute("aria-expanded") == "true"
-        assert att.locator(".hbox").count() == 1
-        assert att.locator(".hbox").evaluate("(e, h) => e === h", handle)
-        assert att.locator(".hbox .details table.attrs tr.crit").count() >= 3
-        assert att.locator(".hbox .details table.attrs").count() == 1
-        assert att.locator(".details").evaluate("e => !!e.closest('.hbox')")
-        assert att.locator(".hbox .pw").count() == 0
-        # Open, the frame goes all the way round everything in Details.
-        b = att.locator(".hbox").bounding_box()
-        for el in att.locator(".hbox .details > :not(template)").all():
-            r = el.bounding_box()
-            assert r["x"] >= b["x"] and r["x"] + r["width"] <= b["x"] + b["width"] + 0.5, (r, b)
-            assert r["y"] >= b["y"] and r["y"] + r["height"] <= b["y"] + b["height"] + 0.5, (r, b)
-        assert att.locator(".hbox").evaluate(BOX_STROKE)[0][0] == "rgba(204, 107, 99, 0.25)"
-        # Open, there is still no fill.
-        assert att.locator(".hbox").evaluate("e => getComputedStyle(e).backgroundColor") == "rgba(0, 0, 0, 0)"
-        # Open every box: still nothing scrolls.
-        closed = p.page.locator(".chev[aria-expanded=false]")
-        while closed.count():
-            closed.first.click()
-        p.page.wait_for_timeout(200)
-        assert p.page.eval_on_selector_all(".hbox", BOX_SCROLLERS) == []
-        # And closed again, back to three rows and the line.
-        att.locator(".chev").click()
-        assert att.locator(".hbox .pw-row").count() == 3 and att.locator(".hbox .pw-more").count() == 1
-        # No box on a FILESYSTEM card, the placeholder or this app's agent down.
-        assert by_id(p, NAS_FS).locator(".hbox").count() == 0
-        assert by_id(p, BACKUP_PI).locator(".hbox").count() == 0
-        # Health FAILED stays next to Attention, in the box.
-        assert by_id(p, REP_FAILED).locator(".hbox .c-health .h-fail").count() == 1
-
-
-BOX_BOTTOMS = """els => els.map((c) => {
-  const box = c.querySelector('.hbox'), rule = c.querySelector('.c-foot');
-  if (!box) return null;
-  const b = box.getBoundingClientRect(), r = rule.getBoundingClientRect(), top = c.querySelector('.c-head').getBoundingClientRect();
-  return { state: box.className, bottom: b.bottom, rule: r.top, head: top.top - c.getBoundingClientRect().top };
-})"""
-
-
-@pytest.mark.parametrize("width", [1280, 390])
-def test_health_box_sits_on_footer(open_page, width):
-    """The health box ends on the footer rule; spare height goes above it, the top rows stay at the top."""
-    p = open_page("", width)
-    cards = p.page.eval_on_selector_all(".grid > article.card", BOX_BOTTOMS)
-    first = by_id(p, NVME).evaluate("e => e.getBoundingClientRect().top")
-    row = [c for c, top in zip(cards, p.page.eval_on_selector_all(
-        ".grid > article.card", "els => els.map((e) => e.getBoundingClientRect().top)")) if abs(top - first) < 1]
-    boxes = [c for c in row if c]
-    for c in boxes:
-        assert 0 <= c["rule"] - c["bottom"] <= 8, c
-        assert c["head"] < 16, c
-    if width == 1280:
-        # Mixed states in one grid row: Health OK and a five-line Attention share one bottom edge.
-        states = {c["state"].split()[-1] for c in boxes}
-        assert len(boxes) == 3 and {"ok", "attention"} <= states, boxes
-        assert max(c["bottom"] for c in boxes) - min(c["bottom"] for c in boxes) <= 1, boxes
-    else:
-        # One column: every card's box sits on its own footer rule.
-        assert all(0 <= c["rule"] - c["bottom"] <= 8 for c in cards if c), cards
-    # Open, the box still ends on the footer rule.
-    att = by_id(p, NAS_ATT)
-    att.locator(".chev").click()
+    att.locator(".pw-more").click()
     p.page.wait_for_timeout(200)
-    b, r = att.locator(".hbox").bounding_box(), att.locator(".c-foot").bounding_box()
-    assert 0 <= r["y"] - (b["y"] + b["height"]) <= 8, (b, r)
-    # Cards with no box keep their content at the top and the footer at the bottom.
-    for cid in (NAS_FS, BACKUP_PI):
-        card, foot = by_id(p, cid).bounding_box(), by_id(p, cid).locator(".c-foot").bounding_box()
-        assert card["y"] + card["height"] - (foot["y"] + foot["height"]) < 16, (cid, card, foot)
-        assert by_id(p, cid).locator(".c-head").bounding_box()["y"] - card["y"] < 16, cid
+    det = att.locator(".hbox .details")
+    assert det.locator(".kv dt .lb").all_inner_texts() == ["Model", "Serial", "Firmware", "Capacity", "Interface"]
+    assert "Data Read" not in det.inner_text() and "not applicable" not in det.inner_text()
+    assert det.locator("table.attrs").count() == 1
+    assert det.locator("thead th").all_inner_texts() == ["ID", "Name", "Value", "Worst", "Thresh", "Raw"]
+    flagged = sorted(t.split()[0] for t in det.locator("tbody tr.crit").all_inner_texts())
+    assert flagged == ["187", "197", "198", "5"], flagged
+    # Raw values are text, never inputs.
+    assert det.locator("input").count() == 0
+    heads = dict(det.locator("thead th").evaluate_all("els => els.map((e) => [e.textContent, e.title])"))
+    assert heads["Raw"] == "The real count or reading. Alerts use this"
+    # Connect by hand stays in Details, with this box's address.
+    rows = det.locator(".conn .cp").evaluate_all(
+        "els => els.map((e) => [e.querySelector('.cp-k').textContent, e.querySelector('.cp-v').textContent])")
+    assert rows == [["Host", "local-smart-sniffer-agent"], ["Port", "9099"], ["mDNS", "smartha-homeassistant"]]
+    # The NVMe health log is its table.
+    nv = by_id(p, NVME)
+    nv.locator(".chev").click()
+    assert nv.locator(".details thead th").all_inner_texts() == ["Name", "Value"]
+    # Closed again, the problem rows come back.
+    att.locator(".chev").click()
+    assert att.locator(".hbox .pw-row").count() == 3
 
 
-TABLE_ROWS = """t => [...t.querySelectorAll('tbody tr')].map((r) => [r.className,
-  ...[...r.cells].filter((c) => getComputedStyle(c).display !== 'none').map((c) => c.innerText.trim())])"""
 
-
-def test_details_one_table_with_flags(open_page):
-    """Details: a short summary, then one table; flagged rows in the state colour, notes muted after the name."""
-    p = open_page()
-    att = by_id(p, NAS_ATT)
+def test_big_numbers_read_cleanly_with_the_exact_one_behind(open_page):
+    """LBAs and NVMe data units as a size, power-on hours as days, other
+    large counts compact; the exact number in the tooltip and in a popover
+    on click or tap, with Copy. Only what is shown changes."""
+    p = open_page("DRIVES=mixed")
+    att = by_id(p, BARRACUDA)
+    assert re.search(r"\b\d[\d,]* d\b", att.locator(".c-stats").inner_text())
     att.locator(".chev").click()
     det = att.locator(".details")
-    # The summary keeps Data Read and Device Statistics; no watched list.
-    assert det.locator(".kv dt .lb").all_inner_texts() == ["Data Read", "Device Statistics"]
-    assert det.locator("table").count() == 1 and det.locator(".table-wrap").count() == 1
-    heads = det.locator("thead th").all_inner_texts()
-    assert heads == ["ID", "Name", "Value", "Worst", "Thresh", "Raw"], heads
-    rows = det.locator("table.attrs").evaluate(TABLE_ROWS)
-    flagged = {r[1]: r for r in rows if r[0] in ("crit", "warn")}
-    assert sorted(flagged) == ["187", "188", "197", "198", "5"], flagged
-    assert flagged["5"][0] == "crit" and flagged["188"][0] == "warn"
-    assert flagged["5"][2] == "Reallocated_Sector_Ct (expected 0)" and flagged["5"][-1] == "24"
-    assert flagged["188"][2] == "Command_Timeout (warns above 100)"
-    # Each reading appears once: no name twice in the table.
-    names = [r[2].split(" (")[0] for r in rows]
-    assert len(names) == len(set(names)), names
-    for mark, rgb in (("crit", ATT), ("warn", MAYBE)):
-        for row in det.locator(f"tbody tr.{mark}").all():
-            # Name and Raw in the state colour, Value too at a lighter
-            # weight; Worst and Thresh stay muted.
-            cells = row.evaluate("""r => Object.fromEntries([...r.cells].map((c) => [c.className.replace('num ', ''),
-              [getComputedStyle(c).color, getComputedStyle(c).fontWeight]]))""")
-            assert cells["nm"] == [rgb, "600"] and cells["c-raw"] == [rgb, "600"], cells
-            if "c-val" in cells and row.locator("td.c-val").inner_text():
-                assert cells["c-val"] == [rgb, "400"], cells
-            for col in ("c-worst", "c-thresh"):
-                if col in cells:
-                    assert cells[col][0] == "rgb(143, 143, 143)", cells
-            assert row.locator("td.nm .lb").evaluate("e => getComputedStyle(e).color") == rgb
-            assert row.locator("td.nm small").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
-            # The note sits right after the name, never in a number cell.
-            assert row.locator("td:not(.nm) small").count() == 0
-    plain = det.locator("tbody tr:not(.crit):not(.warn)").first
-    assert plain.locator("td.c-raw").evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE)
-    assert_colours(p)
-
-
-def test_details_gap_rows_and_nvme(open_page):
-    p = open_page("REPLICAS=carried")
-    ds = by_id(p, "replicas|MOCK-DS-9JG0X1")
-    ds.locator(".chev").click()
-    rows = ds.locator("table.attrs").evaluate(TABLE_ROWS)
-    # A watched attribute the drive does not report: its own row, "not reported" muted in Raw.
-    gap = next(r for r in rows if r[1] == "187")
-    assert gap[2] == "Reported uncorrectable (no attribute 187)" and gap[-1] == "not reported", gap
-    na = ds.locator("tbody tr", has_text="Reported uncorrectable").locator("td.c-raw .na")
-    assert na.evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE, OK)
-    # The Device Statistics reading that stands in for it follows, flagged.
-    after = rows[rows.index(gap) + 1]
-    assert after[0] == "crit" and after[2] == "Uncorrectable, page 4 (expected 0, from device statistics)", after
-    assert ds.locator("tbody tr.crit input.raw-in").input_value() == "18"
-    assert ds.locator("table").count() == 1
-    # An NVMe drive: its health log is the table, Name and Value, with the same flags.
-    nv = by_id(p, REP_NVME)
+    det.locator("table.attrs").wait_for()
+    poh = det.locator("tr", has_text="Power_On_Hours").locator("td.c-raw .bign")
+    assert poh.inner_text().endswith(" d") and poh.get_attribute("title").endswith(" hours")
+    lba = det.locator("tr", has_text="LBAs").locator("td.c-raw .bign")
+    if lba.count():
+        assert lba.first.inner_text().endswith(("TB", "GB", "MB")) and "LBAs" in lba.first.get_attribute("title")
+    poh.click()
+    pop = p.page.locator(".numpop")
+    pop.wait_for()
+    assert "hours" in pop.inner_text() and pop.get_by_role("button", name="Copy").count() == 1
+    # The header's copy glyph, not a word.
+    assert pop.locator("button.copy svg use").get_attribute("href") == "#copy"
+    assert pop.locator("button.copy").inner_text().strip() == ""
+    p.page.keyboard.press("Escape")
+    p.page.wait_for_timeout(100)
+    assert pop.count() == 0
+    nv = by_id(p, NVME)
     nv.locator(".chev").click()
-    assert nv.locator(".details table").count() == 1
-    assert nv.locator(".details thead th").all_inner_texts() == ["Name", "Value"]
-    hit = nv.locator("tbody tr.warn")
-    assert hit.count() == 1 and hit.locator("td.nm").inner_text() == "available_spare (warns below 20%)"
-    assert hit.locator("td.nm .lb").evaluate("e => getComputedStyle(e).color") == MAYBE
-    # Replica inputs stay narrow.
-    widths = p.page.eval_on_selector_all("input.raw-in", "els => els.map((e) => e.getBoundingClientRect().width)")
-    assert widths and max(widths) <= 96.5, widths
-    # Pools keep their per-disk table.
-    pool = by_id(p, REP_POOL)
+    units = nv.locator("tr", has_text="data_units_written").locator("td.c-raw .bign")
+    if units.count():
+        assert units.inner_text().endswith(("TB", "GB", "MB")) and "data units" in units.get_attribute("title")
+
+def test_pool_card(open_page):
+    p = open_page("POOL=degraded")
+    pool = by_id(p, POOL)
+    assert pool.locator(".c-where").inner_text().split("\n")[0].strip() == "ZFS pool"
+    assert pool.locator(".h-att").count() == 1
+    assert "FAULTED" in pool.locator(".pw").inner_text()
     pool.locator(".chev").click()
     assert pool.locator(".details thead th").all_inner_texts()[:2] == ["Disk", "State"]
 
 
-def test_notes_follow_labels(open_page):
+def test_space_bars(open_page):
     p = open_page()
-    nas = by_id(p, NAS_ATT)
-    assert nas.locator(".pw-row").first.locator(".pw-label").inner_text() == "Reallocated sectors (expected 0)"
-    assert nas.locator(".pw-row").first.locator(".pw-val").inner_text().replace(",", "").isdigit()
-    pw_vals = p.page.locator(".pw-val").all_inner_texts()
-    assert pw_vals and not [v for v in pw_vals if "(" in v or "expected" in v], pw_vals
-    for chev in p.page.locator(".chev").all():
-        chev.click()
-    p.page.wait_for_timeout(200)
-    # No note, bracket or small text ever sits in a value cell.
-    assert p.page.locator(".kv dd small").count() == 0
-    values = p.page.locator(".kv dd").all_inner_texts()
-    assert values and not [v for v in values if "(" in v or "from " in v or "expected" in v], values
-    # Every note is in the label cell, right after the label.
-    notes = p.page.evaluate("""() => [...document.querySelectorAll('.kv dt small')]
-        .map((s) => {
-          let prev = s.previousElementSibling;
-          while (prev && prev.tagName === 'TEMPLATE') prev = prev.previousElementSibling;
-          return [!!prev && prev.classList.contains('lb'), s.textContent];
-        })""")
-    assert notes and all(ok and t.startswith(" (") and t.endswith(")") for ok, t in notes), notes
-    read = by_id(p, NVME).locator(".kv > div", has_text="Data Read")
-    assert read.locator("dt").inner_text() == "Data Read (from the NVMe log)"
-    assert re.fullmatch(r"[\d.]+ [KMGTP]?B", read.locator("dd").inner_text()), read.locator("dd").inner_text()
-    stats = by_id(p, NVME).locator(".kv > div", has_text="Device Statistics")
-    assert stats.locator("dt").inner_text() == "Device Statistics (NVMe)"
-    assert stats.locator("dd").inner_text() == "not applicable"
+    rows = by_id(p, NVME).locator(".sp-row")
+    assert rows.count() == 2
+    assert rows.first.locator(".sp-text").inner_text() == "41% of 980 GB"
 
 
-def test_chevron_size_and_stroke(open_page):
-    p = open_page()
-    box = p.page.locator(".chev svg").first.bounding_box()
-    # 80% of the 17.6 by 10.4 it was.
-    assert abs(box["width"] - 17.6 * 0.8) < 0.05 and abs(box["height"] - 10.4 * 0.8) < 0.05, box
-    # The 20 by 12 viewBox scales by the smaller factor; the drawn line is one
-    # pixel heavier than the 2.75 units at 10.4 / 12 it was.
-    sw = p.page.locator(".chev svg").first.evaluate("e => parseFloat(getComputedStyle(e).strokeWidth)")
-    scale = min(box["width"] / 20, box["height"] / 12)
-    assert abs(sw * scale - (2.75 * 10.4 / 12 + 1)) < 0.01, (sw, scale)
-
-
-# ── The grid ─────────────────────────────────────────────────────────────────
-
-def test_one_grid_of_cards(open_page):
-    p = open_page()
-    assert p.page.locator(".grid").count() == 1
-    ids = card_ids(p)
-    assert ids[:2] == [NVME, BARRACUDA]
-    # 2 HAOS, 6 drives, a pool and a filesystem from nas-01, 1 unreachable,
-    # 1 placeholder, 3 replicas.
-    assert len(ids) == 15
-    assert {NAS_ATT, NAS_POOL, NAS_FS, STUDIO, BACKUP_PI, REP_FAILED, REP_NVME, REP_POOL} <= set(ids)
-    pills = {cid: by_id(p, cid).locator(".pill").inner_text() for cid in
-             (NVME, NAS_ATT, NAS_POOL, NAS_FS, BACKUP_PI, REP_FAILED, REP_POOL)}
-    # Every pill names the machine; a pool or filesystem card says what it
-    # is first on the line under its title.
-    assert pills == {NVME: "HAOS", NAS_ATT: "NAS-01", NAS_POOL: "NAS-01", NAS_FS: "NAS-01",
-                     BACKUP_PI: "BACKUP-PI", REP_FAILED: "REPLICA", REP_POOL: "REPLICA"}
-    def where(cid):
-        return by_id(p, cid).locator(".c-where span:not(.scen-box):not(.scen-size)").all_inner_texts()
-
-    assert where(NAS_POOL)[0] == "ZFS pool" and where(NAS_FS)[0] == "Filesystem"
-    assert where(REP_POOL)[0] == "ZFS pool"
-    assert "ZFS pool" not in where(NVME) and "Filesystem" not in where(NAS_ATT)
-    # The + card is last.
-    assert last_is_plus(p)
-    # A FILESYSTEM card has no health line and no Download.
-    fs_card = by_id(p, NAS_FS)
-    assert fs_card.locator(".c-health").count() == 0
-    assert fs_card.get_by_role("button", name="Save as replica").count() == 0
-
-
-def test_rows_stretch_and_three_problem_rows_show(open_page):
-    p = open_page()
-    # Cards in a grid row stretch to the tallest one.
-    heights = p.page.eval_on_selector_all(".grid > article.card", "els => els.slice(0, 3).map((e) => e.offsetHeight)")
-    assert len(set(heights)) == 1, heights
-    att = by_id(p, NAS_ATT)
-    rows = att.locator(".pw-row")
-    assert rows.count() == 3
-    assert all(r.is_visible() for r in rows.all())
-    assert att.locator(".pw-more").inner_text() == "and 2 more"
-    # Details replaces the problem rows, in place.
-    att.locator(".chev").click()
-    assert att.locator(".pw").count() == 0 and att.locator(".details table.attrs").count() == 1
-    assert att.locator(".chev").get_attribute("aria-expanded") == "true"
-    att.locator(".chev").click()
-    assert att.locator(".pw-row").count() == 3
-    # A pool with a failing disk shows its row.
-    p = open_page("POOL=degraded")
-    pool = by_id(p, NAS_POOL)
-    assert "sdf" in pool.locator(".pw").inner_text() and "FAULTED" in pool.locator(".pw").inner_text()
-
-
-def test_space_bar_thresholds(open_page):
-    p = open_page()
-    rows = p.page.evaluate("""() => [...document.querySelectorAll('.sp-row')].map((r) => {
-        const bar = r.querySelector('.sp-bar'), fill = r.querySelector('.sp-bar i'), num = r.querySelector('.sp-bar b');
-        const lum = (c) => { const m = c.match(/\\d+/g).map(Number); return (m[0] + m[1] + m[2]) / 3; };
-        return { mount: r.querySelector('.sp-mount').innerText, step: r.className.replace('sp-row ', ''),
-                 inside: num.innerText, outside: r.querySelector('.sp-text').innerText,
-                 weight: Number(getComputedStyle(num).fontWeight), ink: lum(getComputedStyle(num).color),
-                 fill: lum(getComputedStyle(fill).backgroundColor), outline: getComputedStyle(bar).borderTopStyle };
-      })""")
-    by = {r["mount"]: r for r in rows}
-    low = by["/"]
-    assert low["step"] == "lo" and low["inside"] == "" and low["outside"] == "41% of 980 GB"
-    assert by["/boot"]["outside"].startswith("12% of")
-    s80, s90, s95 = by["/mnt/disk1"], by["/mnt/disk2"], by["/mnt/disk3"]
-    assert (s80["step"], s90["step"], s95["step"]) == ("s80", "s90", "s95")
-    assert (s80["inside"], s90["inside"], s95["inside"]) == ("82%", "91%", "97%")
-    assert s80["outside"].endswith(" free") and s95["outside"].endswith(" free")
-    # Inside the fill at 80% and up: dark type on a light fill, reading as knocked out.
-    for r in (s80, s90, s95):
-        assert r["ink"] < 60 and r["fill"] > 150, r
-    assert s80["fill"] < s90["fill"] < s95["fill"]
-    # Weight steps at 90 and 95; the dashed outline at 95 only.
-    assert s80["weight"] < s90["weight"] < s95["weight"]
-    assert s95["weight"] >= 700
-    assert [r["outline"] for r in (low, s80, s90, s95)] == ["solid", "solid", "solid", "dashed"]
-    assert by["/mnt/usb"]["outside"] == "not mounted" and by["/mnt/usb"]["outline"] == "dashed"
-    # The pool carries its three datasets.
-    assert by_id(p, NAS_POOL).locator(".sp-row").count() == 3
-
-
-def test_drag_reorder_persists(open_page, browser, server):
-    p = open_page()
-    first, third = by_id(p, NVME), by_id(p, NAS_ATT)
-    grip = first.locator(".grip").bounding_box()
-    target = third.bounding_box()
-    p.page.mouse.move(grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
-    p.page.mouse.down()
-    steps = 12
-    for i in range(1, steps + 1):
-        x = grip["x"] + (target["x"] + target["width"] * 0.75 - grip["x"]) * i / steps
-        y = grip["y"] + (target["y"] + target["height"] / 2 - grip["y"]) * i / steps
-        p.page.mouse.move(x, y)
-        p.page.wait_for_timeout(20)
-    # In hand: the lifted copy follows the pointer and the card's place is the gap.
-    assert p.page.locator("#drag-layer .lifted").count() == 1
-    assert "drop-gap" in by_id(p, NVME).get_attribute("class")
-    p.page.mouse.up()
+@pytest.mark.parametrize("width", [1280, 800, 390])
+def test_open_card_keeps_row_heights(open_page, width):
+    """An open card grows down; no other card or the link card changes height."""
+    p = open_page("DRIVES=mixed", width)
+    heights = "() => [...document.querySelector('.grid').children].filter((e) => e.tagName !== 'TEMPLATE')" \
+        ".map((e) => Math.round(e.getBoundingClientRect().height))"
+    closed = p.page.evaluate(heights)
+    i = card_ids(p).index(BARRACUDA)
+    by_id(p, BARRACUDA).locator(".chev").click()
     p.page.wait_for_timeout(300)
-    assert p.page.locator("#drag-layer .lifted").count() == 0
-    ids = card_ids(p)
-    assert ids.index(NVME) == 2 and ids[:2] == [BARRACUDA, NAS_ATT]
-    puts = p.api("PUT", r"/cards/order$")
-    assert len(puts) == 1
-    sent = json.loads(puts[0][2])["order"]
-    assert sent[:3] == [BARRACUDA, NAS_ATT, NVME] and len(sent) == 15
-    # A fresh page has the same order (no reset: the harness keeps it).
-    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
-    page = ctx.new_page()
-    page.goto(f"{server}/")
-    page.wait_for_selector("article.card")
-    page.wait_for_timeout(700)
-    assert page.eval_on_selector_all(".grid > article.card", "els => els.map((e) => e.dataset.card)")[:3] \
-        == [BARRACUDA, NAS_ATT, NVME]
-    ctx.close()
-    # The + card has no grip and stays last.
-    assert p.page.locator(".card.ghost .grip").count() == 0
-
-
-def test_grip_keyboard_and_touch_needs_a_long_press(open_page):
-    p = open_page()
-    by_id(p, NVME).locator(".grip").focus()
-    p.page.keyboard.press("ArrowRight")
-    p.page.wait_for_timeout(200)
-    assert card_ids(p)[:2] == [BARRACUDA, NVME]
-    assert len(p.api("PUT", r"/cards/order$")) == 1
-    # The grip alone takes touch; a quick touch moves nothing.
-    assert by_id(p, NVME).locator(".grip").evaluate("e => getComputedStyle(e).touchAction") == "none"
-    assert p.page.locator(".grid").evaluate("e => getComputedStyle(e).touchAction") == "auto"
-
-
-def test_hide_and_reveal(open_page):
-    p = open_page()
-    eye = p.page.locator(".eye-btn")
-    assert eye.is_visible() and eye.inner_text().strip() == "0" and eye.is_disabled()
-    # HAOS: Download and hide, no trash. Replicas: no eye.
-    nvme = by_id(p, NVME)
-    assert nvme.get_by_role("button", name="Remove this card").count() == 0
-    assert by_id(p, REP_NVME).get_by_role("button", name="Hide this card").count() == 0
-    nvme.get_by_role("button", name="Hide this card").click()
-    assert eye.inner_text().strip() == "1"
-    assert by_id(p, NVME).count() == 0
+    now = p.page.evaluate(heights)
+    assert now[i] > closed[i] + 40
+    assert [h for j, h in enumerate(now) if j != i] == [h for j, h in enumerate(closed) if j != i], (now, closed)
+    by_id(p, BARRACUDA).locator(".chev").click()
     p.page.wait_for_timeout(300)
-    patches = p.api("PATCH", r"/cards/")
-    assert len(patches) == 1 and json.loads(patches[0][2]) == {"hidden": True}
-    assert unquote(patches[0][1]).endswith(f"/cards/{NVME}")
-    eye.click()
-    assert eye.get_attribute("aria-pressed") == "true"
-    shown = by_id(p, NVME)
-    assert "is-hidden" in shown.get_attribute("class")
-    assert float(shown.locator(".c-title").evaluate("e => getComputedStyle(e.closest('.c-head')).opacity")) < 0.5
-    shown.get_by_role("button", name="Hidden. Show this card again").click()
-    assert eye.inner_text().strip() == "0"
-    assert "is-hidden" not in by_id(p, NVME).get_attribute("class")
-
-
-def test_hide_rolls_back_on_error(open_page):
-    p = open_page()
-    p.page.route("**/cards/self*", lambda route: route.fulfill(status=502, body='{"error": "supervisor_failed"}'))
-    by_id(p, NVME).get_by_role("button", name="Hide this card").click()
-    p.page.wait_for_selector("text=That change was not saved. Try again.")
-    assert by_id(p, NVME).count() == 1
-    assert p.page.locator(".eye-btn").inner_text().strip() == "0"
-
-
-def _trash(c):
-    return c.locator(".c-foot .icon.trash")
-
-
-def test_trash_two_clicks(open_page):
-    p = open_page()
-    usb = by_id(p, NAS_USB)
-    trash = _trash(usb)
-    box = trash.bounding_box()
-    trash.click()
-    # The first click: Remove? in the same place, in the Attention colour,
-    # grown to the left (its right edge stays put). Nothing is removed.
-    assert trash.inner_text() == "Remove?"
-    assert "armed" in trash.get_attribute("class")
-    assert trash.get_attribute("aria-label").startswith("Remove this drive?")
-    assert trash.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).borderTopColor, getComputedStyle(e).borderTopWidth]") \
-        == [ATT, ATT, "1px"]
-    armed = trash.bounding_box()
-    assert abs((armed["x"] + armed["width"]) - (box["x"] + box["width"])) < 1.5 and armed["width"] > box["width"]
-    assert usb.get_by_role("group", name="Confirm removal").count() == 0  # no confirm row
-    assert not p.api("DELETE", r"/cards/")
-    # Four seconds put the trash back.
-    p.page.wait_for_timeout(4300)
-    assert "armed" not in trash.get_attribute("class") and trash.inner_text() == ""
-    # Esc puts it back.
-    trash.click()
-    p.page.keyboard.press("Escape")
-    assert "armed" not in trash.get_attribute("class")
-    # Moving the pointer away puts it back.
-    trash.click()
-    p.page.mouse.move(5, 5)
-    p.page.wait_for_timeout(100)
-    assert "armed" not in trash.get_attribute("class")
-    # Focus leaving puts it back.
-    trash.click()
-    p.page.keyboard.press("Shift+Tab")
-    p.page.wait_for_timeout(100)
-    assert "armed" not in trash.get_attribute("class")
-    assert not p.api("DELETE", r"/cards/")
-    # Two clicks in the same spot remove the card, only that one.
-    trash.click()
-    trash.click()
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_USB}\"]')")
-    assert len(p.api("DELETE", r"/cards/")) == 1
-    assert NAS_ATT in card_ids(p)
-    # One armed at a time; a replica and a pool say what they remove.
-    _trash(by_id(p, REP_NVME)).click()
-    assert _trash(by_id(p, REP_NVME)).get_attribute("aria-label").startswith("Remove this replica?")
-    _trash(by_id(p, REP_POOL)).click()
-    assert _trash(by_id(p, REP_POOL)).get_attribute("aria-label").startswith("Remove this replica?")
-    assert "armed" not in _trash(by_id(p, REP_NVME)).get_attribute("class")
-    p.page.keyboard.press("Escape")
-    # Keyboard: Enter twice removes the placeholder, and its machine.
-    p.page.mouse.move(2, 2)
-    pi = by_id(p, BACKUP_PI)
-    _trash(pi).focus()
-    p.page.keyboard.press("Enter")
-    assert _trash(pi).inner_text() == "Remove?"
-    assert _trash(pi).get_attribute("aria-label").startswith("Remove backup-pi?")
-    p.page.keyboard.press("Enter")
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{BACKUP_PI}\"]')")
-    # Space twice on a replica.
-    rep = by_id(p, REP_FAILED)
-    _trash(rep).focus()
-    p.page.keyboard.press(" ")
-    p.page.keyboard.press(" ")
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_FAILED}\"]')")
-    assert len(p.api("DELETE", r"/cards/")) == 3
-    # A pool not in Home Assistant says what it removes.
-    q = open_page("HA=not_installed")
-    _trash(by_id(q, NAS_POOL)).click()
-    assert _trash(by_id(q, NAS_POOL)).get_attribute("aria-label").startswith("Remove this pool?")
-
-
-def _ha_btn(c):
-    return c.locator(".c-foot .icon.rm-ha")
-
-
-def test_trash_in_home_assistant_arms_two_buttons(open_page):
-    p = open_page()
-    att = by_id(p, NAS_ATT)  # blue, still reported by its agent
-    trash = _trash(att)
-    box = trash.bounding_box()
-    trash.click()
-    group = att.get_by_role("group", name="Remove this drive?")
-    assert group.count() == 1
-    ha = _ha_btn(att)
-    assert trash.inner_text() == "Remove here" and ha.inner_text() == "Remove here + disable entities"
-    assert trash.get_attribute("aria-label") == "Remove here, from this page only"
-    # Both in the Attention colour, the same style; Remove here where the
-    # trash was, the Home Assistant button to its left: the pair grows left.
-    style = "e => ['color', 'borderTopColor', 'borderTopWidth', 'fontSize', 'height'].map((k) => getComputedStyle(e)[k])"
-    assert trash.evaluate(style) == ha.evaluate(style)
-    assert trash.evaluate(style)[:3] == [ATT, ATT, "1px"]
-    t, h = trash.bounding_box(), ha.bounding_box()
-    assert abs((t["x"] + t["width"]) - (box["x"] + box["width"])) < 1.5
-    assert h["x"] + h["width"] <= t["x"] and abs(h["y"] - t["y"]) < 1
-    assert not p.api("DELETE", r"/cards/")
-    # The time out puts the trash back.
-    p.page.wait_for_timeout(4300)
-    assert _ha_btn(att).count() == 0 and "armed" not in trash.get_attribute("class")
-    # Esc puts it back, from either button.
-    trash.click()
-    _ha_btn(att).focus()
-    p.page.keyboard.press("Escape")
-    assert _ha_btn(att).count() == 0 and "armed" not in trash.get_attribute("class")
-    # The pointer moving between the two keeps them; leaving puts the trash back.
-    trash.click()
-    hb = _ha_btn(att).bounding_box()
-    p.page.mouse.move(hb["x"] + 5, hb["y"] + 5)
-    p.page.wait_for_timeout(100)
-    assert _ha_btn(att).count() == 1
-    p.page.mouse.move(5, 5)
-    p.page.wait_for_timeout(100)
-    assert _ha_btn(att).count() == 0
-    # Focus moving from one to the other keeps them; leaving both does not.
-    trash.focus()
-    p.page.keyboard.press("Enter")
-    p.page.keyboard.press("Shift+Tab")
-    p.page.wait_for_timeout(100)
-    assert _ha_btn(att).count() == 1 and p.page.evaluate("document.activeElement.classList.contains('rm-ha')")
-    p.page.keyboard.press("Shift+Tab")
-    p.page.wait_for_timeout(100)
-    assert _ha_btn(att).count() == 0 and "armed" not in trash.get_attribute("class")
-    # A drive its agent no longer reports can be deleted there.
-    p.page.mouse.move(2, 2)
-    _trash(by_id(p, NAS_MAYBE)).click()
-    assert _ha_btn(by_id(p, NAS_MAYBE)).inner_text() == "Remove here + delete entities"
-    assert _ha_btn(att).count() == 0  # one armed at a time
-    p.page.keyboard.press("Escape")
-    # A grey card (not in Home Assistant) keeps the single Remove?.
-    usb = by_id(p, NAS_USB)
-    _trash(usb).click()
-    assert _trash(usb).inner_text() == "Remove?" and _ha_btn(usb).count() == 0
-    assert usb.get_by_role("group").count() == 0
-    p.page.keyboard.press("Escape")
-    assert not p.api("DELETE", r"/cards/")
-
-
-def _toast(p: Page):
-    return p.page.locator(".toast")
-
-
-def test_trash_in_home_assistant_removes_and_says_so(open_page):
-    p = open_page()
-    # Disable: off the page, and a short message for four seconds.
-    _trash(by_id(p, NAS_ATT)).click()
-    _ha_btn(by_id(p, NAS_ATT)).click()
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_ATT}\"]')")
-    dels = p.api("DELETE", r"/cards/")
-    assert len(dels) == 1 and unquote(dels[0][1]).endswith(f"/cards/{NAS_ATT}?ha=disable")
-    toast = _toast(p)
-    assert toast.inner_text() == "Disabled in Home Assistant. It cannot be deleted while the agent still sees the drive."
-    assert toast.evaluate("e => getComputedStyle(e).color") != ATT
-    p.page.wait_for_timeout(4300)
-    assert not toast.is_visible()
-    # Delete.
-    _trash(by_id(p, NAS_MAYBE)).click()
-    _ha_btn(by_id(p, NAS_MAYBE)).click()
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_MAYBE}\"]')")
-    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith("?ha=delete")
-    assert toast.inner_text() == "Deleted from Home Assistant."
-    # Remove here: the page only, no message.
-    p.page.wait_for_timeout(4300)
-    _trash(by_id(p, NAS_POOL)).click()
-    _trash(by_id(p, NAS_POOL)).click()
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_POOL}\"]')")
-    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith(f"/cards/{NAS_POOL}")
-    assert not toast.is_visible()
-
-
-def test_trash_in_home_assistant_last_card_and_refusal(open_page):
-    p = open_page("HA_REMOVE=fail")
-    # The machine's last card: its entry goes, the button says delete.
-    with urllib.request.urlopen(f"{p.base}/ha/devices?HA_REMOVE=fail", timeout=5) as resp:
-        data = json.loads(resp.read())
-    data["ha_removal"][NAS_ACCEPTED] = "entry"
-    p.page.route("**/ha/devices", lambda route: route.fulfill(json=data))
-    p.page.evaluate("() => { Alpine.$data(document.body).loadHa(); }")
-    p.page.wait_for_timeout(300)
-    _trash(by_id(p, NAS_ACCEPTED)).click()
-    assert _ha_btn(by_id(p, NAS_ACCEPTED)).inner_text() == "Remove here + delete entities"
-    _ha_btn(by_id(p, NAS_ACCEPTED)).click()
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_ACCEPTED}\"]')")
-    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith("?ha=entry")
-    # Home Assistant refused: the card stays off the page, and the reason shows.
-    assert _toast(p).inner_text() == ("Removed here. Home Assistant did not take the change: "
-                                      "Unable to remove device: the agent still reports this drive.")
-
-
-def test_trash_on_a_replica_in_home_assistant(open_page):
-    p = open_page()
-    rep = by_id(p, REP_FAILED)  # blue: the replica has a device there
-    trash = _trash(rep)
-    trash.click()
-    # One Remove?, as on a card not in Home Assistant, that says where it goes.
-    assert trash.inner_text() == "Remove?" and _ha_btn(rep).count() == 0
-    assert rep.get_by_role("group").count() == 0
-    assert trash.get_attribute("aria-label") == \
-        "Remove this replica? Press again to remove. It leaves Home Assistant too."
-    # The second click removes it here and in Home Assistant, and says nothing.
-    trash.click()
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_FAILED}\"]')")
-    dels = p.api("DELETE", r"/cards/")
-    assert len(dels) == 1 and unquote(dels[0][1]).endswith(f"/cards/{REP_FAILED}?ha=replica")
-    p.page.wait_for_timeout(300)
-    assert not _toast(p).is_visible()
-    # A replica not in Home Assistant: the page only.
-    _trash(by_id(p, REP_NVME)).click()
-    assert _trash(by_id(p, REP_NVME)).get_attribute("aria-label") == \
-        "Remove this replica? Press again to remove."
-    _trash(by_id(p, REP_NVME)).click()
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_NVME}\"]')")
-    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith(f"/cards/{REP_NVME}")
-
-
-def test_trash_on_a_replica_home_assistant_refuses(open_page):
-    p = open_page("HA_REMOVE=fail")
-    _trash(by_id(p, REP_FAILED)).click()
-    _trash(by_id(p, REP_FAILED)).click()
-    p.page.wait_for_function(f"() => !document.querySelector('[data-card=\"{REP_FAILED}\"]')")
-    assert unquote(p.api("DELETE", r"/cards/")[-1][1]).endswith("?ha=replica")
-    # Removed here anyway, and one short muted line says what is left.
-    toast = _toast(p)
-    assert toast.inner_text() == "Removed here. Home Assistant kept its entities; remove them there."
-    assert toast.evaluate("e => getComputedStyle(e).color") != ATT
-
-
-def test_trash_two_taps(browser, server):
-    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
-    ctx = browser.new_context(viewport={"width": 390, "height": 900}, has_touch=True, is_mobile=True)
-    page = ctx.new_page()
-    page.goto(server + "/")
-    page.wait_for_selector(f'article.card[data-card="{NAS_USB}"]')
-    try:
-        trash = page.locator(f'article.card[data-card="{NAS_USB}"] .c-foot .icon.trash')
-        trash.scroll_into_view_if_needed()
-        trash.tap()
-        page.wait_for_timeout(200)
-        assert trash.inner_text() == "Remove?"  # a tap's pointer leaving does not disarm it
-        trash.tap()
-        page.wait_for_function(f"() => !document.querySelector('[data-card=\"{NAS_USB}\"]')")
-    finally:
-        ctx.close()
-
-
-# ── Rename in place ──────────────────────────────────────────────────────────
-
-def _head_h(c) -> float:
-    return c.locator(".c-head").bounding_box()["height"]
-
-
-def _font(loc) -> list:
-    return loc.evaluate("e => ['fontSize', 'fontWeight', 'fontFamily', 'lineHeight'].map((k) => getComputedStyle(e)[k])")
-
-
-_DECO = "e => { const s = getComputedStyle(e); return [s.textDecorationLine, s.textDecorationStyle, s.textDecorationColor]; }"
-_BOXES = """e => ['.exit-slot', '.pill', '.c-where'].map((s) => {
-    const r = e.querySelector(s).getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })"""
-
-
-def _same_boxes(a, b):
-    return all(abs(x - y) <= 1 for ra, rb in zip(a, b) for x, y in zip(ra, rb))
-
-
-def test_rename_has_no_pencils_and_hints_on_the_name_only(open_page):
-    p = open_page()
-    assert p.page.locator(".pencil, use[href='#pencil'], symbol#pencil").count() == 0
-    c = by_id(p, NAS_MAYBE)
-    name = c.locator(".t-name")
-    # The pointer on the card, away from the title: nothing changes.
-    box = c.locator(".c-vitals").bounding_box()
-    p.page.mouse.move(box["x"] + 4, box["y"] + 4)
-    p.page.wait_for_timeout(200)
-    assert name.evaluate(_DECO)[0] == "none"
-    # On the name itself: a dashed underline in #9a9a9a and a text cursor.
-    name.hover()
-    p.page.wait_for_timeout(200)
-    assert name.evaluate(_DECO) == ["underline", "dashed", "rgb(154, 154, 154)"]
-    assert name.evaluate("e => getComputedStyle(e).cursor") == "text"
-    # On an editable pill: dashed border, brighter text, same box.
-    pill = c.locator(".pill")
-    p.page.mouse.move(2, 2)
-    p.page.wait_for_timeout(200)
-    rest = pill.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color]")
-    b0 = pill.bounding_box()
-    pill.hover()
-    p.page.wait_for_timeout(200)
-    hov = pill.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color, getComputedStyle(e).cursor]")
-    assert rest[0] == "solid" and hov[0] == "dashed" and hov[1] != rest[1] and hov[2] == "text"
-    assert pill.bounding_box() == b0
-    # A fixed pill has no hover change: this machine's and the replicas',
-    # on drive and pool cards alike. A field agent's pool and filesystem
-    # pills name the machine and are editable like its drives'.
-    for cid in (NAS_POOL, NAS_FS):
-        assert by_id(p, cid).locator(".pill").get_attribute("tabindex") == "0"
-    for cid in (NVME, REP_NVME, REP_POOL):
-        f = by_id(p, cid).locator(".pill")
-        p.page.mouse.move(2, 2)
-        p.page.wait_for_timeout(150)
-        before = f.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color, getComputedStyle(e).cursor]")
-        f.hover()
-        p.page.wait_for_timeout(150)
-        assert f.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).color, getComputedStyle(e).cursor]") == before
-
-
-def test_rename_card_in_place(open_page):
-    p = open_page()
-    c = by_id(p, NAS_MAYBE)
-    title = c.locator("h3.c-title")
-    original = title.inner_text()
-    p.page.mouse.move(2, 2)
-    font, height, rest = _font(title), _head_h(c), c.evaluate(_BOXES)
-    c.locator(".t-name").click()
-    field = c.locator("input.name-in.c-title")
-    assert field.evaluate("e => document.activeElement === e")
-    assert field.input_value() == original
-    assert _font(field) == font and abs(_head_h(c) - height) < 0.5  # same font, nothing moves
-    assert _same_boxes(c.evaluate(_BOXES), rest)  # exit icon, pill and the line below stay put
-    # A solid line across the full title width.
-    line = field.evaluate("e => getComputedStyle(e).boxShadow")
-    assert "inset" in line and "-1px" in line
-    assert abs(field.bounding_box()["width"] - c.locator(".c-name").bounding_box()["width"]) <= 1
-    # Esc cancels.
-    field.fill("Nope")
-    p.page.keyboard.press("Escape")
-    assert title.inner_text() == original and not p.api("PUT", r"/cards/.+/name$")
-    assert _same_boxes(c.evaluate(_BOXES), rest)
-    # Double-click the title: the whole name stays selected; Enter saves.
-    title.dblclick()
-    assert field.evaluate("e => e.selectionStart === 0 && e.selectionEnd === e.value.length")
-    field.fill("Scratch disk")
-    p.page.keyboard.press("Enter")
-    assert title.inner_text() == "Scratch disk"
-    puts = p.api("PUT", r"/cards/.+/name$")
-    assert len(puts) == 1 and json.loads(puts[0][2]) == {"name": "Scratch disk"}
-    assert unquote(puts[0][1]).endswith(f"/cards/{NAS_MAYBE}/name")
-    # The original model moves to a muted Model line in Details.
-    c.locator(".chev").click()
-    model = c.locator(".details .c-model")
-    assert model.inner_text() == f"Model: {original}"
-    assert model.evaluate("e => getComputedStyle(e).color") == DIM
-    c.locator(".chev").click()
-    # It is kept: a reload shows it.
-    p.page.reload()
-    p.page.wait_for_selector(f'article.card[data-card="{NAS_MAYBE}"] h3.c-title')
-    p.page.wait_for_timeout(600)
-    assert title.inner_text() == "Scratch disk"
-    # Clicking away saves; empty restores the original and drops the Model line.
-    c.locator(".t-name").click()
-    field.fill("")
-    p.page.locator("header.app-head").click()
-    assert title.inner_text() == original
-    assert json.loads(p.api("PUT", r"/cards/.+/name$")[-1][2]) == {"name": ""}
-    c.locator(".chev").click()
-    assert c.locator(".details .c-model").count() == 0
-
-
-def test_rename_pill_in_place_without_moving(open_page):
-    p = open_page()
-    c = by_id(p, NAS_MAYBE)
-    pill = c.locator(".pill")
-    p.page.mouse.move(2, 2)
-    b0, rest = pill.bounding_box(), c.evaluate(_BOXES)
-    pill.click()
-    field = c.locator(".pill-edit input.name-in")
-    assert field.evaluate("e => document.activeElement === e")
-    edit = c.locator(".pill-edit")
-    b1 = edit.bounding_box()
-    assert all(abs(b0[k] - b1[k]) <= 1 for k in ("x", "y", "width", "height"))
-    assert _same_boxes(c.evaluate(_BOXES)[:1], rest[:1]) and _same_boxes(c.evaluate(_BOXES)[2:], rest[2:])
-    assert edit.evaluate("e => [getComputedStyle(e).borderTopStyle, getComputedStyle(e).borderTopColor]") == ["solid", "rgb(255, 255, 255)"]
-    assert field.evaluate("e => getComputedStyle(e).textAlign") == "center"
-    assert _font(field)[:3] == _font(edit)[:3]
-    fb = field.bounding_box()
-    assert fb["x"] >= b1["x"] and fb["x"] + fb["width"] <= b1["x"] + b1["width"] + 0.5
-    p.page.keyboard.press("Escape")
-    assert pill.bounding_box() == b0
-
-
-def test_pills_line_up_across_a_row(open_page):
-    p = open_page()
-    rows = p.page.eval_on_selector_all(".grid > article.card", """els => {
-        const rows = {};
-        for (const c of els) {
-            const k = Math.round(c.getBoundingClientRect().top), r = c.getBoundingClientRect(),
-                  q = c.querySelector('.pill').getBoundingClientRect();
-            (rows[k] = rows[k] || []).push([r.right - q.right, q.top - r.top, q.height, c.querySelector('.pill').classList.contains('pill-ed')]);
-        }
-        return Object.values(rows); }""")
-    mixed = 0
-    for row in rows:
-        assert max(x[0] for x in row) - min(x[0] for x in row) <= 1  # same right edge in its card
-        assert max(x[1] for x in row) - min(x[1] for x in row) <= 1  # same top
-        assert len({round(x[2]) for x in row}) == 1  # same height
-        mixed += len({x[3] for x in row}) == 2
-    assert mixed  # at least one row has editable and fixed pills side by side
-    widths = p.page.eval_on_selector_all(".grid .pill", "els => els.map((e) => e.getBoundingClientRect().width)")
-    assert min(widths) >= 75.5
-
-
-def test_rename_by_tap_and_keyboard(browser, server, open_page):
-    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
-    ctx = browser.new_context(viewport={"width": 390, "height": 900}, has_touch=True, is_mobile=True)
-    try:
-        page = ctx.new_page()
-        page.goto(server + "/")
-        page.wait_for_selector(f'article.card[data-card="{NAS_MAYBE}"] .t-name')
-        c = page.locator(f'article.card[data-card="{NAS_MAYBE}"]')
-        assert page.evaluate("matchMedia('(hover: none)').matches")
-        c.locator(".t-name").tap()
-        assert c.locator("input.name-in.c-title").count() == 1
-        page.keyboard.press("Escape")
-        c.locator(".pill").tap()
-        assert c.locator(".pill-edit input.name-in").count() == 1
-        page.keyboard.press("Escape")
-    finally:
-        ctx.close()
-    p = open_page()
-    c = by_id(p, NAS_MAYBE)
-    name = c.locator(".t-name")
-    name.focus()
-    p.page.keyboard.press("Enter")
-    field = c.locator("input.name-in.c-title")
-    assert field.evaluate("e => document.activeElement === e")
-    p.page.keyboard.press("Escape")
-    # Focus comes back on Alpine's next tick, once the title is drawn again.
-    playwright_api.expect(name).to_be_focused(timeout=2000)
-    p.page.keyboard.press("F2")
-    assert field.count() == 1
-    p.page.keyboard.press("Escape")
-    # Tab reaches the editable pill; Enter edits it. A fixed pill is not a stop.
-    pill = c.locator(".pill")
-    assert pill.get_attribute("tabindex") == "0"
-    assert by_id(p, NVME).locator(".pill").get_attribute("tabindex") is None
-    pill.focus()
-    p.page.keyboard.press("Enter")
-    assert c.locator(".pill-edit input.name-in").count() == 1
-    p.page.keyboard.press("Escape")
-    # A mouse click shows no focus ring; keyboard focus does.
-    p.page.mouse.move(2, 2)
-    p.page.locator("header.app-head").click()
-    name.click()
-    p.page.wait_for_function("() => document.activeElement && document.activeElement.matches('input.name-in')")
-    p.page.keyboard.press("Escape")
-    assert name.evaluate("e => getComputedStyle(e).outlineStyle") == "none"
-    p.page.locator("header.app-head").click()
-    name.focus()
-    p.page.keyboard.press("Shift+Tab")
-    p.page.keyboard.press("Tab")
-    assert name.evaluate("e => document.activeElement === e && e.matches(':focus-visible')")
-    assert name.evaluate("e => getComputedStyle(e).outlineStyle") == "solid"
-
-
-def test_rename_pools_filesystems_and_fixed_pills(open_page):
-    p = open_page()
-    pool = by_id(p, NAS_POOL)
-    pool.locator(".t-name").dblclick()
-    pool.locator("input.name-in").fill("Media pool")
-    p.page.keyboard.press("Enter")
-    assert pool.locator("h3.c-title").inner_text() == "Media pool"
-    pool.locator(".chev").click()
-    assert pool.locator(".details .c-model").inner_text() == "Pool: tank"
-    fs = by_id(p, NAS_FS)
-    fs.locator(".t-name").dblclick()
-    fs.locator("input.name-in").fill("Scratch")
-    p.page.keyboard.press("Enter")
-    assert fs.locator("h3.c-title").inner_text() == "Scratch"
-    # HAOS and REPLICA pills are fixed, on every kind of card.
-    for cid in (NVME, REP_NVME, REP_POOL):
-        c = by_id(p, cid)
-        assert c.locator(".pill").get_attribute("tabindex") is None
-        c.locator(".pill").dblclick()
-        assert c.locator("input.name-in").count() == 0
-
-
-def test_rename_machine_pill_follows_on_every_card(open_page):
-    p = open_page()
-    nas_cards = [cid for cid in card_ids(p) if cid.startswith(NAS + "|")]
-    drives = [cid for cid in nas_cards if not cid.split("|")[1].startswith(("pool:", "fs:"))]
-    assert len(drives) >= 4
-    c = by_id(p, drives[0])
-    pill = c.locator(".pill")
-    assert pill.inner_text() == "NAS-01"
-    pill.dblclick()
-    field = c.locator(".pill-edit input.name-in")
-    assert field.input_value() == "nas-01"
-    field.fill("Basement NAS")
-    p.page.keyboard.press("Enter")
-    puts = p.api("PUT", r"/hosts/.+/name$")
-    assert len(puts) == 1 and json.loads(puts[0][2]) == {"name": "Basement NAS"}
-    assert unquote(puts[0][1]).endswith(f"/hosts/{NAS}/name")
-    for cid in drives:
-        assert by_id(p, cid).locator(".pill").inner_text() == "BASEMENT NAS"
-    # The machine's pool and filesystem cards follow; their pills rename it too.
-    assert by_id(p, NAS_POOL).locator(".pill").inner_text() == "BASEMENT NAS"
-    assert by_id(p, NAS_FS).locator(".pill").inner_text() == "BASEMENT NAS"
-    # A single click does the same; empty restores the agent's name.
-    c.locator(".pill").click()
-    c.locator(".pill-edit input.name-in").fill("")
-    p.page.keyboard.press("Enter")
-    for cid in drives:
-        assert by_id(p, cid).locator(".pill").inner_text() == "NAS-01"
-    for cid in (NAS_POOL, NAS_FS):
-        pill = by_id(p, cid).locator(".pill")
-        assert pill.get_attribute("tabindex") == "0"
-        pill.dblclick()
-        field = by_id(p, cid).locator(".pill-edit input.name-in")
-        assert field.input_value() == "nas-01"
-        p.page.keyboard.press("Escape")
-    by_id(p, NAS_FS).locator(".pill").click()
-    by_id(p, NAS_FS).locator(".pill-edit input.name-in").fill("Attic NAS")
-    p.page.keyboard.press("Enter")
-    assert unquote(p.api("PUT", r"/hosts/.+/name$")[-1][1]).endswith(f"/hosts/{NAS}/name")
-    for cid in drives + [NAS_POOL]:
-        assert by_id(p, cid).locator(".pill").inner_text() == "ATTIC NAS"
-    # A machine with nothing to show is renamed from its title.
-    pi = by_id(p, BACKUP_PI)
-    pi.locator(".t-name").dblclick()
-    pi.locator("input.name-in").fill("Pi in the garage")
-    p.page.keyboard.press("Enter")
-    assert pi.locator("h3.c-title").inner_text() == "Pi in the garage"
-    assert unquote(p.api("PUT", r"/hosts/.+/name$")[-1][1]).endswith(f"/hosts/{BACKUP_PI}/name")
-
-
-def test_rename_syncs_with_home_assistant(open_page, server):
-    p = open_page()
-    c = by_id(p, NVME)  # in Home Assistant (blue exit icon)
-    assert c.locator("a.exit").count() == 1
-    original = c.locator("h3.c-title").inner_text()
-    c.locator(".t-name").dblclick()
-    c.locator("input.name-in").fill("Boot NVMe")
-    p.page.keyboard.press("Enter")
-    p.page.wait_for_timeout(300)
-    assert c.locator("h3.c-title").inner_text() == "Boot NVMe"
-    assert c.locator(".act-note").count() == 0 or not c.locator(".act-note").is_visible()
-    # A rename made in Home Assistant shows on the next refresh, over the app's.
-    ha = json.load(urllib.request.urlopen(f"{server}/ha/devices", timeout=5))
-    device = ha["targets"]["self"]["devices"][NVME.split("|")[1]]
-    assert ha["targets"]["self"]["names"][NVME.split("|")[1]]["name_by_user"] == "Boot NVMe"
-    req = urllib.request.Request(f"{server}/dev/ha-name", method="POST",
-                                 data=json.dumps({"device": device, "name": "Named in HA"}).encode(),
-                                 headers={"Content-Type": "application/json"})
-    urllib.request.urlopen(req, timeout=5)
-    p.page.get_by_role("button", name="Refresh").click()
-    p.page.wait_for_function(f"""() => document.querySelector('[data-card="{NVME}"] h3.c-title').textContent === 'Named in HA'""")
-    c.locator(".chev").click()
-    assert c.locator(".details .c-model").inner_text() == f"Model: {original}"
-    # A drive not in Home Assistant keeps the name in the app only.
-    assert by_id(p, NAS_USB).locator("button.exit.add").count() == 1
-
-
-def test_rename_home_assistant_refuses(open_page):
-    p = open_page("HA_NAME=fail")
-    c = by_id(p, NVME)
-    c.locator(".t-name").dblclick()
-    c.locator("input.name-in").fill("Boot NVMe")
-    p.page.keyboard.press("Enter")
-    note = c.locator(".act-note")
-    note.wait_for(state="visible")
-    assert note.inner_text() == "Saved in this app; Home Assistant did not take the name."
-    assert note.evaluate("e => getComputedStyle(e).color") not in (ATT, MAYBE, OK)
-    assert c.locator("h3.c-title").inner_text() == "Boot NVMe"  # the app's name is kept
-    assert len(p.api("PUT", r"/cards/.+/name$")) == 1
-
-
-def test_attribute_headers_explain_value_and_raw(open_page):
-    p = open_page()
-    c = by_id(p, BARRACUDA)
-    c.locator(".chev").click()
-    heads = dict(c.locator("table.attrs thead th").evaluate_all("els => els.map((e) => [e.textContent, e.title])"))
-    assert heads["Value"] == "The maker's health score for this attribute, counting down from new"
-    assert heads["Worst"] == "The lowest that score has been"
-    assert heads["Thresh"] == "The maker's failure point for that score"
-    assert heads["Raw"] == "The real count or reading. Alerts use this"
-    # Value, Worst and Thresh are muted; Raw is not.
-    plain = c.locator("tbody tr:not(.crit):not(.warn)").first
-    for col in ("c-val", "c-worst", "c-thresh"):
-        assert plain.locator(f"td.{col}").evaluate("e => getComputedStyle(e).color") == DIM
-    assert plain.locator("td.c-raw").evaluate("e => getComputedStyle(e).color") == "rgb(189, 189, 189)"
-
-
-def test_replica_raw_reads_as_text_until_focused(open_page):
-    p = open_page()
-    c = by_id(p, REP_FAILED)
-    c.locator(".chev").click()
-    field = c.locator("input.raw-in").first
-    raw_text = field.locator("xpath=..")  # its Raw cell, whose font every Raw cell has
-    look = "e => { const s = getComputedStyle(e); return [s.borderTopWidth, s.borderBottomWidth, s.backgroundColor, s.textAlign, s.fontFamily, s.fontSize, s.boxShadow]; }"
-    p.page.mouse.move(2, 2)
-    rest = field.evaluate(look)
-    text = raw_text.evaluate(look)
-    assert rest[:4] == ["0px", "0px", "rgba(0, 0, 0, 0)", "right"], rest
-    assert rest[4:6] == text[4:6]  # the font of the other Raw cells
-    assert rest[6] == "none"
-    field.hover()
-    p.page.wait_for_timeout(100)
-    assert field.evaluate(look)[6] != "none"  # an underline
-    assert field.evaluate(look)[2] == "rgba(0, 0, 0, 0)"
-    field.focus()
-    focused = field.evaluate(look)
-    assert focused[2] == "rgb(0, 0, 0)" and "241, 241, 241" in focused[6]  # the full field
-
-
-def _scenario(card):
-    pick = card.locator(".c-where select.scen")
-    return pick, pick.evaluate("e => e.options[e.selectedIndex].text"), pick.locator("option").all_inner_texts()
-
-
-def test_scenario_picker_applies_on_change(open_page):
-    p = open_page()
-    rep = by_id(p, REP_NVME)
-    assert rep.locator(".preset, .presets").count() == 0
-    pick, current, options = _scenario(rep)
-    assert pick.get_attribute("aria-label") == "Scenario"
-    assert current == "NVMe wear"
-    assert options == ["Healthy NVMe", "NVMe wear", "Media errors", "Critical warning"]
-    pick.select_option("media_errors")
-    p.page.wait_for_function(f"() => document.querySelector('[data-card=\"{REP_NVME}\"] .h-att')")
-    posts = p.api("POST", r"/mock/drives/[^/]+/scenario$")
-    assert len(posts) == 1 and json.loads(posts[0][2]) == {"id": "media_errors"}
-    assert _scenario(rep)[1] == "Media errors"
-    assert _scenario(by_id(p, REP_FAILED))[2] == [
-        "Healthy SATA HDD", "Reallocated sectors growing", "Pending sectors", "Command timeouts", "SMART failed"]
-    pool_pick, _, pool_options = _scenario(by_id(p, REP_POOL))
-    assert pool_options == ["Healthy pool", "ZFS pool degraded", "Pool faulted"]
-    assert "ZFS pool" in by_id(p, REP_POOL).locator(".c-where").inner_text()
-    # Quiet at rest: no border until hovered or focused.
-    assert pick.evaluate("e => getComputedStyle(e).borderTopColor") == "rgba(0, 0, 0, 0)"
-    assert pick.evaluate("e => getComputedStyle(e).fontFamily") == rep.locator(".c-where").evaluate(
-        "e => getComputedStyle(e).fontFamily")
-    pool_pick.select_option("faulted")
-    p.page.wait_for_timeout(400)
-    assert len(p.api("POST", r"/mock/pools/[^/]+/scenario$")) == 1
-    assert json.loads(p.api("POST", r"/mock/pools/[^/]+/scenario$")[0][2]) == {"id": "faulted"}
-
-
-def test_scenario_picker_on_touch(browser, server):
-    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
-    ctx = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
-    try:
-        page = ctx.new_page()
-        page.goto(f"{server}/")
-        page.wait_for_function("() => window.Alpine && document.body._x_dataStack")
-        page.wait_for_timeout(700)
-        pick = page.locator(f'article.card[data-card="{REP_NVME}"] select.scen')
-        pick.scroll_into_view_if_needed()
-        box = pick.bounding_box()
-        card = page.locator(f'article.card[data-card="{REP_NVME}"]').bounding_box()
-        assert box["height"] >= 24 and box["x"] >= card["x"] and box["x"] + box["width"] <= card["x"] + card["width"], box
-        pick.tap()
-        pick.select_option("critical_warning")
-        page.wait_for_function(f"() => document.querySelector('[data-card=\"{REP_NVME}\"] .h-att')")
-    finally:
-        ctx.close()
-
-
-def test_replica_with_no_scenario(open_page):
-    """A replica carried over from the 0.2.x mock drives has no current scenario: the picker says so."""
-    p = open_page("REPLICAS=carried")
-    rep = by_id(p, REP_NVME)
-    pick, current, options = _scenario(rep)
-    assert current == "Choose scenario"
-    assert options[0] == "Choose scenario" and options[1:] == ["Healthy NVMe", "NVMe wear", "Media errors",
-                                                                  "Critical warning"]
-    assert rep.locator(".scen-size").text_content() == "Choose scenario"
-    assert pick.evaluate("e => e.getBoundingClientRect().width") > 80
-    colour = pick.evaluate("e => getComputedStyle(e).color")
-    assert colour != by_id(p, REP_FAILED).locator("select.scen").evaluate("e => getComputedStyle(e).color")
-    pick.select_option("media_errors")
-    p.page.wait_for_function(f"() => document.querySelector('[data-card=\"{REP_NVME}\"] .h-att')")
-    posts = p.api("POST", r"/mock/drives/[^/]+/scenario$")
-    assert len(posts) == 1 and json.loads(posts[0][2]) == {"id": "media_errors"}
-    pick, current, options = _scenario(rep)
-    assert current == "Media errors" and "Choose scenario" not in options
+    assert p.page.evaluate(heights) == closed
 
 
 def test_download(open_page, tmp_path):
     p = open_page()
-    rep = by_id(p, REP_FAILED)
-    button = rep.get_by_role("button", name="Save as replica")
-    assert button.get_attribute("title") == "Save as replica"
     with p.page.expect_download() as dl:
-        button.click()
-    path = tmp_path / "replica.json"
+        by_id(p, BARRACUDA).get_by_role("button", name="Download this card as a file").click()
+    assert dl.value.suggested_filename == "drive-Seagate-BarraCuda-2TB-ST2000DM008.json"
+    path = tmp_path / "card.json"
     dl.value.save_as(path)
     doc = json.loads(path.read_text())
-    assert doc["format"] == "smart-sniffer-replica" and dl.value.suggested_filename.endswith(".json")
-    assert p.api("GET", r"/cards/replicas%7CMOCK-SATA-0001/file$")
-    # A real drive's file has its serial replaced.
-    with p.page.expect_download() as dl:
-        by_id(p, BARRACUDA).get_by_role("button", name="Save as replica").click()
-    path = tmp_path / "real.json"
-    dl.value.save_as(path)
-    text = path.read_text()
-    assert "ZFL0K7Q2" not in text and re.search(r"REPLICA-[0-9A-F]{8}", text)
-    # It goes back in through Upload a replica.
-    open_add(p)
-    p.page.wait_for_selector(".replica-pick label")
-    p.page.locator("input[type=file][aria-label='Upload a replica']").set_input_files(str(path))
-    p.page.wait_for_function("() => document.querySelectorAll('.replica-pick label.on').length === 1")
-    assert len(p.api("POST", r"/replicas$")) == 1
+    assert doc["drive"]["serial"] == "ZFL0K7Q2" and doc["drive"]["smart_data"]
+    assert p.api("GET", r"/cards/self%7CZFL0K7Q2/file$")
 
 
-def test_exit_icon_confirms(open_page):
-    p = open_page()
-    usb = by_id(p, NAS_USB)
-    usb.get_by_role("button", name="Create sensors and alerts").click()
-    ask = usb.get_by_role("group", name="Confirm")
-    assert ask.locator(".ask-title").inner_text() == "Create sensors and alerts for NAS-01?"
-    nas = [i.split("|")[1] for i in card_ids(p) if i.startswith(NAS + "|")]
-    drives = len([k for k in nas if not k.startswith(("pool:", "fs:"))])
-    assert ask.locator(".ask-line").inner_text() == (
-        f"Each of its {drives} drives gets health sensors for dashboards and automations, "
-        "and an alert when it needs attention.")
-    assert ask.get_by_role("button").all_inner_texts() == ["Create", "Cancel"]
-    assert "Home Assistant" not in ask.inner_text()
-    # The confirm sits under the title.
-    assert usb.evaluate("""e => { let s = e.querySelector('.ask').previousElementSibling;
-        while (s && s.tagName === 'TEMPLATE') s = s.previousElementSibling;
-        return s.classList.contains('c-head'); }""")
-    p.page.keyboard.press("Escape")
-    assert usb.get_by_role("group", name="Confirm").count() == 0
-    p = open_page("HA_SELF=0")
-    nvme = by_id(p, NVME)
-    nvme.get_by_role("button", name="Create sensors and alerts").click()
-    ask = nvme.get_by_role("group", name="Confirm")
-    assert ask.locator(".ask-title").inner_text() == "Create sensors and alerts for HAOS?"
-    assert ask.locator(".ask-line").inner_text() == (
-        "Each of its 2 drives gets health sensors for dashboards and automations, "
-        "and an alert when it needs attention.")
-    ask.get_by_role("button", name="Create").click()
-    p.page.wait_for_selector(f'[data-card="{NVME}"] a.exit', timeout=6000)
-    assert json.loads(p.api("POST", r"/ha/add$")[0][2]) == {"target": "self"}
-    # The exit icon's place is the same on every card, left of the pill.
-    p = open_page()
-    gaps = p.page.eval_on_selector_all(".grid > article.card .c-tags", """els => els.map((t) => {
-        const s = t.querySelector('.exit-slot').getBoundingClientRect(), p = t.querySelector('.pill').getBoundingClientRect();
-        return Math.round(p.left - s.right); })""")
-    assert len(set(gaps)) == 1
-
-
-def test_add_error_shows_on_the_confirm(open_page):
-    p = open_page("HA_SELF=0&ADD=error")
-    c = by_id(p, NVME)
-    c.get_by_role("button", name="Create sensors and alerts").click()
-    c.get_by_role("group", name="Confirm").get_by_role("button", name="Create").click()
-    p.page.wait_for_selector("text=Home Assistant did not create them. The App log may say why.")
-
-
-def test_placeholder_authenticate(open_page):
-    p = open_page()
-    pending = by_id(p, BACKUP_PI)
-    assert "machine" in pending.get_attribute("class")
-    assert "This agent wants a password." in pending.inner_text()
-    assert pending.locator(".c-vitals, .c-health").count() == 0
-    pending.get_by_label("Agent password").fill("wrong")
-    pending.get_by_role("button", name="Authenticate").click()
-    p.page.wait_for_selector("text=That password was refused.")
-    assert "bad" in pending.get_by_label("Agent password").get_attribute("class")
-    pending.get_by_label("Agent password").fill("fieldpass")
-    pending.get_by_role("button", name="Authenticate").click()
-    p.page.wait_for_selector(f'[data-card="{BACKUP_PI}|32315D480012"]')
-    assert by_id(p, BACKUP_PI).count() == 0
-    assert "fieldpass" not in p.page.content()
-
-
-def test_unreachable_keeps_its_readings(open_page):
-    p = open_page()
-    studio = by_id(p, STUDIO)
-    assert studio.locator(".seen").inner_text() == "Last seen: 3 h ago, not answering"
-    assert "33 C" in studio.locator(".c-vitals").inner_text()
-
+# ── Agent states ─────────────────────────────────────────────────────────────
 
 def test_agent_down(open_page):
     p = open_page("AGENT=down")
     assert "agent not answering" in p.page.locator(".versions").inner_text()
-    # The HAOS cards keep their last readings, marked not answering.
     seen = by_id(p, NVME).locator(".seen").inner_text()
     assert seen.startswith("Last seen: ") and seen.endswith(", not answering")
+    # Asked again every 8 seconds while down; every 30 when it answers.
+    assert 6000 < p.page.evaluate("Alpine.$data(document.body).selfNext - Date.now()") <= 8000
+    assert link_card(p).count() == 1  # the card under the grid stays
 
 
-def test_requests_stay_home_and_nothing_scans_at_load(open_page):
+def test_page_polls_every_30_seconds(open_page):
     p = open_page()
-    p.page.wait_for_timeout(1500)
-    assert all(url.startswith(p.base) for _, url, _ in p.requests)
-    assert not p.api("POST", r"/fleet/scan$") and not p.api("POST", r"/fleet/probe$")
-    open_add(p)
-    p.page.wait_for_timeout(600)
-    assert len(p.api("POST", r"/fleet/scan$")) == 1
+    wait = p.page.evaluate("Alpine.$data(document.body).selfNext - Date.now()")
+    assert 27000 < wait <= 30000, wait
+    ha = p.page.evaluate("Alpine.$data(document.body).haNext - Date.now()")
+    assert 27000 < ha <= 30000, ha
+    p.page.wait_for_timeout(2000)
+    paths = {unquote(re.sub(r"\?.*", "", u[len(p.base):])) for _, u, _ in p.requests
+             if not u.endswith((".js", ".css", ".png"))}
+    assert paths <= {"/", "/app/info", "/fleet/hosts/self/drives", "/ha/integration"}, paths
+    assert len(p.api("GET", r"/fleet/hosts/self/drives$")) == 1
+
+
+def test_self_reading_card(open_page):
+    p = open_page("SELF_DELAY=3")
+    reading = by_id(p, "self")
+    assert reading.locator(".m-msg").inner_text() == "Reading this machine's drives."
+    assert reading.locator(".pill").inner_text() == "HAOS"
+    assert reading.locator(".hbox, .c-health").count() == 0
+    by_id(p, NVME).wait_for(timeout=6000)
+    assert by_id(p, "self").count() == 0
+
+
+def test_no_drives(open_page):
+    p = open_page("DRIVES=0")
+    assert "reports no readable drives" in p.page.locator(".empty-line").inner_text()
+    assert card_ids(p) == []
+    assert link_card(p).count() == 1
+
+
+def test_requests_stay_home(open_page):
+    p = open_page()
+    p.page.wait_for_timeout(500)
     assert all(url.startswith(p.base) for _, url, _ in p.requests)
 
 
-def test_ingress_prefix(open_page, browser, server):
+def test_ingress_prefix(browser, server):
     """Every request stays relative to the page, as it must behind ingress."""
     ctx = browser.new_context()
     page = ctx.new_page()
@@ -1549,1052 +524,40 @@ def test_ingress_prefix(open_page, browser, server):
     page.on("request", lambda r: seen.append(r.url))
     page.goto(f"{server}/api/hassio_ingress/tok123/")
     page.wait_for_selector("article.card")
+    page.wait_for_selector("section.link-card")
     ctx.close()
     api = [u for u in seen if not u.endswith((".js", ".css", ".png"))][1:]
     assert api and all("/api/hassio_ingress/tok123/" in u for u in api), api
 
 
-def test_add_card_areas_and_flow(open_page):
-    p = open_page("HOSTS=one")
-    open_add(p)
-    region = p.page.get_by_role("region", name="Add", exact=True)
-    # Three areas, each its own panel.
-    areas = region.locator("section.area")
-    assert [a.get_attribute("aria-label") for a in areas.all()] == ["Network", "Add by hand", "Replicas"]
-    assert all(a.evaluate("e => getComputedStyle(e).borderTopStyle") == "solid" for a in areas.all())
-    # Network with Add by hand under it on the left; Replicas on the right.
-    net, hand, reps = (a.bounding_box() for a in areas.all())
-    assert abs(hand["x"] - net["x"]) < 1 and abs(hand["width"] - net["width"]) < 1
-    assert hand["y"] > net["y"] + net["height"] - 1
-    assert reps["x"] > net["x"] + net["width"] - 1 and abs(reps["y"] - net["y"]) < 1
-    block = region.get_by_label("Network block")
-    assert block.input_value() == "10.0.10.0/24"
-    assert region.get_by_role("button", name="Rescan").is_visible()
-    p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
-    p.page.wait_for_timeout(500)
-    assert region.locator(".found b").inner_text() == "2"
-    assert region.locator(".found small").inner_text() == "new, 1 already added"
-    done = region.locator(".pick-row.done")
-    assert "proxmox-01, already added" in done.inner_text() and done.locator("input").is_disabled()
-    add = region.locator(".add-foot .btn-primary")
-    assert add.inner_text() == "Add 2"
-    # One Add counts ticks across all three areas.
-    region.locator(".replica-pick label", has_text="NVMe, wear").click()
-    assert add.inner_text() == "Add 3"
-    region.locator(".replica-pick label", has_text="NVMe, wear").click()
-    block.fill("10.0.20.0/24")
-    assert region.get_by_role("button", name="Scan", exact=True).is_visible()
-    assert add.is_disabled()
-    block.fill("10.0.0.0/16")
-    region.get_by_role("button", name="Scan", exact=True).click()
-    alert = region.get_by_role("alert")
-    assert "That is 65,534 addresses." in alert.inner_text()
-    alert.get_by_role("button").click()
-    p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
-    # Add by hand: a machine found drops into the Network list, ticked.
-    region.get_by_label("Host or IP").fill("nowhere.lan")
-    region.get_by_role("button", name="Check").click()
-    p.page.wait_for_selector("text=Nothing answered at nowhere.lan:9099.")
-    region.get_by_label("Host or IP").fill("nas.lan")
-    region.get_by_role("button", name="Check").click()
-    p.page.wait_for_selector("section.area[aria-label=Network] .pick-row.on:has-text('nas.lan:9099')")
-    assert add.inner_text() == "Add 3"
-    region.locator(".pick-row", has_text="nas.lan").click()
-    add.click()
-    p.page.wait_for_selector("[role=region][aria-label=Add]", state="detached")
-    posts = p.api("POST", r"/fleet/hosts$")
-    assert len(posts) == 1
-    assert sorted(h["address"] for h in json.loads(posts[0][2])["hosts"]) == ["10.0.10.52", "10.0.10.61"]
-    p.page.wait_for_selector('[data-card="10.0.10.61:9099|2309E6A1B2C3"]')
-    assert "This agent wants a password." in by_id(p, BACKUP_PI).inner_text()
-    # New cards land just before the + card.
-    assert last_is_plus(p)
-
-
-@pytest.mark.parametrize("width", [1280, 390])
-def test_add_card_columns(open_page, width):
-    """Network and Add by hand share the left column, Replicas the right;
-    a phone stacks them in that order. Check stays on the host's line."""
-    p = open_page("HOSTS=one", width)
-    open_add(p)
-    region = p.page.get_by_role("region", name="Add", exact=True)
-    net, hand, reps = (region.locator(f"section.area[aria-label='{n}']").bounding_box()
-                       for n in ("Network", "Add by hand", "Replicas"))
-    assert hand["y"] > net["y"] + net["height"] - 1 and abs(hand["x"] - net["x"]) < 1
-    if width == 1280:
-        assert abs(hand["width"] - net["width"]) < 1
-        assert reps["x"] > net["x"] + net["width"] - 1 and abs(reps["y"] - net["y"]) < 1
-        host = region.get_by_label("Host or IP").bounding_box()
-        check = region.get_by_role("button", name="Check").bounding_box()
-        assert abs((check["y"] + check["height"] / 2) - (host["y"] + host["height"] / 2)) < 2
-        help_ = region.locator(".area-help").bounding_box()
-        assert help_["y"] > check["y"] + check["height"] - 1
-    else:
-        assert abs(reps["x"] - net["x"]) < 1 and reps["y"] > hand["y"] + hand["height"] - 1
-    add = region.locator(".add-foot .btn-primary").bounding_box()
-    box = region.bounding_box()
-    assert add["y"] > max(hand["y"] + hand["height"], reps["y"] + reps["height"]) - 1
-    assert box["x"] + box["width"] - (add["x"] + add["width"]) < 30
-
-
-def test_scan_counter_names_new_and_already_added(open_page):
-    p = open_page("HOSTS=one")
-    open_add(p)
-    p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
-    p.page.wait_for_timeout(500)
-    found = p.page.locator(".found")
-    assert found.locator("b").inner_text() == "2"
-    assert found.locator("small").inner_text() == "new, 1 already added"
-    old = found.locator(".found-old")
-    assert old.evaluate("e => getComputedStyle(e).color") == DIM
-    # Every listed row already added: nothing new, the rest named.
-    p.page.evaluate("""() => { const d = Alpine.$data(document.body);
-        d.add.scan = Object.assign({}, d.add.scan, { found: d.add.scan.found.map((r) => Object.assign({}, r, { added: true })) }); }""")
-    p.page.wait_for_timeout(100)
-    assert found.locator("b").inner_text() == "0"
-    assert found.locator("small").inner_text() == "new, 3 already added"
-
-
-def test_attribute_cells_sit_at_the_top(open_page):
-    p = open_page()
-    c = by_id(p, NAS_ATT)
-    _toggle(p, NAS_ATT)
-    c.locator("table.attrs").first.wait_for()
-    aligns = c.locator("table.attrs td").evaluate_all("els => [...new Set(els.map((e) => getComputedStyle(e).verticalAlign))]")
-    assert aligns == ["top"]
-    p.page.set_viewport_size({"width": 390, "height": 900})
-    # A flagged row whose name and note wrap to a second line.
-    row = c.locator("table.attrs tr.crit, table.attrs tr.warn").filter(has=p.page.locator("td.nm small")).first
-    row.locator("td.nm").wait_for()
-    p.page.wait_for_function("(e) => e.getBoundingClientRect().height > 20", arg=row.locator("td.nm").element_handle(), timeout=3000)
-    # The first line of text in every shown cell starts at the same height.
-    tops = row.locator("td").evaluate_all("""els => els.filter((e) => e.getClientRects().length).map((e) => {
-      const w = document.createTreeWalker(e, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.textContent.trim() ? 1 : 3 });
-      const n = w.nextNode(); const r = document.createRange(); r.selectNodeContents(n);
-      return r.getClientRects()[0].top; })""")
-    assert len(tops) >= 3 and max(tops) - min(tops) < 3, tops
-
-
-def test_closing_the_add_card_cancels_the_scan(open_page):
-    p = open_page("SCAN=slow")
-    open_add(p)
-    p.page.wait_for_timeout(600)
-    p.page.get_by_role("button", name="Close").click()
-    p.page.wait_for_timeout(300)
-    assert p.api("DELETE", r"/fleet/scan/")
-
-
-def _set_hidden(p: Page, hidden: bool) -> None:
-    p.page.evaluate("""(hidden) => {
-        Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
-        document.dispatchEvent(new Event('visibilitychange'));
-    }""", hidden)
-
-
-def test_scan_polling_pauses_while_hidden_and_resumes_at_once(open_page):
-    p = open_page("SCAN=slow")
-    open_add(p)
-    p.page.wait_for_timeout(900)
-    polls = lambda: len(p.api("GET", r"/fleet/scan/"))  # noqa: E731
-    assert polls() >= 1
-    _set_hidden(p, True)
-    p.page.wait_for_timeout(500)
-    before = polls()
-    probed = p.page.evaluate("() => Alpine.$data(document.body).add.scan.probed")
-    p.page.wait_for_timeout(1600)
-    assert polls() == before
-    _set_hidden(p, False)
-    p.page.wait_for_timeout(60)
-    assert polls() == before + 1
-    p.page.wait_for_function(f"() => Alpine.$data(document.body).add.scan.probed > {probed}", timeout=2000)
-    p.page.wait_for_timeout(900)
-    assert before + 2 <= polls() <= before + 5
-
-
-def test_nothing_answered_and_wide_prefill(open_page):
-    p = open_page("SCAN=none&HOSTS=one")
-    open_add(p)
-    p.page.wait_for_selector("text=None answered on 10.0.10.0/24, port 9099.", timeout=6000)
-    assert p.page.locator(".found b").inner_text() == "0"
-    assert p.page.locator(".found small").inner_text() == "new"
-    p = open_page("NETWORK=wide")
-    open_add(p)
-    p.page.wait_for_timeout(500)
-    assert "That is 65,534 addresses." in p.page.get_by_role("alert").inner_text()
-    assert not p.api("POST", r"/fleet/scan$")
-
-
-def test_upload_refused_and_folder_missing(open_page, tmp_path):
-    p = open_page()
-    bad = tmp_path / "notes.json"
-    bad.write_text('{"hello": 1}')
-    open_add(p)
-    p.page.wait_for_selector(".replica-pick label")
-    p.page.locator("input[type=file][aria-label='Upload a replica']").set_input_files(str(bad))
-    p.page.wait_for_selector(".up-msg:has-text('This is not a replica file.')")
-    p = open_page("REPLICA_FOLDER=missing")
-    open_add(p)
-    p.page.wait_for_selector("text=Your replica folder is not available.")
-    assert p.page.get_by_role("button", name="Choose file").is_disabled()
-
-
-def test_first_run(open_page):
-    p = open_page("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1")
-    assert p.page.locator("article.card").count() == 1
-    eye = p.page.locator(".eye-btn")
-    assert eye.is_visible() and eye.is_disabled() and eye.inner_text().strip() == "0"
-    assert p.page.get_by_role("button", name="Refresh").is_visible()
-    assert p.page.get_by_role("button", name="Add a drive, or a replica for testing").is_visible()
-    assert p.page.locator(".app-foot a:visible").all_inner_texts() == [
-        "App log", "App configuration", "Agentic access", "GitHub", "HAIR, infrared remotes in Home Assistant"]
-    # No integration yet: the grey icon opens the install guide.
-    assert p.page.locator("a.exit").count() == 0 and p.page.locator("button.exit.add").count() == 1
-
-
-def test_raw_table_marks(open_page):
-    p = open_page()
-    c = by_id(p, BARRACUDA)
-    c.locator(".chev").click()
-    hits = c.locator("table.attrs tr.crit")
-    assert sorted(t.split()[0] for t in hits.all_inner_texts()) == ["197", "5"]
-
-
-# The grid columns a card spans, and the wrappers that scroll sideways.
-SPAN = """(e) => {
-  const cols = getComputedStyle(e.parentElement).gridTemplateColumns.split(' ').length;
-  const gap = parseFloat(getComputedStyle(e.parentElement).columnGap);
-  const col = (e.parentElement.getBoundingClientRect().width - gap * (cols - 1)) / cols;
-  return [cols, Math.round((e.getBoundingClientRect().width + gap) / (col + gap))];
-}"""
-WIDE_WRAPS = "els => els.filter((w) => w.scrollWidth > w.clientWidth + 0.5).map((w) => w.outerHTML.slice(0, 80))"
-HEIGHTS = "els => els.map((e) => Math.round(e.getBoundingClientRect().height))"
-
-
-@pytest.mark.parametrize("width,cols", [(1280, 3), (740, 2), (390, 1)])
-def test_open_card_stays_one_column(open_page, width, cols):
-    p = open_page("", width)
-    c = by_id(p, NAS_ATT)
-    assert c.evaluate(SPAN) == [cols, 1]
-    # Closed, every grid row is as tall as its tallest card.
-    if cols > 1:
-        heights = p.page.eval_on_selector_all(".grid > article.card", HEIGHTS)[:cols * 2]
-        assert len(set(heights[:cols])) == 1 and len(set(heights[cols:])) == 1, heights
-    before = p.page.eval_on_selector_all(".grid > article.card", HEIGHTS)
-    c.locator(".chev").click()
-    p.page.wait_for_timeout(200)
-    assert c.evaluate(SPAN) == [cols, 1]
-    assert card_ids(p)[:3] == [NVME, BARRACUDA, NAS_ATT]
-    after = p.page.eval_on_selector_all(".grid > article.card", HEIGHTS)
-    i = card_ids(p).index(NAS_ATT)
-    row = range(i - i % cols, i - i % cols + cols)
-    # The open card grows down; the cards beside it keep their own height.
-    assert after[i] > before[i] + 100, (before[i], after[i])
-    if cols > 1:
-        own = p.page.eval_on_selector_all(".grid > article.card", """els => els.map((e) => {
-          const kids = [...e.children].filter((k) => getComputedStyle(k).display !== 'none');
-          const last = kids[kids.length - 1].getBoundingClientRect();
-          const cs = getComputedStyle(e);
-          return Math.round(last.bottom + parseFloat(cs.paddingBottom) + parseFloat(cs.borderBottomWidth)
-            - e.getBoundingClientRect().top);
-        })""")
-        for j in row:
-            if j != i:
-                assert after[j] < after[i] and abs(after[j] - own[j]) <= 1, (j, after[j], own[j], after[i])
-        # Rows with no card open still stretch to their tallest card.
-        nxt = after[(row[-1] + 1):(row[-1] + 1 + cols)]
-        assert len(set(nxt)) == 1, nxt
-    # The table fits without scrolling sideways, on every open card.
-    for cid in (NAS_POOL, REP_FAILED, REP_NVME, BARRACUDA):
-        by_id(p, cid).locator(".chev").click()
-    p.page.wait_for_timeout(200)
-    assert p.page.locator(".table-wrap").count() >= 5
-    assert p.page.eval_on_selector_all(".table-wrap", WIDE_WRAPS) == []
-    assert p.page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    assert_no_scroll(p)
-    assert_inside_cards(p)
-    assert_no_overflow(p)
-    heads = c.locator("table.attrs thead th:visible").all_inner_texts()
-    # One column wide: ID, Name, Value and Raw; Worst and Thresh hide.
-    assert heads == ["ID", "Name", "Value", "Raw"], heads
-    assert c.locator("td.c-worst:visible, td.c-thresh:visible").count() == 0
-    name = c.locator("table.attrs td.nm").first
-    assert name.get_attribute("title") == name.locator(".lb").inner_text()
-    # Raw sits right next to Value: no spare space between the number columns.
-    gap = c.locator("tbody tr").first.evaluate("""r => {
-      const cells = [...r.cells].filter((x) => getComputedStyle(x).display !== 'none');
-      const v = cells[cells.length - 2].getBoundingClientRect(), raw = cells[cells.length - 1];
-      const text = document.createRange(); text.selectNodeContents(raw);
-      return text.getBoundingClientRect().left - v.right; }""")
-    assert gap < 40, gap
-    # Closed again, the row stretches as before.
-    for cid in (NAS_ATT, NAS_POOL, REP_FAILED, REP_NVME, BARRACUDA):
-        by_id(p, cid).locator(".chev").click()
-    p.page.wait_for_timeout(200)
-    assert p.page.eval_on_selector_all(".grid > article.card", HEIGHTS) == before
-
-
-def test_wide_card_has_no_spacer_column(open_page):
-    p = open_page("", 1280)
-    p.page.add_style_tag(content=".grid { grid-template-columns: 1fr !important; }")
-    c = by_id(p, NAS_ATT)
-    c.locator(".chev").click()
-    p.page.wait_for_timeout(200)
-    assert c.locator("table.attrs thead th:visible").all_inner_texts() == ["ID", "Name", "Value", "Worst", "Thresh", "Raw"]
-    # Name takes the spare width; Thresh and Raw sit together at the right.
-    gap = c.locator("tbody tr").first.evaluate("""r => {
-      const t = r.cells[4].getBoundingClientRect(), raw = r.cells[5];
-      const text = document.createRange(); text.selectNodeContents(raw);
-      return text.getBoundingClientRect().left - t.right; }""")
-    assert gap < 120, gap
-    assert c.locator("td.nm").first.bounding_box()["width"] > 600
-
-
-def test_drag_with_an_open_card(open_page):
-    p = open_page()
-    by_id(p, BARRACUDA).locator(".chev").click()
-    p.page.wait_for_timeout(200)
-    grip = by_id(p, BARRACUDA).locator(".grip").bounding_box()
-    target = by_id(p, NAS_MAYBE).bounding_box()
-    p.page.mouse.move(grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
-    p.page.mouse.down()
-    for i in range(1, 13):
-        p.page.mouse.move(grip["x"] + (target["x"] + target["width"] * 0.75 - grip["x"]) * i / 12,
-                          grip["y"] + (target["y"] + target["height"] / 2 - grip["y"]) * i / 12)
-        p.page.wait_for_timeout(20)
-    p.page.mouse.up()
-    p.page.wait_for_timeout(300)
-    ids = card_ids(p)
-    assert ids.index(BARRACUDA) == ids.index(NAS_MAYBE) + 1, ids[:6]
-    assert by_id(p, BARRACUDA).evaluate(SPAN) == [3, 1]
-    # In its new row the other cards keep their closed heights.
-    p.page.wait_for_timeout(200)
-    open_h = _heights(p)
-    by_id(p, BARRACUDA).locator(".chev").click()
-    p.page.wait_for_timeout(300)
-    closed = _heights(p)
-    i = ids.index(BARRACUDA)
-    _same_but(open_h, closed, i)
-    assert open_h[i] > closed[i] + 20
-    assert len(p.api("PUT", r"/cards/order$")) == 1
-
-
-# Every grid item's height: cards, then the + card.
-HEIGHTS = "() => [...document.querySelector('.grid').children].filter((e) => e.tagName !== 'TEMPLATE')" \
-    ".map((e) => e.getBoundingClientRect().height)"
-TWO_COLUMNS = 800
-
-
-def _heights(p: Page) -> list:
-    return p.page.evaluate(HEIGHTS)
-
-
-def _same_but(now: list, before: list, skip: int) -> None:
-    assert len(now) == len(before)
-    moved = [(j, a, b) for j, (a, b) in enumerate(zip(now, before)) if j != skip and abs(a - b) > 1]
-    assert not moved, moved
-
-
-def _cols(p: Page) -> int:
-    return p.page.evaluate("() => getComputedStyle(document.querySelector('.grid')).gridTemplateColumns.split(' ').length")
-
-
-def _toggle(p: Page, cid: str) -> None:
-    by_id(p, cid).locator(".chev").click()
-    p.page.wait_for_timeout(250)
-
-
-@pytest.mark.parametrize("width", [1280, TWO_COLUMNS, 390])
-def test_open_card_keeps_row_heights(open_page, width):
-    """An open card grows down; no other card changes height, open or closed."""
-    p = open_page("", width)
-    assert _cols(p) == {1280: 3, TWO_COLUMNS: 2, 390: 1}[width]
-    closed = _heights(p)
-    for cid in (NAS_ATT, BARRACUDA, NAS_POOL):
-        i = card_ids(p).index(cid)
-        _toggle(p, cid)
-        now = _heights(p)
-        _same_but(now, closed, i)
-        assert now[i] > closed[i] + 20, (now[i], closed[i])
-        _toggle(p, cid)
-        assert all(abs(a - b) <= 1 for a, b in zip(_heights(p), closed)), (_heights(p), closed)
-    # Thresholds edit mode changes the open card only.
-    i = card_ids(p).index(BARRACUDA)
-    _edit(p, BARRACUDA)
-    p.page.wait_for_timeout(250)
-    _same_but(_heights(p), closed, i)
-    by_id(p, BARRACUDA).get_by_role("button", name="Cancel").click()
-    p.page.wait_for_timeout(250)
-    _same_but(_heights(p), closed, i)
-    _toggle(p, BARRACUDA)
-    assert all(abs(a - b) <= 1 for a, b in zip(_heights(p), closed))
-
-
-def test_open_card_keeps_row_heights_through_a_resize(open_page):
-    p = open_page("", 1280)
-    p.page.set_viewport_size({"width": TWO_COLUMNS, "height": 900})
-    p.page.wait_for_timeout(300)
-    closed2 = _heights(p)
-    p.page.set_viewport_size({"width": 1280, "height": 900})
-    p.page.wait_for_timeout(300)
-    closed3 = _heights(p)
-    i = card_ids(p).index(NAS_ATT)
-    _toggle(p, NAS_ATT)
-    _same_but(_heights(p), closed3, i)
-    edit = by_id(p, NAS_ATT).locator(".chev")
-    edit.focus()
-    for size, closed in ((TWO_COLUMNS, closed2), (1280, closed3), (TWO_COLUMNS, closed2)):
-        p.page.set_viewport_size({"width": size, "height": 900})
-        p.page.wait_for_timeout(400)
-        now = _heights(p)
-        _same_but(now, closed, i)
-        assert now[i] > closed[i] + 20
-        assert by_id(p, NAS_ATT).locator(".chev").get_attribute("aria-expanded") == "true"
-    # The chevron keeps the focus through the measuring.
-    assert edit.evaluate("e => document.activeElement === e")
-    _toggle(p, NAS_ATT)
-    assert all(abs(a - b) <= 1 for a, b in zip(_heights(p), closed2))
-
-
-def test_chevron_outline_only_for_the_keyboard(open_page):
-    p = open_page()
-    chev = by_id(p, BARRACUDA).locator(".chev")
-    chev.click()
-    assert chev.get_attribute("aria-expanded") == "true"
-    assert chev.evaluate("e => getComputedStyle(e).outlineStyle") == "none"
-    assert not chev.evaluate("e => e.matches(':focus-visible')")
-    # By Tab from the card's grip, the outline shows, and Enter still works.
-    by_id(p, BARRACUDA).locator(".grip").focus()
-    for _ in range(12):
-        p.page.keyboard.press("Tab")
-        if chev.evaluate("e => document.activeElement === e"):
-            break
-    assert chev.evaluate("e => document.activeElement === e")
-    outline = chev.evaluate("e => [getComputedStyle(e).outlineStyle, getComputedStyle(e).outlineWidth]")
-    assert outline == ["solid", "2px"], outline
-    p.page.keyboard.press("Enter")
-    assert chev.get_attribute("aria-expanded") == "false"
-    assert chev.evaluate("e => e.matches(':focus-visible')")
-
-
-def test_page_polls_only_its_own_reads(open_page):
-    p = open_page()
-    p.page.wait_for_timeout(9000)
-    paths = {unquote(re.sub(r"\?.*", "", u[len(p.base):])) for _, u, _ in p.requests
-             if not u.endswith((".js", ".css", ".png"))}
-    assert paths <= {"/", "/app/info", "/cards", "/fleet/hosts", "/fleet/hosts/self/drives",
-                     "/fleet/hosts/replicas/drives", "/ha/devices"} | {
-        f"/fleet/hosts/{h}:9099/drives" for h in ("10.0.10.20", "10.0.10.44", "10.0.10.52")}, paths
-    assert len(p.api("GET", r"/fleet/hosts/self/drives$")) == 2
-    assert len(p.api("GET", r"/fleet/hosts$")) == 1
-
-
-# ── Screenshots, named by state ──────────────────────────────────────────────
-
-# ── Thresholds ───────────────────────────────────────────────────────────────
-
-# Watches every card but one and the grid while that card goes in and out of
-# threshold edit mode: an element added to or removed from another card, a
-# style or class change on one, a change to the grid's children, or a busy
-# mark or the page's error line anywhere outside the card is recorded.
-# Text-only changes (the cards' "seen" clocks) are allowed.
-WATCH_OTHERS = """(cid) => {
-  const grid = document.querySelector('.grid');
-  const mine = grid.querySelector(`[data-card="${CSS.escape(cid)}"]`);
-  const seen = window.__seen = [];
-  const kids = [...grid.children];
-  const els = (list) => [...list].filter((n) => n.nodeType === 1).length;
-  const obs = [];
-  kids.filter((e) => e !== mine && e.dataset && e.dataset.card).forEach((e) => {
-    const o = new MutationObserver((ms) => ms.forEach((m) => {
-      if (m.type === 'childList' && (els(m.addedNodes) || els(m.removedNodes))) seen.push(`subtree ${e.dataset.card}`);
-      if (m.type === 'attributes' && m.target === e) seen.push(`${m.attributeName} ${e.dataset.card}`);
-    }));
-    o.observe(e, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
-    obs.push(o);
-  });
-  const g = new MutationObserver((ms) => ms.forEach(() => seen.push('grid children')));
-  g.observe(grid, { childList: true });
-  obs.push(g);
-  let on = true;
-  const frame = () => {
-    if (!on) return;
-    const busy = [...document.querySelectorAll('[aria-busy="true"]')].filter((e) => !mine.contains(e));
-    if (busy.length) seen.push('busy outside the card');
-    const err = document.querySelector('.page-err');
-    if (err && err.offsetParent) seen.push('page error line');
-    if (!mine.querySelector('table.attrs')) seen.push('the card lost its table');
-    requestAnimationFrame(frame);
-  };
-  frame();
-  window.__stop = () => {
-    on = false;
-    obs.forEach((o) => o.disconnect());
-    const now = [...grid.children];
-    if (now.length !== kids.length || now.some((e, i) => e !== kids[i])) seen.push('grid children');
-    return seen;
-  };
-}"""
-
-
-def _edit(p: Page, cid: str):
-    c = by_id(p, cid)
-    if c.locator(".tune").count() == 0:
-        c.locator(".chev").click()
-    c.get_by_role("button", name="Edit thresholds").click()
-    p.page.wait_for_selector(f'[data-card="{cid}"] table.thr-t')
-    return c
-
-
-def _edit_rows(c) -> list:
-    return c.locator("table.thr-t tbody tr").evaluate_all("""rows => rows.map((r) => [
-        r.querySelector('.lb').textContent, r.cells[1].textContent, r.querySelector('input').value,
-        r.cells[3].textContent, r.className])""")
-
-
-def test_threshold_notes_at_rest(open_page):
-    p = open_page()
-    over = by_id(p, NAS_OVER)
-    # Closed: the flagged row's note names the threshold in force.
-    row = over.locator(".pw-row").first
-    assert row.locator(".pw-label").inner_text() == "Reallocated sectors (alert above 5, default 0)"
-    assert row.locator(".pw-val").inner_text() == "8"
-    assert "crit" in row.get_attribute("class")
-    # Within its threshold: Health OK, the row marked accepted, not flagged.
-    ok = by_id(p, NAS_ACCEPTED)
-    assert ok.locator(".h-ok").count() == 1 and ok.locator(".pw-row").count() == 0
-    ok.locator(".chev").click()
-    attr = ok.locator("table.attrs tr", has_text="Reallocated_Sector_Ct")
-    assert attr.locator("small").inner_text().strip() == "(accepted, alert above 4, default 0)"
-    assert attr.get_attribute("class") in ("", None)
-    # The tune button shows only with Details open, by the chevron.
-    assert by_id(p, NVME).locator(".tune").count() == 0
-    tune = ok.locator(".tune").bounding_box()
-    chev = ok.locator(".chev").bounding_box()
-    assert 0 <= chev["x"] - (tune["x"] + tune["width"]) < 16 and abs(tune["y"] + tune["height"] / 2 - chev["y"] - chev["height"] / 2) < 3
-    # Its glyph is the two sliders, filled, smaller than the chevron's button.
-    assert ok.locator(".tune svg use").get_attribute("href") == "#adjust"
-    sym = p.page.locator("symbol#adjust")
-    assert sym.get_attribute("viewBox") == "0 0 512 512" and sym.locator("path").count() == 2
-    glyph = ok.locator(".tune svg").bounding_box()
-    assert glyph["height"] < chev["height"] - 1 and glyph["width"] < chev["width"]
-    assert 0.72 <= glyph["height"] / chev["height"] <= 0.82
-    assert ok.locator(".tune svg").evaluate("e => getComputedStyle(e).fill") == ok.locator(".tune").evaluate("e => getComputedStyle(e).color")
-    # Closed again: no glyph.
-    ok.locator(".chev").click()
-    assert ok.locator(".tune").count() == 0
-    assert_colours(p)
-
-
-def test_tune_glyph_size_place_and_rest(open_page):
-    """The sliders glyph is 12.6 px, about half its width nearer the chevron
-    than the 14 px glyph was, vertically centred on it, with a tap target of
-    at least 24 px; leaving edit mode by any route puts it back at rest."""
-    p = open_page()
-    c = by_id(p, BARRACUDA)
-    c.locator(".chev").click()
-    p.page.wait_for_timeout(300)  # the chevron's turn
-    glyph = c.locator(".tune svg").bounding_box()
-    chev = c.locator(".chev svg").bounding_box()
-    tune = c.locator(".tune").bounding_box()
-    assert abs(glyph["width"] - 12.6) < 0.5 and abs(glyph["height"] - 12.6) < 0.5
-    assert tune["width"] >= 24 and tune["height"] >= 24
-    assert abs(glyph["y"] + glyph["height"] / 2 - chev["y"] - chev["height"] / 2) < 1
-    # Before: the 14 px glyph's centre 27 px from the chevron's (12 px gap).
-    centres = chev["x"] + chev["width"] / 2 - glyph["x"] - glyph["width"] / 2
-    gap = chev["x"] - glyph["x"] - glyph["width"]
-    assert 19.5 <= centres <= 21.5 and 5 <= gap <= 8
-    tune_l = c.locator(".tune")
-
-    def rest():
-        return tune_l.evaluate("""e => { const s = getComputedStyle(e);
-            return [e.getAttribute('aria-pressed'), e.className, s.color, s.backgroundColor, s.outlineStyle]; }""")
-
-    p.page.mouse.move(0, 0)
-    at_rest = rest()
-    assert at_rest == ["false", "tune", DIM, "rgba(0, 0, 0, 0)", "none"]
-
-    def back(route):
-        p.page.mouse.move(0, 0)
-        assert rest() == at_rest, route
-        assert not p.page.evaluate("Alpine.$data(document.body).ui.thr"), route
-
-    # The glyph again: still under the pointer it is not the edit look.
-    _edit(p, BARRACUDA)
-    assert tune_l.get_attribute("aria-pressed") == "true"
-    assert tune_l.evaluate("e => getComputedStyle(e).color") == PAPER
-    tune_l.click()
-    assert tune_l.get_attribute("aria-pressed") == "false"
-    assert tune_l.evaluate("e => getComputedStyle(e).color") != PAPER
-    back("glyph")
-    _edit(p, BARRACUDA)
-    c.get_by_role("button", name="Cancel").click()
-    back("cancel")
-    _edit(p, BARRACUDA)
-    c.get_by_role("button", name="Save", exact=True).click()
-    p.page.wait_for_selector(f'[data-card="{BARRACUDA}"] table.thr-t', state="detached")
-    p.page.wait_for_timeout(300)
-    back("save")
-    _edit(p, BARRACUDA)
-    c.locator(".chev").click()
-    assert c.locator(".tune").count() == 0
-    c.locator(".chev").click()
-    p.page.wait_for_timeout(300)
-    back("close")
-    # A keyboard Tab still shows the ring; a click leaves none.
-    tune_l.focus()
-    p.page.keyboard.press("Shift+Tab")
-    p.page.keyboard.press("Tab")
-    assert p.page.evaluate("document.activeElement.classList.contains('tune')")
-    assert tune_l.evaluate("e => e.matches(':focus-visible') && getComputedStyle(e).outlineStyle") == "solid"
-
-
-def test_threshold_edit_mode(open_page):
-    p = open_page()
-    c = _edit(p, BARRACUDA)
-    assert c.locator(".tune").get_attribute("aria-pressed") == "true"
-    rows = _edit_rows(c)
-    # The watched rows the drive reports, in the table's order, flagged ones marked.
-    assert [r[0] for r in rows[:2]] == ["Reallocated sectors", "Pending sectors"]
-    assert rows[0][1:] == ["24", "0", "0", "crit"] and rows[1][1:] == ["3", "0", "0", "crit"]
-    assert ["Command timeout", "0", "100", "100", ""] in rows
-    assert c.locator("table.thr-t td.def").first.evaluate("e => getComputedStyle(e).color") == DIM
-    assert c.locator(".thr-where").inner_text() == "Saved in Home Assistant"
-    assert c.locator("table.attrs:not(.thr-t)").count() == 0  # the edit table takes the table's place
-    assert [b.inner_text() for b in c.locator(".thr-btns button").all()] == [
-        "Accept current readings", "Reset to defaults", "Cancel", "Save"]
-    assert c.locator(".thr-pending").inner_text() == ""
-    assert_colours(p)
-    assert_no_dashes(p)
-    # A value that is not a whole number is refused on the page.
-    c.get_by_label("Threshold of Reallocated sectors, alert above").fill("x")
-    c.get_by_role("button", name="Save", exact=True).click()
-    assert "whole number" in c.locator(".thr-err").inner_text()
-    assert not p.api("PUT", r"/thresholds$")
-    c.get_by_label("Threshold of Reallocated sectors, alert above").fill("30")
-    c.get_by_role("button", name="Save", exact=True).click()
-    p.page.wait_for_selector(f'[data-card="{BARRACUDA}"] table.thr-t', state="detached")
-    sent = json.loads(p.api("PUT", r"/thresholds$")[0][2])["values"]
-    assert sent["Reallocated Sector Count"] == 30 and sent["Current Pending Sector Count"] == 0
-    # Saved: the card is judged again; 24 is within 30, the pending sectors still flag.
-    p.page.wait_for_function(f"""() => [...document.querySelectorAll('[data-card="{BARRACUDA}"] table.attrs tr')]
-        .some((r) => r.textContent.includes('accepted, alert above 30, default 0'))""")
-    c = _edit(p, BARRACUDA)
-    assert _edit_rows(c)[0][2] == "30"
-    # Cancel leaves without saving; the tune button again too.
-    c.get_by_label("Threshold of Reallocated sectors, alert above").fill("99")
-    c.get_by_role("button", name="Cancel").click()
-    assert c.locator("table.thr-t").count() == 0 and len(p.api("PUT", r"/thresholds$")) == 1
-    # Not in Home Assistant: the numbers live in the app.
-    p = open_page("HA_SELF=0")
-    c = _edit(p, BARRACUDA)
-    assert c.locator(".thr-where").inner_text() == "Saved in this app"
-
-
-def test_threshold_edit_touches_only_its_card(open_page):
-    """Opening a drive's Details reads its thresholds in the background, so
-    edit mode opens with no request and no wait; going in and out of it
-    changes nothing on any other card, the grid or the page."""
-    p = open_page()
-    gets = lambda: len(p.api("GET", r"/thresholds$"))  # noqa: E731
-    assert gets() == 0
-    c = by_id(p, BARRACUDA)
-    c.locator(".chev").click()
-    p.page.wait_for_function(f"() => Alpine.$data(document.body).thrCache[{json.dumps(BARRACUDA)}]?.data")
-    assert gets() == 1
-    p.page.evaluate(WATCH_OTHERS, BARRACUDA)
-    c.get_by_role("button", name="Edit thresholds").click()
-    # In edit mode at once: the table is there before anything could be read.
-    assert c.locator("table.thr-t").count() == 1
-    assert c.locator(".tune").get_attribute("aria-busy") is None
-    p.page.wait_for_timeout(200)
-    c.get_by_role("button", name="Stop editing thresholds").click()
-    assert c.locator("table.thr-t").count() == 0
-    p.page.wait_for_timeout(300)
-    assert p.page.evaluate("window.__stop()") == []
-    assert gets() == 1
-    # Not read yet (the background read failed): edit mode reads them, the
-    # card keeps its table meanwhile, the tune button shows the wait, and
-    # still nothing else changes.
-    p = open_page()
-    gets = lambda: len(p.api("GET", r"/thresholds$"))  # noqa: E731
-    thr = re.compile(r".*/cards/[^/]+/thresholds$")
-    p.page.route(thr, lambda r: r.abort() if r.request.method == "GET" else r.fallback())
-    c = by_id(p, BARRACUDA)
-    c.locator(".chev").click()
-    p.page.wait_for_function(f"() => Alpine.$data(document.body).thrCache[{json.dumps(BARRACUDA)}]?.err")
-    p.page.unroute(thr)
-    held = []
-    p.page.route(thr, lambda r: held.append(r))
-    p.page.evaluate(WATCH_OTHERS, BARRACUDA)
-    c.get_by_role("button", name="Edit thresholds").click()
-    p.page.wait_for_function("() => document.querySelector('.tune[aria-busy=\"true\"]')")
-    assert c.locator("table.attrs:not(.thr-t)").count() == 1 and c.locator("table.thr-t").count() == 0
-    assert c.locator(".tune").evaluate("e => getComputedStyle(e).opacity") == "0.5"
-    p.page.wait_for_timeout(200)
-    for r in held:
-        r.fallback()
-    c.locator("table.thr-t").wait_for()
-    assert c.locator(".tune").get_attribute("aria-busy") is None
-    c.get_by_role("button", name="Stop editing thresholds").click()
-    p.page.wait_for_timeout(300)
-    assert p.page.evaluate("window.__stop()") == []
-    assert gets() == 2
-
-
-PAPER = "rgb(241, 241, 241)"
-
-
-def _pending(c) -> list:
-    """The labels of the fields marked changed but not saved."""
-    return c.locator("table.thr-t tbody tr").evaluate_all("""rows => rows
-        .filter((r) => r.querySelector('input').classList.contains('pending'))
-        .map((r) => r.querySelector('.lb').textContent)""")
-
-
-def _no_threshold_writes(p: Page) -> bool:
-    return not [r for r in p.requests if r[0] != "GET" and "/thresholds" in r[1]]
-
-
-def test_threshold_buttons_and_pending(open_page):
-    p = open_page()
-    c = _edit(p, BARRACUDA)
-    # Accept and Reset on a row above; Cancel then Save below; all right-aligned,
-    # Save the rightmost and lowest.
-    boxes = [b.bounding_box() for b in c.locator(".thr-btns button").all()]
-    row = c.locator(".thr-btns").bounding_box()
-    right = row["x"] + row["width"]
-    acc, rst, can, sav = boxes
-    assert abs(acc["y"] - rst["y"]) < 1 and acc["x"] + acc["width"] < rst["x"]
-    assert abs(can["y"] - sav["y"]) < 1 and can["x"] + can["width"] < sav["x"]
-    assert rst["y"] + rst["height"] <= can["y"]
-    assert abs(right - rst["x"] - rst["width"]) < 1 and abs(right - sav["x"] - sav["width"]) < 1
-    assert max(b["x"] + b["width"] for b in boxes) == sav["x"] + sav["width"]
-    assert max(b["y"] for b in boxes) == sav["y"] and acc["x"] > row["x"]
-    # The pending note is on the line above the buttons, at the right.
-    note_box = c.locator(".thr-foot").bounding_box()
-    assert note_box["y"] + note_box["height"] <= row["y"]
-    assert c.locator(".thr-pending").inner_text() == "" and _pending(c) == []
-    # A typed change is pending: bold, in the main type, and the muted line.
-    field = c.get_by_label("Threshold of Reallocated sectors, alert above")
-    plain = field.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).fontWeight]")
-    field.fill("30")
-    assert _pending(c) == ["Reallocated sectors"]
-    assert field.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).fontWeight]") == [PAPER, "700"]
-    assert plain[1] != "700"
-    note = c.locator(".thr-pending")
-    assert note.inner_text() == "Not saved yet"
-    assert note.evaluate("e => getComputedStyle(e).color") == DIM
-    assert_colours(p)
-    # Typed back to the saved value: nothing pending.
-    field.fill("0")
-    assert _pending(c) == [] and note.inner_text() == ""
-    assert _no_threshold_writes(p)
-
-
-def test_threshold_accept_fills_the_fields(open_page):
-    p = open_page()
-    # One more label flagged, a wear gauge ("alert at"): accepting it takes
-    # the reading plus one, as the proxy's accept would store.
-    def wear(route):
-        body = route.fetch().json()
-        for lab in body["labels"]:
-            if lab["label"] == "SSD Wear Percent Used":
-                lab.update(reading=95, flagged=True)
-        route.fulfill(json=body)
-    p.page.route(re.compile(r".*/cards/[^/]+/thresholds$"), lambda r: wear(r) if r.request.method == "GET" else r.fallback())
-    c = _edit(p, BARRACUDA)
-    before = {r[0]: r[2] for r in _edit_rows(c)}
-    c.get_by_role("button", name="Accept current readings").click()
-    rows = {r[0]: r[2] for r in _edit_rows(c)}
-    filled = {"Reallocated sectors": "24", "Pending sectors": "3", "Wear used": "96"}
-    assert before["Wear used"] == "90" and {k: rows[k] for k in filled} == filled
-    assert {k: v for k, v in rows.items() if k not in filled} == {k: v for k, v in before.items() if k not in filled}
-    # No request and no confirm; the fields are pending.
-    p.page.wait_for_timeout(300)
-    assert _no_threshold_writes(p)
-    assert c.locator(".ask").count() == 0 and c.get_by_role("group", name="Confirm accept").count() == 0
-    assert sorted(_pending(c)) == sorted(filled)
-    assert c.locator(".thr-pending").inner_text() == "Not saved yet"
-    assert_no_dashes(p)
-    # Save sends them all in one PUT, and the card is judged again.
-    p.page.unroute(re.compile(r".*/cards/[^/]+/thresholds$"))
-    c.get_by_role("button", name="Save", exact=True).click()
-    p.page.wait_for_selector(f'[data-card="{BARRACUDA}"] .h-ok')
-    puts = p.api("PUT", r"/thresholds$")
-    assert len(puts) == 1
-    sent = json.loads(puts[0][2])["values"]
-    assert sent["Reallocated Sector Count"] == 24 and sent["Current Pending Sector Count"] == 3
-    assert sent["SSD Wear Percent Used"] == 96 and sent["Command Timeout"] == 100
-    assert not p.api("POST", r"/thresholds/(accept|reset)$")
-    # Saved: nothing pending when edited again, and nothing left to accept.
-    c = _edit(p, BARRACUDA)
-    assert _pending(c) == [] and c.locator(".thr-pending").inner_text() == ""
-    assert c.get_by_role("button", name="Accept current readings").is_disabled()
-    c = _edit(p, NVME)
-    assert c.get_by_role("button", name="Accept current readings").is_disabled()
-
-
-def test_threshold_reset_fills_defaults(open_page):
-    p = open_page()
-    c = _edit(p, NAS_ACCEPTED)
-    assert ["Reallocated sectors", "2", "4", "0", ""] == _edit_rows(c)[0]
-    c.get_by_role("button", name="Reset to defaults").click()
-    rows = _edit_rows(c)
-    assert all(r[2] == r[3] for r in rows), rows  # every field its default
-    assert _pending(c) == ["Reallocated sectors"]
-    assert c.locator(".thr-pending").inner_text() == "Not saved yet"
-    p.page.wait_for_timeout(300)
-    assert _no_threshold_writes(p)
-    assert c.locator(".ask").count() == 0 and c.get_by_role("group", name="Confirm reset").count() == 0
-    # Cancel discards: edit mode closes, nothing sent, the saved value back.
-    c.get_by_role("button", name="Cancel").click()
-    assert c.locator("table.thr-t").count() == 0
-    assert _no_threshold_writes(p)
-    c = _edit(p, NAS_ACCEPTED)
-    assert _edit_rows(c)[0][2] == "4" and _pending(c) == []
-    # Reset, then Save: one PUT with the defaults, and the card flags again.
-    c.get_by_role("button", name="Reset to defaults").click()
-    c.get_by_role("button", name="Save", exact=True).click()
-    p.page.wait_for_selector(f'[data-card="{NAS_ACCEPTED}"] .h-att')
-    puts = p.api("PUT", r"/thresholds$")
-    assert len(puts) == 1 and json.loads(puts[0][2])["values"]["Reallocated Sector Count"] == 0
-    assert not p.api("POST", r"/thresholds/(accept|reset)$")
-
-
-def _conn(c) -> list:
-    return c.locator(".conn .cp").evaluate_all(
-        "els => els.map((e) => [e.querySelector('.cp-k').textContent, e.querySelector('.cp-v').textContent])")
-
-
-def test_connect_by_hand(open_page):
-    p = open_page()
-    c = by_id(p, BARRACUDA)
-    assert c.locator(".conn").count() == 0  # only with Details open
-    c.locator(".chev").click()
-    assert c.locator(".conn-h").inner_text() == "Connect by hand"
-    assert _conn(c) == [["Host", "local-smart-sniffer-agent"], ["Port", "9099"], ["mDNS", "smartha-homeassistant"]]
-    # It sits in the summary area, above the table.
-    assert c.locator(".conn").bounding_box()["y"] < c.locator("table.attrs").bounding_box()["y"]
-    assert c.locator(".conn button.copy").count() == 3
-    nas = by_id(p, NAS_ATT)
-    nas.locator(".chev").click()
-    assert _conn(nas) == [["Host", "10.0.10.20"], ["Port", "9099"]]
-    assert nas.locator(".conn-note").count() == 0
-    pool = by_id(p, NAS_POOL)
-    pool.locator(".chev").click()
-    assert _conn(pool) == [["Host", "10.0.10.20"], ["Port", "9099"]]
-    rep = by_id(p, REP_FAILED)
-    rep.locator(".chev").click()
-    assert rep.locator(".conn").count() == 0  # a replica is not added by hand
-    assert_colours(p)
-    # A machine with a password says so.
-    p = open_page("HOSTS=one")
-    c = p.page.locator("article.card", has_text="proxmox-01").first
-    c = by_id(p, c.get_attribute("data-card"))
-    c.locator(".chev").click()
-    assert c.locator(".conn-note").inner_text() == "This agent wants its password (the token: line in its config)"
-
+# ── Header, agent line, footer ───────────────────────────────────────────────
 
 def test_top_of_page(open_page):
     p = open_page()
-    # No intro paragraph; the agent line, then the Drives label, then the grid.
-    assert p.page.locator(".app-tag").count() == 0
-    assert "Drive health for this machine" not in p.page.locator("main").inner_text()
+    assert p.page.title() == "SMART Sniffer App"
     line = p.page.locator(".agent-line")
     assert line.inner_text().replace("\n", " ").split() == [
         "HAOS", "SMART", "AGENT:", "local-smart-sniffer-agent:9099", "mDNS", "smartha-homeassistant"]
-    assert "answering" not in line.inner_text() and "0.8.1" not in line.inner_text()
     assert line.locator("button.copy").count() == 2
-    label = p.page.locator("p.sec-drives")
-    assert label.inner_text().strip() == "DRIVES:"
-    # Both section headers: uppercase, a colon, the same element and font.
-    heads = p.page.locator(".sec-label")
-    assert heads.count() == 2
-    assert [h.inner_text().strip() for h in heads.all()] == ["HAOS SMART AGENT:", "DRIVES:"]
-    fonts = [h.evaluate("e => { const c = getComputedStyle(e); return [c.fontFamily, c.fontSize, c.fontWeight, "
-                        "c.letterSpacing, c.textTransform, c.color].join('|') }") for h in heads.all()]
-    assert fonts[0] == fonts[1], fonts
-    # No rules line under the grid; the rules version sits in the header.
-    assert p.page.locator(".rules-line").count() == 0
-    assert "rules from integration" not in p.page.locator("main").inner_text()
-    vers = p.page.locator(".versions")
-    words = vers.inner_text().replace("\n", " ").split()
-    assert words[:5] == ["app", "0.3.1", "agent", "0.8.1", "rules"] and len(words) == 6, words
-    assert re.fullmatch(r"v?\d+(\.\d+)+\S*", words[5]), words
-    rules = vers.locator("span[title]", has_text="rules")
-    assert rules.get_attribute("title") == "Integration rules this app judges drives with"
-    dot = vers.locator(".agent-dot")
-    assert dot.evaluate("e => getComputedStyle(e).backgroundColor") == "rgb(93, 163, 114)"
-    assert dot.get_attribute("title") == "This app's agent is answering"
-    box = dot.bounding_box()
-    assert round(box["width"]) == 7 and round(box["height"]) == 7
-    assert dot.bounding_box()["x"] < vers.get_by_text("0.8.1").bounding_box()["x"]
-    head = p.page.locator("header.app-head").bounding_box()
-    tops = [line.bounding_box()["y"], label.bounding_box()["y"], p.page.locator(".grid").bounding_box()["y"]]
-    assert head["y"] < tops[0] < tops[1] < tops[2]
-    # The footer no longer carries the agent.
-    foot = p.page.locator("footer.app-foot")
-    assert "This app's agent" not in foot.inner_text() and foot.locator(".foot-agent").count() == 0
-    p = open_page("MDNS=off")
-    line = p.page.locator(".agent-line")
-    assert "mDNS" not in line.inner_text() and line.locator("button.copy").count() == 1
-    p = open_page("AGENT=down")
-    dot = p.page.locator(".versions .agent-dot")
-    assert dot.evaluate("e => getComputedStyle(e).backgroundColor") == "rgb(204, 107, 99)"
-    assert dot.get_attribute("title") == "This app's agent is not answering"
-    assert "answering" not in p.page.locator(".agent-line").inner_text()
-    assert_colours(p)
-
-
-@pytest.mark.parametrize("width", [390])
-def test_agent_line_wraps_on_a_phone(open_page, width):
-    p = open_page("", width)
-    assert_no_scroll(p)
-    assert_no_overflow(p)
-    # Each part wraps whole: no part is split over two lines.
-    heights = p.page.eval_on_selector_all(".agent-line > *", "els => els.map((e) => e.getBoundingClientRect().height)")
-    assert max(heights) < 24, heights
-
-
-def test_footer_links(open_page):
-    p = open_page()
-    foot = p.page.locator("footer.app-foot")
-    assert foot.locator("a:visible").all_inner_texts() == [
-        "App log", "App configuration", "Agentic access", "Integration", "GitHub",
-        "HAIR, infrared remotes in Home Assistant"]
-    agentic = foot.get_by_role("link", name="Agentic access")
-    assert agentic.get_attribute("href") == "agentic-access"
-    assert agentic.get_attribute("target") == "_blank" and agentic.get_attribute("rel") == "noopener"
-    assert foot.get_by_role("link", name="App log").get_attribute("title") == \
-        "The app's log in Home Assistant, from the agent and this page"
-    hair = foot.get_by_role("link", name="HAIR, infrared remotes in Home Assistant")
-    assert hair.get_attribute("href") == "https://github.com/DAB-LABS/HAIR"
-    assert hair.get_attribute("target") == "_blank" and hair.get_attribute("rel") == "noopener"
-    assert "Also from DAB-LABS:" in foot.locator(".also").inner_text()
-    assert foot.locator(".foot-sep").count() == 1
-    # Quiet, like the other links.
-    colour = "e => getComputedStyle(e).color"
-    assert hair.evaluate(colour) == foot.get_by_role("link", name="GitHub").evaluate(colour)
-
-
-OPACITY = "e => Number(getComputedStyle(e).opacity)"
-
-
-def test_plus_card_rests_dim(open_page):
-    p = open_page()
-    plus = p.page.locator("button.card.ghost")
-    assert plus.inner_text().split("\n")[-1].strip() == "Add a drive, or a replica for testing"
-    assert abs(plus.evaluate(OPACITY) - 0.3) < 0.01
-    plus.hover()
-    p.page.wait_for_timeout(300)
-    assert plus.evaluate(OPACITY) == 1
-    p.page.mouse.move(2, 2)
-    p.page.wait_for_timeout(300)
-    assert abs(plus.evaluate(OPACITY) - 0.3) < 0.01
-    plus.focus()
-    p.page.keyboard.press("Shift+Tab")
-    p.page.keyboard.press("Tab")
-    p.page.wait_for_timeout(300)
-    assert plus.evaluate(OPACITY) == 1
-
-
-def test_plus_card_rests_brighter_on_touch(browser, server):
-    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?", method="POST"), timeout=5)
-    ctx = browser.new_context(viewport={"width": 390, "height": 900}, has_touch=True, is_mobile=True)
-    page = ctx.new_page()
-    page.goto(server + "/")
-    page.wait_for_selector("article.card")
-    try:
-        assert page.evaluate("matchMedia('(hover: none)').matches")
-        assert abs(page.locator("button.card.ghost").evaluate(OPACITY) - 0.45) < 0.01
-        grip = page.locator("article.card .grip").first
-        assert abs(grip.evaluate(OPACITY) - 0.3) < 0.01
-    finally:
-        ctx.close()
-
-
-def test_card_controls_dim_until_hover(open_page):
-    p = open_page()
-    c = by_id(p, NAS_MAYBE)
-    other = by_id(p, NVME)
-    controls = lambda card: [card.locator(".grip")] + card.locator(".c-foot .icon").all()  # noqa: E731
-    assert len(controls(c)) == 4  # grip, download, eye, trash
-    p.page.mouse.move(2, 2)
-    p.page.wait_for_timeout(250)
-    for el in controls(c):
-        assert abs(el.evaluate(OPACITY) - 0.3) < 0.01
-    # The exit icon, the pill and the health box stay as they are.
-    for sel in (".exit", ".pill", ".hbox"):
-        assert c.locator(sel).evaluate(OPACITY) == 1
-    # The pointer anywhere on the card brings them all up, on that card only.
-    box = c.locator(".c-vitals").bounding_box()
-    p.page.mouse.move(box["x"] + 4, box["y"] + 4)
-    p.page.wait_for_timeout(250)
-    assert all(el.evaluate(OPACITY) == 1 for el in controls(c))
-    assert all(abs(el.evaluate(OPACITY) - 0.3) < 0.01 for el in controls(other))
-    # Keyboard focus brings one up without the pointer.
-    p.page.mouse.move(2, 2)
-    c.locator(".grip").focus()
-    p.page.keyboard.press("Shift+Tab")
-    p.page.keyboard.press("Tab")
-    p.page.wait_for_timeout(250)
-    assert c.locator(".grip").evaluate(OPACITY) == 1
-    assert abs(c.locator(".c-foot .icon").first.evaluate(OPACITY) - 0.3) < 0.01
-
-
-@pytest.mark.parametrize("width,span", [(1280, 2), (740, 2), (390, 1)])
-def test_open_plus_card_spans(open_page, width, span):
-    p = open_page("", width)
-    open_add(p)
-    region = p.page.get_by_role("region", name="Add", exact=True)
-    cols, spans = region.evaluate(SPAN)
-    assert spans == span and (cols == 3 if width == 1280 else spans == cols), (cols, spans)
-    areas = region.locator("section.area").all()
-    if width == 390:
-        tops = [a.bounding_box()["y"] for a in areas]
-        assert tops == sorted(tops) and len(set(tops)) == 3
-    assert_no_scroll(p)
-
-
-def _check(region, host: str, text: str):
-    region.get_by_label("Host or IP").fill(host)
-    region.get_by_role("button", name="Check").click()
-    msg = region.locator(".check-msg")
-    msg.filter(has_text=text).wait_for(timeout=4000)
-    return msg
-
-
-def test_check_answers_every_time(open_page):
-    p = open_page("HOSTS=one")
-    open_add(p)
-    region = p.page.get_by_role("region", name="Add", exact=True)
-    p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
-    p.page.wait_for_timeout(500)
-    # (a) A machine already in the scan's list: ticked again, flashed, said.
-    row = region.locator(".pick-row", has_text="10.0.10.61")
-    row.click()
-    assert not row.locator("input").is_checked()
-    msg = _check(region, "10.0.10.61", "10.0.10.61 is in the list above, ticked.")
-    assert msg.inner_text() == "10.0.10.61 is in the list above, ticked."
-    region.locator(".pick-row.flash", has_text="10.0.10.61").wait_for(timeout=1000)
-    assert row.locator("input").is_checked()
-    assert region.locator(".pick-row").count() == 3
-    # The flash is an outline in white or grey only.
-    assert_colours(p)
-    # (b) A new machine joins the list, ticked.
-    msg = _check(region, "nas.lan", "Added nas.lan to the list, ticked.")
-    assert region.locator(".pick-row.on", has_text="nas.lan:9099").count() == 1
-    # (c) A stored machine with cards on the page.
-    msg = _check(region, "10.0.10.21", "10.0.10.21 is already on the page.")
-    # (d) Nothing answered, muted.
-    msg = _check(region, "10.0.10.99", "Nothing answered at 10.0.10.99:9099.")
-    assert msg.evaluate("e => getComputedStyle(e).color") == "rgb(143, 143, 143)"
-    # (e) Something answered that is no agent.
-    msg = _check(region, "10.0.10.98", "10.0.10.98:9099 answered, but it is not a SMART Sniffer agent.")
-    assert msg.evaluate("e => getComputedStyle(e).color") != "rgb(143, 143, 143)"
-    # The scan stays; Check never starts one.
-    assert len(p.api("POST", r"/fleet/scan$")) == 1
-    assert region.locator(".pick-row").count() == 4
+    assert [h.inner_text().strip() for h in p.page.locator(".sec-label").all()] == ["HAOS SMART AGENT:", "DRIVES:"]
+    words = p.page.locator(".versions").inner_text().replace("\n", " ").split()
+    assert words[:5] == ["app", "0.4.0-dev", "agent", "0.8.5", "rules"] and len(words) == 6, words
+    # The header: SMART SNIFFER | App · HAOS, "· HAOS" muted. No buttons at
+    # all: the hidden-cards eye and Refresh are gone (the page polls).
+    head = p.page.locator("header.app-head")
+    name = head.locator(".page-name")
+    assert name.inner_text() == "App · HAOS"
+    assert name.locator(".pn-sub").inner_text() == "· HAOS"
+    assert name.evaluate("e => getComputedStyle(e).color") == "rgb(189, 189, 189)"
+    assert name.locator(".pn-sub").evaluate("e => getComputedStyle(e).color") == DIM
+    assert head.locator("button, .head-tools").count() == 0
+    assert p.page.get_by_role("button", name="Refresh").count() == 0
+    assert p.page.evaluate("typeof Alpine.$data(document.body).refresh") == "undefined"
+    # The retired notice line is not there in any state.
+    for flags in ("INTEGRATION=missing", ""):
+        q = open_page(flags)
+        assert q.page.locator(".ha-notice").count() == 0
+        assert "Want sensors and alerts?" not in q.page.locator("main").inner_text()
 
 
 def test_copy_buttons(open_page):
@@ -2603,491 +566,719 @@ def test_copy_buttons(open_page):
     p.page.locator(".agent-line button.copy").first.click()
     assert p.page.evaluate("navigator.clipboard.readText()") == "local-smart-sniffer-agent:9099"
     assert p.page.locator(".agent-line .copied:visible").inner_text() == "copied"
-    c = by_id(p, NAS_ATT)
-    c.locator(".chev").click()
-    c.get_by_role("button", name="Copy Host").click()
-    assert p.page.evaluate("navigator.clipboard.readText()") == "10.0.10.20"
-    # No Clipboard API (a frame without the permission): the text is selected.
-    p.page.evaluate("Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })")
-    c.get_by_role("button", name="Copy Port").click()
-    assert p.page.evaluate("window.getSelection().toString()") == "9099"
-    assert c.locator(".copied:visible").inner_text() in ("copied", "selected")
 
 
-def _shot(p: Page, name: str, target=None):
-    SHOTS.mkdir(parents=True, exist_ok=True)
-    width = p.page.viewport_size["width"]
-    path = SHOTS / f"{name}-{width}.png"
-    p.page.wait_for_timeout(250)
-    if target is None:
-        p.page.screenshot(path=str(path), full_page=True)
+@pytest.mark.parametrize("flags,links", [
+    ("", ["App log", "App configuration", "Integration", "GitHub", "HAIR, infrared remotes in Home Assistant"]),
+    ("INTEGRATION=update", ["App log", "App configuration", "Integration", "GitHub",
+                            "HAIR, infrared remotes in Home Assistant"]),
+    ("INTEGRATION=missing", ["App log", "App configuration", "GitHub", "HAIR, infrared remotes in Home Assistant"]),
+])
+def test_footer_links(open_page, flags, links):
+    p = open_page(flags)
+    foot = p.page.locator("footer.app-foot")
+    assert foot.locator("a:visible").all_inner_texts() == links
+    assert foot.get_by_text("Agentic access").count() == 0
+    assert foot.get_by_role("link", name="App log").get_attribute("href") == \
+        "/config/app/local_smart_sniffer_agent/logs"
+    if "Integration" in links:
+        assert foot.get_by_role("link", name="Integration").get_attribute("href") == \
+            "/config/integrations/integration/smart_sniffer"
+    assert "DAB-LABS" in foot.inner_text()
+
+
+# ── The card under the grid: Control Center, install, update ────────────────
+
+LINK_CASES = {
+    "loaded": ("INTEGRATION=loaded", SEE_ALL, None, "Open", False),
+    "no_entries": ("INTEGRATION=no_entries", SEE_ALL,
+                   "It opens once SMART Sniffer has its first machine. Create sensors and alerts for HAOS "
+                   "above, or add a machine in Settings, Devices & services.", None, False),
+    "restart": ("INTEGRATION=restart", SEE_ALL, "Restart Home Assistant to finish the update.", None, False),
+    "panel_failed": ("INTEGRATION=panel_failed", SEE_ALL,
+                     "The Control Center did not start. Check the Home Assistant log.", None, False),
+    "missing": ("INTEGRATION=missing", GET_MORE,
+                "Install the SMART Sniffer integration to get these drives with sensors and alerts, "
+                "and to also add other machines.", "How to install", True),
+    "missing_one_drive": ("INTEGRATION=missing&DRIVES=1", GET_MORE,
+                          "Install the SMART Sniffer integration to get this drive with sensors and alerts, "
+                          "and to also add other machines.", "How to install", True),
+    "update": ("INTEGRATION=update", GET_MORE,
+               "Update the SMART Sniffer integration to 0.9 to add your other machines and see them all "
+               "in the Control Center.", "Open in HACS", True),
+}
+
+
+@pytest.mark.parametrize("case", list(LINK_CASES))
+@pytest.mark.parametrize("width", [1280, 390])
+def test_link_card_states(open_page, case, width):
+    flags, title, body, action, close = LINK_CASES[case]
+    p = open_page(flags, width)
+    lc = link_card(p)
+    lc.wait_for(timeout=5000)
+    assert lc.count() == 1
+    assert lc.locator(".lc-title").inner_text() == title
+    if body:
+        assert lc.locator(".lc-body").inner_text() == body
     else:
-        target.scroll_into_view_if_needed()
-        target.screenshot(path=str(path))
+        assert lc.locator(".lc-body").count() == 0
+    acts = lc.locator(".lc-act a").all_inner_texts()
+    assert acts == ([action] if action else []), acts
+    assert (lc.get_by_role("button", name="Close").count() == 1) is close
+    # Last in the grid, across every column, in the built card style.
+    last = p.page.evaluate("""() => [...document.querySelector('.grid').children]
+        .filter((e) => e.tagName !== 'TEMPLATE').pop().classList.contains('link-card')""")
+    assert last
+    grid = p.page.locator(".grid").bounding_box()
+    box = lc.bounding_box()
+    assert abs(box["width"] - grid["width"]) < 1 and abs(box["x"] - grid["x"]) < 1, (box, grid)
+    style = lc.evaluate("""e => { const c = getComputedStyle(e); return [c.backgroundColor, c.borderTopColor,
+        c.borderTopWidth, c.borderTopLeftRadius !== '0px']; }""")
+    assert style == ["rgb(7, 7, 7)", "rgb(43, 43, 43)", "1px", True], style
+    assert lc.locator(".lc-title").evaluate("e => getComputedStyle(e).color") == "rgb(241, 241, 241)"
+    if body:
+        # #bdbdbd at 0.86 rem.
+        got = lc.locator(".lc-body").evaluate(
+            "e => [getComputedStyle(e).color, parseFloat(getComputedStyle(e).fontSize)"
+            " / parseFloat(getComputedStyle(document.documentElement).fontSize)]")
+        assert got[0] == "rgb(189, 189, 189)" and abs(got[1] - 0.86) < 0.001, got
+    if width == 390:
+        # The action drops under the text.
+        text = lc.locator(".lc-text").bounding_box()
+        act = lc.locator(".lc-act").bounding_box()
+        assert act["y"] >= text["y"] + text["height"] - 1
     assert_no_scroll(p)
+    assert_no_dashes(p)
     if width < 760:
         assert_no_overflow(p)
 
 
-def _top(p: Page, name: str):
-    """The top of the page, header to the first row of cards."""
-    SHOTS.mkdir(parents=True, exist_ok=True)
-    width = p.page.viewport_size["width"]
-    p.page.wait_for_timeout(250)
-    bottom = p.page.locator(".grid").bounding_box()["y"] + 40
-    p.page.screenshot(path=str(SHOTS / f"{name}-{width}.png"), clip={"x": 0, "y": 0, "width": width, "height": bottom})
+def test_link_card_waits_for_the_integration(open_page):
+    # Home Assistant not answering: no card, no Create line, no Integration
+    # link; this box's drives as always.
+    p = open_page("INTEGRATION=unreachable")
+    assert link_card(p).count() == 0 and p.page.locator(".create").count() == 0
+    assert by_id(p, NVME).count() == 1
+
+
+def test_link_card_links(open_page):
+    p = open_page("INTEGRATION=missing")
+    link = link_card(p).get_by_role("link", name="How to install")
+    assert link.get_attribute("href") == HACS_REPO
+    assert link.get_attribute("target") == "_blank" and link.get_attribute("rel") == "noopener"
+    p = open_page("INTEGRATION=missing&HACS=missing")
+    assert link_card(p).get_by_role("link", name="How to install").get_attribute("href") == HACS_DOCS
+    p = open_page("INTEGRATION=update")
+    link = link_card(p).get_by_role("link", name="Open in HACS")
+    assert link.get_attribute("href") == HACS_REPO and link.get_attribute("target") == "_blank"
+    p = open_page("INTEGRATION=loaded")
+    open_ = link_card(p).get_by_role("link", name="Open")
+    assert open_.get_attribute("href") == "/smart-sniffer" and open_.get_attribute("target") == "_top"
+    assert "btn" in open_.get_attribute("class")
+    p = open_page("INTEGRATION=loaded&PANEL_PATH=/smart-sniffer-dev")
+    assert link_card(p).get_by_role("link", name="Open").get_attribute("href") == "/smart-sniffer-dev"
+
+
+@pytest.mark.parametrize("which", ["install", "update"])
+def test_link_card_close_persists(open_page, browser, server, which):
+    flags = "INTEGRATION=missing" if which == "install" else "INTEGRATION=update"
+    p = open_page(flags)
+    link_card(p).get_by_role("button", name="Close").click()
+    assert link_card(p).count() == 0
+    posts = p.api("POST", r"/app/notice/dismiss$")
+    assert len(posts) == 1 and json.loads(posts[0][2]) == {"notice": which}
+    # Another browser: closed there too (the app keeps it, not the browser).
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    try:
+        page.goto(f"{server}/?{flags}")
+        page.wait_for_selector("article.card")
+        page.wait_for_timeout(800)
+        assert page.locator("section.link-card").count() == 0
+    finally:
+        ctx.close()
+
+
+def test_link_card_never_closes_while_it_leads_somewhere(open_page):
+    for flags in ("INTEGRATION=loaded", "INTEGRATION=no_entries", "INTEGRATION=restart",
+                  "INTEGRATION=panel_failed"):
+        p = open_page(flags)
+        assert link_card(p).get_by_role("button", name="Close").count() == 0, flags
+
+
+# Open: in its own tab a plain link; framed in Home Assistant, the page
+# asks its parent with home-assistant/navigate, and goes there itself when
+# the parent does not.
+
+PARENT = """<!doctype html><html><body style="margin:0">
+<iframe id="f" src="{src}" style="width:1200px;height:800px;border:0"></iframe>
+<script>
+  window.got = [];
+  window.marker = 'parent';
+  window.addEventListener('message', (e) => {{
+    window.got.push(e.data);
+    if ({handle} && e.data && e.data.type === 'home-assistant/navigate') history.pushState(null, '', e.data.path);
+  }});
+</script></body></html>"""
+
+
+def _framed(browser, server, handle: bool):
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    shell = f"{server}/ha-shell"
+    page.route(shell, lambda route: route.fulfill(
+        status=200, content_type="text/html",
+        body=PARENT.format(src="/?INTEGRATION=loaded", handle="true" if handle else "false")))
+    page.route(f"{server}/smart-sniffer", lambda route: route.fulfill(
+        status=200, content_type="text/html", body="<!doctype html><title>panel</title><p>panel</p>"))
+    page.goto(shell)
+    frame = page.frame_locator("#f")
+    frame.locator("section.link-card").get_by_role("link", name="Open").wait_for(timeout=10000)
+    return ctx, page, frame
+
+
+def test_open_asks_home_assistant_to_navigate(browser, server):
+    ctx, page, frame = _framed(browser, server, handle=True)
+    try:
+        frame.locator("section.link-card").get_by_role("link", name="Open").click()
+        page.wait_for_timeout(1200)
+        assert page.evaluate("window.got") == [{"type": "home-assistant/navigate", "path": "/smart-sniffer"}]
+        # Home Assistant went there itself: no second, full navigation.
+        assert page.evaluate("window.marker") == "parent"
+        assert page.evaluate("location.pathname") == "/smart-sniffer"
+    finally:
+        ctx.close()
+
+
+def test_open_falls_back_to_the_top_window(browser, server):
+    ctx, page, frame = _framed(browser, server, handle=False)
+    try:
+        with page.expect_navigation(timeout=5000):
+            frame.locator("section.link-card").get_by_role("link", name="Open").click()
+        assert page.url == f"{server}/smart-sniffer"
+        assert page.title() == "panel"
+    finally:
+        ctx.close()
+
+
+def test_open_in_its_own_tab_is_a_plain_link(open_page, server):
+    p = open_page("INTEGRATION=loaded")
+    p.page.route(f"{server}/smart-sniffer", lambda route: route.fulfill(
+        status=200, content_type="text/html", body="<!doctype html><title>panel</title>"))
+    with p.page.expect_navigation(timeout=5000):
+        link_card(p).get_by_role("link", name="Open").click()
+    assert p.page.url == f"{server}/smart-sniffer"
+    p.errors.clear()
+
+
+# ── Create sensors and alerts for HAOS ───────────────────────────────────────
+
+def test_create_line_and_confirm(open_page):
+    p = open_page("INTEGRATION=loaded&HAOS_ENTRY=0")
+    line = p.page.get_by_role("button", name="Create sensors and alerts for HAOS")
+    assert line.count() == 1
+    # Directly under DRIVES:, above the cards.
+    label = p.page.locator("p.sec-drives").bounding_box()
+    at = line.bounding_box()
+    grid = p.page.locator(".grid").bounding_box()
+    assert label["y"] < at["y"] < grid["y"]
+    # Built link style: underlined, paper-white, no box.
+    assert line.evaluate("e => getComputedStyle(e).textDecorationLine") == "underline"
+    assert line.evaluate("e => getComputedStyle(e).borderTopStyle") == "none"
+    line.click()
+    ask = p.page.get_by_role("group", name="Confirm")
+    assert ask.locator(".ask-title").inner_text() == "Create sensors and alerts for HAOS?"
+    assert ask.locator(".ask-line").inner_text() == (
+        "Each of its 2 drives gets health sensors for dashboards and automations, and an alert when it needs attention.")
+    assert ask.get_by_role("button").all_inner_texts() == ["Create", "Cancel"]
+    ask.get_by_role("button", name="Cancel").click()
+    assert p.page.locator(".create .ask").count() == 0
+    line.click()
+    p.page.keyboard.press("Escape")
+    assert p.page.locator(".create .ask").count() == 0
+    # The card under the grid says Open meanwhile.
+    assert link_card(p).get_by_role("link", name="Open").count() == 1
+    line.click()
+    p.page.get_by_role("group", name="Confirm").get_by_role("button", name="Create").click()
+    line.wait_for(state="detached", timeout=5000)
+    posts = p.api("POST", r"/ha/add$")
+    assert len(posts) == 1 and json.loads(posts[0][2]) == {"target": "self"}
+    assert link_card(p).locator(".lc-title").inner_text() == SEE_ALL
+    for text in p.page.locator("main").all_inner_texts():
+        assert "to Home Assistant" not in text
+
+
+def test_create_line_one_drive_and_error(open_page):
+    p = open_page("INTEGRATION=loaded&HAOS_ENTRY=0&DRIVES=1&ADD=error")
+    p.page.get_by_role("button", name="Create sensors and alerts for HAOS").click()
+    ask = p.page.get_by_role("group", name="Confirm")
+    assert ask.locator(".ask-line").inner_text() == (
+        "Its drive gets health sensors for dashboards and automations, and an alert when it needs attention.")
+    ask.get_by_role("button", name="Create").click()
+    ask.locator(".ask-err").wait_for(timeout=5000)
+    assert ask.locator(".ask-err").inner_text() == "Home Assistant did not create them. The App log may say why."
+    assert p.page.get_by_role("button", name="Create sensors and alerts for HAOS").count() == 1
+
+
+def test_create_line_with_no_machines_yet(open_page):
+    # Integration 0.9 installed with no machine: the line, and the card says
+    # how it opens. After Create, Open.
+    p = open_page("INTEGRATION=no_entries")
+    assert p.page.get_by_role("button", name="Create sensors and alerts for HAOS").count() == 1
+    assert link_card(p).get_by_role("link", name="Open").count() == 0
+    p.page.get_by_role("button", name="Create sensors and alerts for HAOS").click()
+    p.page.get_by_role("group", name="Confirm").get_by_role("button", name="Create").click()
+    link_card(p).get_by_role("link", name="Open").wait_for(timeout=5000)
+
+
+@pytest.mark.parametrize("flags", ["INTEGRATION=loaded", "INTEGRATION=update", "INTEGRATION=missing",
+                                   "INTEGRATION=restart", "INTEGRATION=panel_failed"])
+def test_no_create_line(open_page, flags):
+    p = open_page(flags)
+    assert p.page.locator(".create").count() == 0
+
+
+# ── Cards as the integration's Control Center draws them ─────────────────────
+# The stat row, the Details header, Device Statistics, one number rule,
+# hover-only underlines and the popovers with Copy, as in integration 0.9.
+
+WUH = "self|9JG0X1AB"
+QEMU = "self|QM00005"
+
+
+def _open(c):
+    c.locator("button.chev").first.click()
+    c.locator(".details").first.wait_for()
+
+
+def _stats(c):
+    """A card's stat row as (label, value) pairs, labels as written in the
+    page (the uppercase is CSS)."""
+    return c.locator(".c-stats .st-t").evaluate_all(
+        "els => els.map(e => [e.querySelector('dt').textContent, e.querySelector('dd').textContent])")
+
+
+def test_stat_row_temperature_days_written_read_worn(open_page):
+    p = open_page("DRIVES=2&VDISK=1")
+    nvme = by_id(p, NVME)
+    tiles = _stats(nvme)
+    assert tiles == [["Temp", "41 C"], ["Powered", "92 d"], ["Written", "4.67 TB"], ["Read", "9.34 TB"],
+                     ["Worn", "2%"]], tiles
+    # Shown in capitals, a hairline before every tile (the first one clipped).
+    assert nvme.locator(".st-k").first.inner_text() == "TEMP"
+    lines = nvme.locator(".st-t").evaluate_all("els => els.map(e => getComputedStyle(e).borderLeftStyle)")
+    assert set(lines) == {"solid"}, lines
+    clip = nvme.locator(".c-stats").evaluate(
+        "e => [e.getBoundingClientRect().left, e.querySelector('.st-t').getBoundingClientRect().left,"
+        " getComputedStyle(e).overflow]")
+    assert clip[1] < clip[0] and clip[2] == "hidden", clip
+    # No status colours: every value in one colour, the units lighter grey.
+    colors = nvme.locator(".st-v > span").evaluate_all("els => [...new Set(els.map(e => getComputedStyle(e).color))]")
+    assert len(colors) == 1, colors
+    # A hard disk with Device Statistics but no page 7: written and read
+    # from them, never "worn".
+    hdd = dict(_stats(by_id(p, WUH)))
+    assert hdd["Written"] == "108 TB" and hdd["Read"] == "792 TB" and "Worn" not in hdd, hdd
+    # A virtual disk that reports nothing: no row at all, no stray hairline.
+    assert by_id(p, QEMU).locator(".c-stats, .st-t, .c-vitals").count() == 0
+    # A SATA drive with attribute 241 only: written, no read, no worn.
+    q = open_page()
+    bc = dict(_stats(by_id(q, BARRACUDA)))
+    assert list(bc) == ["Temp", "Powered", "Written"] and bc["Written"] == "61.2 TB", bc
+
+
+def test_stat_row_leaves_out_what_is_not_reported_and_zero_degrees(open_page):
+    p = open_page()
+    got = p.page.evaluate("""() => {
+      const x = Alpine.$data(document.body);
+      const card = (stats) => ({ kind: 'drive', it: { drive: { smart_data: {} }, view: { stats } } });
+      const keys = (c) => x.stats(c).map((t) => t.k + '=' + t.n + t.u);
+      return {
+        zero: keys(card({ temp_c: 0, power_on_hours: 12000 })),
+        missing: keys(card({ power_on_hours: 30 })),
+        none: x.stats(card({ temp_c: 0 })).length,
+        warm: keys(card({ temp_c: 41 })),
+        pool: x.stats({ kind: 'pool', it: {} }).length,
+      };
+    }""")
+    assert got == {"zero": ["Powered=500 d"], "missing": ["Powered=30 h"], "none": 0, "warm": ["Temp=41 C"],
+                   "pool": 0}, got
+
+
+@pytest.mark.parametrize("width", [1100, 390])
+def test_stat_row_is_one_row_with_all_five(open_page, width):
+    p = open_page("", width)
+    nvme = by_id(p, NVME)
+    tops = nvme.locator(".st-t").evaluate_all("els => els.map(e => Math.round(e.getBoundingClientRect().top))")
+    assert len(tops) == 5 and len(set(tops)) == 1, tops
+    # The pool card keeps its plain line: no stat row.
+    q = open_page("POOL=online", width)
+    assert by_id(q, POOL).locator(".c-stats").count() == 0 and by_id(q, POOL).locator(".c-vitals").count() == 1
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_details_top_names_the_drive(open_page, width):
+    p = open_page("DRIVES=mixed", width)
+    bc = by_id(p, BARRACUDA)
+    _open(bc)
+    ident = bc.locator("dl.kv.ident")
+    assert ident.locator("dt").all_inner_texts() == ["Model", "Serial", "Firmware", "Capacity", "Interface"]
+    values = ident.locator("dd").all_inner_texts()
+    assert values == ["Seagate BarraCuda 2TB ST2000DM008", "ZFL0K7Q2", "0001", "2.00 TB", "SATA 6.0 Gb/s"], values
+    # No copy glyph at rest: model, serial and firmware open the popover;
+    # capacity keeps its exact bytes behind it; every value lines up right.
+    assert bc.locator(".details button.copy, .details .copied").count() == 0
+    assert ident.locator(".bign.txt").all_inner_texts() == values[:3]
+    assert ident.locator(".bign:not(.txt)").get_attribute("title") == "2,000,398,934,016 bytes"
+    rights = ident.locator("dd").evaluate_all(
+        "els => els.map(e => Math.round((e.querySelector('.v') || e).getBoundingClientRect().right))")
+    assert len(set(rights)) == 1, rights
+    # The drive's own lines, then Connect by hand, then the table.
+    order = bc.locator(".details > *").evaluate_all("els => els.map(e => e.className)")
+    assert order.index("kv ident") < order.index("conn") < order.index("table-wrap"), order
+    # A link slower than the drive says both speeds; NVMe says NVMe and has
+    # no Device Statistics.
+    red = by_id(p, RED)
+    _open(red)
+    assert red.locator("dl.kv.ident dd").all_inner_texts()[-1] == "SATA 3.0 Gb/s (max 6.0 Gb/s)"
+    nv = by_id(p, NVME)
+    _open(nv)
+    assert nv.locator("dl.kv.ident dd").all_inner_texts()[2:] == ["5B2QGXA7", "1.00 TB", "NVMe"]
+    assert nv.locator(".devstat").count() == 0
+    assert_no_scroll(p)
+    assert_inside_cards(p)
+
+
+def test_device_statistics_table_takes_the_stand_in_rows(open_page):
+    p = open_page("DRIVES=2")
+    c = by_id(p, WUH)
+    _open(c)
+    attrs = c.locator("table.attrs").first
+    attrs.wait_for()
+    # The page 4 count is not in the attribute table but in Device
+    # Statistics, under its own small heading, inside the same Details.
+    assert attrs.locator("tr", has_text="page 4").count() == 0
+    assert c.locator(".details .devstat h4").inner_text().lower() == "device statistics"
+    ds = c.locator("table.devstat-t")
+    names = ds.locator("td.nm .lb").all_inner_texts()
+    assert {"Power cycles", "Reported uncorrectable", "Command resets", "Temperature, lifetime max",
+            "Temperature, lifetime min", "Time above the operating maximum", "Hardware resets",
+            "Interface CRC errors"} <= set(names), names
+    # What the stat row shows is left out here.
+    assert not {"Temperature", "Power-on hours", "Data written", "Data read", "Endurance used"} & set(names), names
+    vals = ds.locator("td.c-raw").all_inner_texts()
+    assert vals[names.index("Temperature, lifetime max")] == "47 C"
+    assert vals[names.index("Time above the operating maximum")] == "0 min"
+    assert ds.locator("tr", has_text="Reported uncorrectable").locator("td.c-raw").inner_text() == "0"
+    # Read only: no inputs, no editor.
+    assert c.locator(".details input, .details .tune, .details .thr").count() == 0
+
+
+def test_one_number_rule_everywhere(open_page):
+    p = open_page()
+    bc = by_id(p, BARRACUDA)
+    written = dict(_stats(bc))["Written"]
+    _open(bc)
+    attr = bc.locator("table.attrs tr", has_text="Total_LBAs_Written").locator(".bign").inner_text()
+    assert attr == written, (attr, written)
+    fmt = p.page.evaluate("""() => {
+      const x = Alpine.$data(document.body);
+      return [x.bytes(5104198542848), x.bytes(19834000000000), x.bytes(898000000000), x.bytes(999.6e9),
+              x.bytes(512), x.compact(344046933), x.compact(12345), x.bytes(2000398934016)];
+    }""")
+    assert fmt == ["5.10 TB", "19.8 TB", "898 GB", "1.00 TB", "512 B", "344 M", "12,345", "2.00 TB"], fmt
+    js = (WEB_DIR / "cc.js").read_text()
+    assert "tb(" not in js and "toFixed" not in js
+
+
+def test_formatted_numbers_underline_only_on_hover(open_page):
+    p = open_page()
+    big = by_id(p, NVME).locator(".c-stats .bign").first
+    deco = lambda: big.evaluate("e => getComputedStyle(e).textDecorationLine")  # noqa: E731
+    assert p.page.evaluate("matchMedia('(hover: hover)').matches")
+    p.page.mouse.move(0, 0)
+    assert deco() == "none"
+    big.hover()
+    assert p.wait(lambda: deco() == "underline")
+    assert big.evaluate("e => getComputedStyle(e).cursor") == "pointer" and big.get_attribute("title")
+    big.click()
+    p.page.locator(".numpop").wait_for()
+
+
+def test_a_phone_gets_no_underline_and_a_tap_opens_the_number(open_page):
+    p = open_page("", 390, touch=True)
+    assert not p.page.evaluate("matchMedia('(hover: hover)').matches")
+    big = by_id(p, NVME).locator(".c-stats .bign").first
+    big.tap()
+    pop = p.page.locator(".numpop")
+    pop.wait_for()
+    assert "hours" in pop.inner_text() and pop.locator("button.copy").count() == 1
+    assert big.evaluate("e => getComputedStyle(e).textDecorationLine") == "none"
+
+
+def _text_fields(c):
+    """(label, value, trigger) for Model, Serial and Firmware in Details and
+    Host, Port and mDNS under Connect by hand."""
+    out = []
+    for row in c.locator("dl.kv.ident > div").all():
+        label = row.locator("dt").inner_text()
+        if label in ("Model", "Serial", "Firmware"):
+            out.append((label, row.locator("dd").text_content().strip(), row.locator(".bign.txt")))
+    for cp in c.locator(".conn .cp").all():
+        out.append((cp.locator(".cp-k").inner_text(), cp.locator(".cp-v").text_content(), cp.locator(".bign.txt")))
+    return out
+
+
+def _text_card(open_page, width=1280, touch=False):
+    p = open_page("DRIVES=mixed", width, touch=touch)
+    c = by_id(p, BARRACUDA)
+    _open(c)
+    fields = _text_fields(c)
+    assert [f[0] for f in fields] == ["Model", "Serial", "Firmware", "Host", "Port", "mDNS"], fields
+    return p, c, fields
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_details_text_values_open_the_popover_and_copy_the_value(open_page, width):
+    p, c, fields = _text_card(open_page, width)
+    p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    pop = p.page.locator(".numpop")
+    for label, value, trigger in fields:
+        trigger.click()
+        pop.wait_for()
+        # The exact value, whole: letters, dots and spaces kept.
+        assert pop.locator(".cp-v").text_content() == value, (label, value)
+        assert pop.locator("button.copy svg use").get_attribute("href") == "#copy"
+        box = pop.evaluate("e => e.getBoundingClientRect().toJSON()")
+        assert box["left"] >= 0 and box["right"] <= width, (label, box)
+        # Under the value where it fits, else pulled in from the right edge.
+        left = trigger.evaluate("e => e.getBoundingClientRect().left")
+        if left + box["width"] <= width - 8:
+            assert abs(box["left"] - left) <= 1, (label, left, box)
+        else:
+            assert abs(box["right"] - (width - 8)) <= 1, (label, box)
+        pop.locator("button.copy").click()
+        assert p.wait(lambda: pop.locator(".copied").is_visible() and pop.locator(".copied").inner_text() == "copied")
+        assert p.page.evaluate("navigator.clipboard.readText()") == value, label
+        # A second click on the value closes it.
+        trigger.click()
+        assert p.wait(lambda: pop.count() == 0), label
+    assert_no_scroll(p)
+
+
+def test_copy_leaves_nothing_selected(open_page):
+    """A phone that selected the value (iOS on a tap) keeps no selection
+    handles over it once Copy has copied; Copied still shows."""
+    p, c, fields = _text_card(open_page, 390, touch=True)
+    p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    pop = p.page.locator(".numpop")
+    label, value, trigger = fields[1]  # the serial
+    trigger.tap()
+    pop.wait_for()
+    p.page.evaluate("""() => { const r = document.createRange();
+      r.selectNodeContents(document.querySelector('.numpop .cp-v'));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }""")
+    assert p.page.evaluate("window.getSelection().toString()") == value
+    pop.locator("button.copy").tap()
+    assert p.wait(lambda: pop.locator(".copied").is_visible() and pop.locator(".copied").inner_text() == "copied")
+    assert p.page.evaluate("[window.getSelection().rangeCount, window.getSelection().toString()]") == [0, ""]
+    assert p.page.evaluate("navigator.clipboard.readText()") == value
+    # The header's copy buttons clear it the same way.
+    p.page.evaluate("""() => { const r = document.createRange();
+      r.selectNodeContents(document.querySelector('.agent-line .cp-v'));
+      window.getSelection().addRange(r); }""")
+    p.page.locator(".agent-line button.copy").first.tap()
+    assert p.wait(lambda: p.page.evaluate("window.getSelection().rangeCount") == 0)
+
+
+def test_a_big_number_still_copies_its_digits(open_page):
+    p = open_page()
+    p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    bc = by_id(p, BARRACUDA)
+    _open(bc)
+    lba = bc.locator("table.attrs tr", has_text="Total_LBAs_Written").locator(".bign")
+    exact = lba.get_attribute("title")
+    lba.click()
+    pop = p.page.locator(".numpop")
+    pop.wait_for()
+    assert pop.locator(".cp-v").inner_text() == exact
+    pop.locator("button.copy").click()
+    assert p.wait(lambda: pop.locator(".copied").is_visible())
+    assert p.page.evaluate("navigator.clipboard.readText()") == re.sub(r"[^0-9]", "", exact)
+
+
+@pytest.mark.parametrize("touch", [False, True])
+def test_no_copy_glyph_at_rest_in_details(open_page, touch):
+    p, c, fields = _text_card(open_page, 390 if touch else 1280, touch)
+    assert c.locator(".details button.copy, .details .copied").count() == 0
+    assert p.page.locator(".numpop").count() == 0
+    for label, _value, trigger in fields:
+        assert trigger.evaluate("e => e.parentElement.querySelectorAll('button, svg').length") == 0, label
+
+
+def test_text_values_underline_only_on_hover(open_page):
+    p, c, fields = _text_card(open_page)
+    for label, _value, trigger in fields:
+        style = lambda t=trigger: t.evaluate(  # noqa: E731
+            "e => { const s = getComputedStyle(e); return [s.textDecorationLine, s.textDecorationStyle, s.cursor]; }")
+        p.page.mouse.move(0, 0)
+        assert p.wait(lambda s=style: s()[0] == "none"), label
+        assert trigger.get_attribute("title") is None, label
+        trigger.hover()
+        assert p.wait(lambda s=style: s()[0] == "underline"), label
+        assert style()[1:] == ["dotted", "pointer"], (label, style())
+
+
+def test_a_phone_gets_no_underline_on_text_values_and_a_tap_opens_them(open_page):
+    p, c, fields = _text_card(open_page, 390, touch=True)
+    pop = p.page.locator(".numpop")
+    for label, value, trigger in fields:
+        trigger.tap()
+        pop.wait_for()
+        assert pop.locator(".cp-v").text_content() == value, label
+        assert trigger.evaluate("e => getComputedStyle(e).textDecorationLine") == "none", label
+        trigger.tap()
+        assert p.wait(lambda: pop.count() == 0), label
+
+
+def test_text_values_open_and_close_from_the_keyboard(open_page):
+    p, c, fields = _text_card(open_page)
+    pop = p.page.locator(".numpop")
+    for label, value, trigger in fields:
+        assert trigger.get_attribute("role") == "button" and trigger.get_attribute("tabindex") == "0", label
+        assert trigger.get_attribute("aria-label") == f"{label} {value}"
+        trigger.focus()
+        for key in ("Enter", " "):
+            p.page.keyboard.press(key)
+            assert p.wait(lambda: pop.count() == 1), (label, key)
+            assert pop.locator(".cp-v").text_content() == value
+            p.page.keyboard.press("Escape")
+            assert p.wait(lambda: pop.count() == 0), (label, key)
+    big = c.locator(".c-stats .bign").first
+    big.focus()
+    p.page.keyboard.press(" ")
+    assert p.wait(lambda: pop.count() == 1)
+    p.page.keyboard.press("Escape")
+    assert p.wait(lambda: pop.count() == 0)
+
+
+@pytest.mark.parametrize("width", [1100, 390])
+def test_attribute_names_never_break_inside_a_word(open_page, width):
+    p = open_page("", width)
+    nv = by_id(p, NVME)
+    _open(nv)
+    table = nv.locator("table.attrs").first
+    names = table.locator("td.nm .lb").all_inner_texts()
+    assert "available_spare_threshold" in names, names
+    split = table.locator("td.nm .lb > span > span").evaluate_all(
+        "els => els.filter(e => e.getClientRects().length > 1).map(e => e.textContent)")
+    assert split == [], split
+    # A very long raw value wraps in its own box: the table stays inside
+    # the card and the names keep their width.
+    fit = table.evaluate("""t => {
+      const cell = [...t.querySelectorAll('tbody tr')][1].querySelector('td.c-raw');
+      const s = document.createElement('span');
+      s.className = 'long';
+      s.textContent = '1449400005035951791936293027446784';
+      cell.replaceChildren(s);
+      return [t.getBoundingClientRect().width <= t.parentElement.getBoundingClientRect().width + 1,
+              t.querySelector('tbody tr td.nm').getBoundingClientRect().width];
+    }""")
+    assert fit[0] and fit[1] > 150, fit
+    assert_no_scroll(p)
+
+
+@pytest.mark.parametrize("width", [1270, 1100, 390])
+def test_short_raw_values_stay_on_one_line(open_page, width):
+    """A raw value of 20 characters or fewer never wraps, also in a narrow
+    card (three columns or a phone); the table stays inside the card."""
+    p = open_page("", width)
+    c = by_id(p, BARRACUDA)
+    _open(c)
+    table = c.locator("table.attrs").first
+    got = table.evaluate("""t => {
+      const rows = [...t.querySelectorAll('tbody tr')];
+      return ['38 (0 18 0 0 0)', '38 (Min/Max 19/48) C'].map((text, i) => {
+        const span = rows[i].querySelector('td.c-raw span');
+        span.textContent = text;
+        const names = [...t.querySelectorAll('td.nm .lb > span > span')]
+          .filter(e => e.getClientRects().length > 1).length;
+        return [span.getClientRects().length, names,
+                t.getBoundingClientRect().width <= t.parentElement.getBoundingClientRect().width + 1];
+      });
+    }""")
+    assert got == [[1, 0, True], [1, 0, True]], got
+    assert_no_scroll(p)
+
+
+def test_name_parts_and_long_values_in_the_page(open_page):
+    p = open_page()
+    got = p.page.evaluate("""() => {
+      const x = Alpine.$data(document.body);
+      return [x.nameParts('available_spare_threshold'), x.nameParts('Power cycles'), x.nameParts(null)];
+    }""")
+    assert got == [["available_", "spare_", "threshold"], ["Power cycles"], [""]], got
+    html = (WEB_DIR / "index.html").read_text()
+    assert ':class="{ long: String(a.disp).length > 20 }"' in html
+
+
+def test_device_statistics_trim_is_a_fixed_page_offset_list():
+    js = (WEB_DIR / "cc.js").read_text()
+    m = re.search(r"const DEVSTAT_IN_STATS = new Set\(\[([^\]]*)\]\)", js)
+    assert m, "DEVSTAT_IN_STATS not found"
+    assert sorted(re.findall(r"'(\d+:\d+)'", m.group(1))) == sorted(["5:8", "1:16", "1:24", "1:40", "7:8"])
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_header_names_the_page_at_every_width(open_page, width):
+    p = open_page("", width)
+    name = p.page.locator("header.app-head .page-name")
+    assert name.is_visible() and name.inner_text() == "App · HAOS"
+    word = p.page.locator("header.app-head .wordmark").bounding_box()
+    box = name.bounding_box()
+    head = p.page.locator("header.app-head").bounding_box()
+    if width < 760:
+        # Its own line under the wordmark, starting where the wordmark does,
+        # with no rule before it, smaller.
+        assert box["y"] >= word["y"] + word["height"] - 1 and abs(box["x"] - word["x"]) < 1, (box, word)
+        assert name.evaluate("e => getComputedStyle(e).borderLeftStyle") == "none"
+        assert name.evaluate("e => parseFloat(getComputedStyle(e).fontSize)") < 14
+        assert_no_overflow(p)
+    else:
+        assert box["x"] > word["x"] + word["width"] and name.evaluate(
+            "e => getComputedStyle(e).borderLeftStyle") == "solid"
+    assert box["x"] + box["width"] <= head["x"] + head["width"]
+    assert_no_scroll(p)
+
+
+# ── Screenshots, named by state ──────────────────────────────────────────────
+
+SHOT_STATES = [
+    ("app-1-open", "INTEGRATION=loaded"),
+    ("app-1-create", "INTEGRATION=loaded&HAOS_ENTRY=0"),
+    ("app-1a-no-machines", "INTEGRATION=no_entries"),
+    ("app-1b-restart", "INTEGRATION=restart"),
+    ("app-1c-panel-failed", "INTEGRATION=panel_failed"),
+    ("app-2-install", "INTEGRATION=missing"),
+    ("app-3-update", "INTEGRATION=update"),
+    ("app-agent-down", "AGENT=down"),
+    ("app-no-drives", "DRIVES=0&INTEGRATION=missing"),
+]
 
 
 def test_screenshots(open_page):
+    SHOTS.mkdir(parents=True, exist_ok=True)
     for width in WIDTHS:
-        p = open_page("", width)
-        _shot(p, "grid", None)
-        _shot(p, "header", p.page.locator("header.app-head"))
-        _top(p, "top-agent-up")
-        _shot(p, "attention-three-rows-and-more", by_id(p, NAS_ATT))
-        _shot(p, "maybe-space-91-97", by_id(p, NAS_MAYBE))
-        _shot(p, "health-ok-haos-space", by_id(p, NVME))
-        _shot(p, "health-not-known", by_id(p, NAS_USB))
-        _shot(p, "attention-health-failed-replica", by_id(p, REP_FAILED))
-        _shot(p, "pool-online-datasets", by_id(p, NAS_POOL))
-        _shot(p, "pool-degraded-replica", by_id(p, REP_POOL))
-        _shot(p, "filesystem-card", by_id(p, NAS_FS))
-        _shot(p, "unreachable", by_id(p, STUDIO))
-        _shot(p, "password-placeholder", by_id(p, BACKUP_PI))
-        _shot(p, "replica-scenario-picker", by_id(p, REP_NVME))
-        for cid, name in ((BARRACUDA, "details-drive"), (NAS_POOL, "details-pool"), (REP_NVME, "details-replica"),
-                          (NAS_ATT, "details-attention")):
-            by_id(p, cid).locator(".chev").click()
-            _shot(p, name, by_id(p, cid))
-            by_id(p, cid).locator(".chev").click()
-        by_id(p, NAS_ATT).locator(".chev").click()
-        _shot(p, "grid-details-open", None)
-        by_id(p, NAS_ATT).locator(".chev").click()
-        usb = by_id(p, NAS_USB)
-        usb.get_by_role("button", name="Create sensors and alerts").click()
-        _shot(p, "exit-grey-confirm", usb)
-        _trash(by_id(p, NAS_MAYBE)).click()
-        _shot(p, "remove-armed", by_id(p, NAS_MAYBE))
-        p.page.keyboard.press("Escape")
-        # Rename, as the approved mockup: at rest, pointer on the title,
-        # editing the title, pointer on the machine pill, editing the pill.
-        m = by_id(p, NAS_MAYBE)
-        p.page.mouse.move(2, 2)
-        p.page.evaluate("document.activeElement && document.activeElement.blur()")
-        _shot(p, "rename-1-rest", m)
-        m.locator(".t-name").hover()
-        _shot(p, "rename-2-title-hover", m)
-        m.locator(".t-name").click()
-        _shot(p, "rename-3-title-editing", m)
-        p.page.keyboard.press("Escape")
-        m.locator(".pill").hover()
-        _shot(p, "rename-4-pill-hover", m)
-        m.locator(".pill").click()
-        _shot(p, "rename-5-pill-editing", m)
-        p.page.keyboard.press("Escape")
-        p.page.mouse.move(2, 2)
-        by_id(p, BARRACUDA).locator(".t-name").dblclick()
-        by_id(p, BARRACUDA).locator("input.name-in").fill("Backup SATA")
-        p.page.keyboard.press("Enter")
+        for name, flags in SHOT_STATES:
+            p = open_page(flags, width)
+            p.page.wait_for_timeout(250)
+            p.page.screenshot(path=str(SHOTS / f"{name}-{width}.png"), full_page=True)
+            assert_no_scroll(p)
+            if width < 760:
+                assert_no_overflow(p)
+        # Details open, and the Create confirm open.
+        p = open_page("INTEGRATION=loaded&HAOS_ENTRY=0", width)
+        p.page.get_by_role("button", name="Create sensors and alerts for HAOS").click()
         by_id(p, BARRACUDA).locator(".chev").click()
-        p.page.mouse.move(2, 2)
-        _shot(p, "renamed-model-line", by_id(p, BARRACUDA))
-        by_id(p, BARRACUDA).locator(".chev").click()
-        rep = by_id(p, REP_FAILED)
-        rep.locator(".chev").click()
-        p.page.mouse.move(2, 2)
-        _shot(p, "replica-table", rep)
-        rep.locator("input.raw-in").nth(1).hover()
-        _shot(p, "replica-table-hover", rep)
-        rep.locator("input.raw-in").nth(2).focus()
-        _shot(p, "replica-table-focused", rep)
-        rep.locator(".chev").click()
-        by_id(p, NVME).get_by_role("button", name="Hide this card").click()
-        _shot(p, "header-hidden-1", p.page.locator("header.app-head"))
-        p.page.locator(".eye-btn").click()
-        _shot(p, "hidden-revealed", p.page.locator(".grid"))
-        # The drag: lifted card and drop gap.
-        grip = by_id(p, BARRACUDA).locator(".grip").bounding_box()
-        target = by_id(p, NAS_MAYBE).bounding_box()
-        p.page.mouse.move(grip["x"] + 4, grip["y"] + 4)
-        p.page.mouse.down()
-        for i in range(1, 11):
-            p.page.mouse.move(grip["x"] + (target["x"] + target["width"] * 0.3 - grip["x"]) * i / 10,
-                              grip["y"] + (target["y"] + 40 - grip["y"]) * i / 10)
-        _shot(p, "drag", None)
-        p.page.mouse.up()
-
-        p = open_page("", width)
-        _shot(p, "threshold-override-closed", by_id(p, NAS_OVER))
-        c = by_id(p, BARRACUDA)
-        c.locator(".chev").click()
-        _shot(p, "connect-by-hand", c.locator(".conn"))
-        c = _edit(p, BARRACUDA)
-        _shot(p, "threshold-edit", c)
-        c.get_by_role("button", name="Accept current readings").click()
-        _shot(p, "threshold-accept-pending", c)
-        _shot(p, "footer", p.page.locator("footer.app-foot"))
-        _shot(p, "agent-line", p.page.locator(".agent-line"))
-        p = open_page("POOL=degraded", width)
-        _shot(p, "pool-degraded", by_id(p, NAS_POOL))
-        p = open_page("HA=unreachable", width)
-        _shot(p, "exit-absent", by_id(p, NVME))
-        p = open_page("HA_NAME=fail", width)
-        by_id(p, NVME).locator(".t-name").dblclick()
-        by_id(p, NVME).locator("input.name-in").fill("Boot NVMe")
-        p.page.keyboard.press("Enter")
-        by_id(p, NVME).locator(".act-note").wait_for(state="visible")
-        p.page.mouse.move(2, 2)
-        _shot(p, "rename-ha-refused", by_id(p, NVME))
-        p = open_page("AGENT=down", width)
-        _shot(p, "haos-not-answering", by_id(p, NVME))
-        _top(p, "top-agent-down")
-        p = open_page("", width)
-        pi = by_id(p, BACKUP_PI)
-        pi.get_by_label("Agent password").fill("wrong")
-        pi.get_by_role("button", name="Authenticate").click()
-        p.page.wait_for_selector("text=That password was refused.")
-        _shot(p, "password-refused", pi)
-        p = open_page("SCAN=slow", width)
-        open_add(p)
-        p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length >= 1", timeout=15000)
-        _shot(p, "plus-open-scanning", p.page.get_by_role("region", name="Add", exact=True))
-        p = open_page("HOSTS=one", width)
-        open_add(p)
-        p.page.wait_for_function("() => document.querySelectorAll('.pick-row').length === 3", timeout=6000)
-        p.page.wait_for_timeout(500)
-        _shot(p, "plus-open-scanned", p.page.get_by_role("region", name="Add", exact=True))
-        p = open_page("HOSTS=none&REPLICAS=0&HA=not_installed&DRIVES=1", width)
-        _shot(p, "first-run", None)
-        p = open_page("SELF_DELAY=4", width)
-        _shot(p, "self-reading", by_id(p, "self"))
-        ax = _agentic_page(p.ctx, p.base, width=width)
-        _shot_page(ax, f"agentic-{width}.png")
-
-
-# ── Agentic access ──────────────────────────────────────────────────────────
-
-def _agentic_page(ctx, base: str, flags: str = "", width: int = 1280):
-    page = ctx.new_page()
-    page.set_viewport_size({"width": width, "height": 900})
-    page.goto(f"{base}/api/hassio_ingress/tok123/agentic-access" + (f"?{flags}" if flags else ""))
-    page.wait_for_selector("pre.ax-json")
-    return page
-
-
-def _shot_page(page, name: str):
-    SHOTS.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(SHOTS / name), full_page=False)
-
-
-def _raw_json(base: str, flags: str = "") -> dict:
-    with urllib.request.urlopen(f"{base}/api/hassio_ingress/tok123/agentic-access.json?{flags}", timeout=10) as r:
-        assert r.headers["Content-Type"] == "application/json; charset=utf-8"
-        return json.loads(r.read())
-
-
-def _without_times(doc: dict) -> dict:
-    doc = json.loads(json.dumps(doc))
-    doc.pop("generated_at", None)
-    for agent in doc["agents"]:
-        for key in ("read_at", "last_answer", "data_age_seconds"):
-            agent.pop(key, None)
-        for d in agent["drives"]:
-            (d.get("data") or {}).pop("last_updated", None)
-    return doc
-
-
-def test_agentic_link_under_ingress(browser, server):
-    """The footer link opens the page in a new tab, under the ingress
-    prefix, and everything that page asks for stays under it."""
-    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset", method="POST"), timeout=5)
-    ctx = browser.new_context()
-    page = ctx.new_page()
-    errors = []
-    page.goto(f"{server}/api/hassio_ingress/tok123/")
-    page.wait_for_selector("article.card")
-    seen = []
-    with ctx.expect_page() as info:
-        page.locator("footer.app-foot").get_by_role("link", name="Agentic access").click()
-    ax = info.value
-    ax.on("request", lambda r: seen.append(r.url))
-    ax.on("pageerror", lambda e: errors.append(str(e)))
-    ax.wait_for_selector("pre.ax-json")
-    assert ax.url == f"{server}/api/hassio_ingress/tok123/agentic-access"
-    ax.reload()
-    ax.wait_for_selector("pre.ax-json")
-    assert seen and all(u.startswith(f"{server}/api/hassio_ingress/tok123/") for u in seen), seen
-    assert ax.get_by_role("link", name="Raw JSON").get_attribute("href") == "agentic-access.json"
-    assert ax.get_by_role("link", name="Control Center").get_attribute("href") == "./"
-    doc = json.loads(ax.locator("pre.ax-json").inner_text())
-    assert doc["schema"] == "smart-sniffer-agentic-access"
-    assert [a["kind"] for a in doc["agents"]][0] == "self" and doc["agents"][-1]["kind"] == "replicas"
-    assert list(doc)[-1] == "guide"
-    assert not errors, errors
-    ctx.close()
-
-
-def test_agentic_copy(browser, server):
-    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset", method="POST"), timeout=5)
-    ctx = browser.new_context()
-    ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=server)
-    page = _agentic_page(ctx, server)
-    page.get_by_role("button", name="Copy").click()
-    page.wait_for_selector("#ax-status:has-text('Copied')")
-    copied = json.loads(page.evaluate("navigator.clipboard.readText()"))
-    assert _without_times(copied) == _without_times(_raw_json(server))
-    ctx.close()
-
-
-def test_agentic_copy_without_clipboard_selects(browser, server):
-    """Ingress on plain http is no secure context: the text is selected."""
-    ctx = browser.new_context()
-    page = _agentic_page(ctx, server)
-    page.evaluate("Object.defineProperty(window, 'isSecureContext', { value: false })")
-    page.evaluate("document.execCommand = () => false")
-    page.get_by_role("button", name="Copy").click()
-    page.wait_for_selector("#ax-status:has-text('Selected, press Ctrl+C')")
-    assert page.evaluate("window.getSelection().toString().length") > 1000
-    ctx.close()
-
-
-def test_agentic_download(browser, server):
-    ctx = browser.new_context(accept_downloads=True)
-    page = _agentic_page(ctx, server)
-    with page.expect_download() as info:
-        page.get_by_role("button", name="Download").click()
-    download = info.value
-    shown = json.loads(page.locator("pre.ax-json").inner_text())
-    assert download.suggested_filename == f"smart-sniffer-{shown['generated_at'][:10]}.json"
-    assert re.fullmatch(r"smart-sniffer-\d{4}-\d{2}-\d{2}\.json", download.suggested_filename)
-    saved = json.loads(Path(download.path()).read_text(encoding="utf-8"))
-    assert saved == shown
-    ctx.close()
-
-
-def test_agentic_unreachable_shows(browser, server):
-    urllib.request.urlopen(urllib.request.Request(f"{server}/dev/reset?AGENT=down", method="POST"), timeout=5)
-    ctx = browser.new_context()
-    page = _agentic_page(ctx, server, "AGENT=down")
-    doc = json.loads(page.locator("pre.ax-json").inner_text())
-    me = doc["agents"][0]
-    assert me["id"] == "self" and me["status"] == "unreachable" and me["stale"] is True
-    assert me["error"]["message"] == "The agent did not answer. Readings are from last_answer."
-    assert "not answering" in page.locator(".ax-meta").inner_text()
-    ctx.close()
-
-
-@pytest.mark.parametrize("width", [390, 1280])
-def test_agentic_no_page_scroll(browser, server, width):
-    ctx = browser.new_context()
-    page = _agentic_page(ctx, server, width=width)
-    sw, vw = page.evaluate("[document.documentElement.scrollWidth, window.innerWidth]")
-    assert sw == vw, f"page is {sw} px wide at {vw} px"
-    pre = page.evaluate("(() => { const p = document.querySelector('pre.ax-json');"
-                        " return [p.scrollWidth, p.clientWidth, getComputedStyle(p).overflowX]; })()")
-    assert pre[2] == "auto"
-    if width == 390:
-        assert pre[0] > pre[1]  # the JSON block scrolls sideways
-    ctx.close()
-
-
-def test_replica_pill_is_a_ghost(open_page):
-    """A replica's REPLICA pill reads as test data: dotted frame, dimmer type.
-    The card itself keeps the normal border, hidden cards keep theirs, and
-    the ghost is not the dashed hover hint of a renamable pill."""
-    p = open_page()
-    look = ("e => { const s = getComputedStyle(e); "
-            "return [s.borderTopStyle, s.borderTopColor, s.borderTopWidth, s.color]; }")
-    real_pill = by_id(p, NAS_ATT).locator(".pill").evaluate(look)
-    for cid in (REP_FAILED, REP_NVME, REP_POOL):
-        card = by_id(p, cid)
-        pill = card.locator(".pill")
-        assert pill.inner_text() == "REPLICA"
-        ghost = pill.evaluate(look)
-        assert ghost[0] == "dotted" and ghost[1] == real_pill[1] and ghost[2] == "1px", cid
-        assert ghost[3] == "rgb(143, 143, 143)" and real_pill[3] == "rgb(189, 189, 189)"  # --dim, not --grey
-        # The card's own frame is the normal one, as on a real drive.
-        frame = ["solid", "rgb(71, 71, 71)", "1px"]
-        assert card.evaluate(look)[:3] == by_id(p, NAS_ATT).evaluate(look)[:3] == frame
-        # Fixed: no tab stop, no editor, no hover change.
-        assert pill.get_attribute("tabindex") is None
-        p.page.mouse.move(2, 2)
-        before = pill.evaluate(look)
-        pill.hover()
-        p.page.wait_for_timeout(150)
-        assert pill.evaluate(look) == before
-    for cid in (NVME, NAS_ATT, NAS_POOL, NAS_FS):
-        assert by_id(p, cid).locator(".pill").evaluate(look)[0] == "solid", cid
-    # A renamable pill's hint under the pointer is dashed, never dotted.
-    pill = by_id(p, NAS_ATT).locator(".pill")
-    pill.hover()
-    p.page.wait_for_timeout(150)
-    assert pill.evaluate(look)[0] == "dashed"
-    # Health colours are unchanged on a replica.
-    rep, real = by_id(p, REP_FAILED), by_id(p, NAS_ATT)
-    box = "e => [getComputedStyle(e).borderTopColor, getComputedStyle(e).borderTopStyle]"
-    assert rep.locator(".hbox").evaluate(box) == real.locator(".hbox").evaluate(box)
-    assert rep.locator(".h-att").evaluate("e => getComputedStyle(e).color") == ATT
-
-
-def test_cards_after_shot(open_page):
-    """One picture of a drive, a filesystem, a pool and a replica card side
-    by side, for looking at by eye (cards-after-<width>.png)."""
-    p = open_page("", 1280)
-    order = [NAS_ATT, NAS_FS, NAS_POOL, REP_FAILED]
-    p.page.evaluate("""(ids) => {
-      const grid = document.querySelector('.grid');
-      ids.slice().reverse().forEach((id) => grid.prepend(grid.querySelector(`[data-card="${CSS.escape(id)}"]`)));
-    }""", order)
-    p.page.mouse.move(2, 2)
-    p.page.wait_for_timeout(300)
-    boxes = [by_id(p, cid).bounding_box() for cid in order]
-    x0 = min(b["x"] for b in boxes) - 8
-    y0 = min(b["y"] for b in boxes) - 8
-    x1 = max(b["x"] + b["width"] for b in boxes) + 8
-    y1 = max(b["y"] + b["height"] for b in boxes) + 8
-    SHOTS.mkdir(parents=True, exist_ok=True)
-    p.page.screenshot(path=str(SHOTS / "cards-after-1280.png"),
-                      clip={"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0})
-
-
-def test_self_reading_card(open_page):
-    """Before this machine's agent first answers, its place holds a card
-    that says it is being read: the page is never just the + card."""
-    p = open_page("SELF_DELAY=3")
-    reading = by_id(p, "self")
-    assert reading.count() == 1
-    assert reading.locator(".m-msg").inner_text() == "Reading this machine's drives."
-    assert reading.locator("h3.c-title").inner_text() == "This machine's drives"
-    assert reading.locator(".pill").inner_text() == "HAOS"
-    assert "machine" in reading.get_attribute("class")
-    assert reading.locator(".hbox, .c-health").count() == 0  # no health claimed while unknown
-    assert p.page.locator(".agent-dot").get_attribute("class") == "agent-dot unknown"
-    assert by_id(p, NVME).count() == 0
-    assert card_ids(p)[0] == "self"  # where this machine's drives will be
-    by_id(p, NVME).wait_for(timeout=6000)
-    assert by_id(p, "self").count() == 0
-    assert card_ids(p)[:2] == [NVME, BARRACUDA]
-
-
-# ── Sensors and alerts: Create, or the install guide ─────────────────────────
-
-HACS_REPO = ("https://my.home-assistant.io/redirect/hacs_repository/"
-             "?owner=DAB-LABS&repository=smart-sniffer&category=integration")
-
-
-def test_create_confirm_wording(open_page):
-    """State 3, integration installed and loaded: Create and Cancel, in the
-    user's words; the page lives inside Home Assistant, so never "add to
-    Home Assistant"."""
-    p = open_page("HA_SELF=0")
-    icon = by_id(p, NVME).locator("button.exit.add")
-    assert icon.get_attribute("aria-label") == "Create sensors and alerts"
-    assert icon.get_attribute("title") == "Create sensors and alerts"
-    icon.click()
-    ask = by_id(p, NVME).get_by_role("group", name="Confirm")
-    assert ask.locator(".ask-title").inner_text() == "Create sensors and alerts for HAOS?"
-    assert ask.get_by_role("button").all_inner_texts() == ["Create", "Cancel"]
-    ask.get_by_role("button", name="Cancel").click()
-    assert by_id(p, NVME).locator(".ask").count() == 0
-    # One drive: the singular line.
-    p = open_page("HA_SELF=0&DRIVES=1")
-    by_id(p, NVME).locator("button.exit.add").click()
-    assert by_id(p, NVME).locator(".ask-line").inner_text() == (
-        "Its drive gets health sensors for dashboards and automations, and an alert when it needs attention.")
-    # Replicas: test sensors, and the others come too while none is in it.
-    p = open_page("HA=installed&REPLICAS=board")
-    rep = by_id(p, REP_NVME)
-    rep.locator("button.exit.add").click()
-    ask = rep.get_by_role("group", name="Confirm")
-    assert ask.locator(".ask-title").inner_text() == "Create test sensors for the replicas?"
-    line = ask.locator(".ask-line").inner_text()
-    assert line.endswith("Delete them from the integration when you're done testing.")
-    for text in p.page.locator(".ask").all_inner_texts():
-        assert "Add" not in text and "to Home Assistant" not in text
-    assert not p.page.locator(".ha-notice").count()  # never with the integration installed
-
-
-def test_create_error_says_create(open_page):
-    p = open_page("HA_SELF=0&ADD=error")
-    c = by_id(p, NVME)
-    c.locator("button.exit.add").click()
-    c.get_by_role("button", name="Create", exact=True).click()
-    err = c.locator(".ask-err")
-    err.wait_for()
-    assert err.inner_text() == "Home Assistant did not create them. The App log may say why."
-
-
-def test_install_guide_without_the_integration(open_page):
-    """State 1, integration not installed: the grey icon still shows on drive
-    and pool cards, and opens a guide instead of Create."""
-    p = open_page("HA=not_installed")
-    for cid in (NVME, NAS_ATT, NAS_POOL, REP_FAILED):
-        assert by_id(p, cid).locator("button.exit.add").count() == 1, cid
-    assert by_id(p, NAS_FS).locator(".exit").count() == 0  # no icon on a filesystem card, as before
-    by_id(p, NAS_POOL).locator("button.exit.add").click()
-    guide = by_id(p, NAS_POOL).get_by_role("group", name="Install the integration")
-    assert guide.locator(".ask-title").inner_text() == "Sensors and alerts need the SMART Sniffer integration"
-    steps = guide.locator(".ask-steps li").all_inner_texts()
-    assert steps == ["Install it from HACS. Open in HACS", "Restart Home Assistant.", "Come back here and click again."]
-    link = guide.get_by_role("link", name="Open in HACS")
-    assert link.get_attribute("href") == HACS_REPO
-    assert link.get_attribute("target") == "_blank" and link.get_attribute("rel") == "noopener"
-    assert guide.get_by_role("button").all_inner_texts() == ["Close"]
-    assert not p.api("POST", r"/ha/add$")
-    guide.get_by_role("button", name="Close").click()
-    assert by_id(p, NAS_POOL).locator(".ask").count() == 0
-
-
-def test_install_guide_names_hacs_first_when_it_is_missing(open_page):
-    p = open_page("HA=not_installed&HACS=missing")
-    by_id(p, NVME).locator("button.exit.add").click()
-    guide = by_id(p, NVME).get_by_role("group", name="Install the integration")
-    first = guide.locator(".ask-steps li").first
-    assert first.inner_text() == "Install HACS, then the SMART Sniffer integration. How to install HACS"
-    assert first.get_by_role("link").get_attribute("href") == "https://hacs.xyz/docs/use/"
-
-
-def test_integration_notice(open_page, browser, server):
-    """A quiet line when the integration is not installed, dismissed for
-    every browser through the proxy; never shown when it is installed or
-    when Home Assistant cannot be reached."""
-    p = open_page("HA=not_installed")
-    notice = p.page.locator(".ha-notice")
-    assert notice.inner_text().startswith("Want sensors and alerts? Install the SMART Sniffer integration.")
-    assert notice.get_by_role("link").get_attribute("href") == HACS_REPO
-    assert notice.get_by_role("link").get_attribute("target") == "_blank"
-    notice.get_by_role("button", name="Dismiss").click()
-    assert p.page.locator(".ha-notice").count() == 0
-    assert len(p.api("POST", r"/app/notice/dismiss$")) == 1
-    # Another browser, no reset of the harness: still dismissed.
-    ctx = browser.new_context()
-    other = ctx.new_page()
-    other.goto(f"{server}/?HA=not_installed")
-    other.wait_for_selector("article.card")
-    other.wait_for_timeout(600)
-    assert other.locator(".ha-notice").count() == 0
-    ctx.close()
-    for flags in ("", "HA=unreachable"):
-        q = open_page(flags)
-        assert q.page.locator(".ha-notice").count() == 0, flags
-    q = open_page("HA=unreachable")
-    assert q.page.locator(".exit").count() == 0  # state 4: no icon, as before
-
-
-def test_create_and_guide_shots(open_page):
-    """create-confirm-<w>.png (installed), install-guide-<w>.png (not
-    installed, with the notice) for looking at by eye."""
-    p = open_page("HA_SELF=0", 1280)
-    by_id(p, NVME).locator("button.exit.add").click()
-    p.page.mouse.move(2, 2)
-    _shot(p, "create-confirm", by_id(p, NVME))
-    p = open_page("HA=not_installed", 1280)
-    by_id(p, NVME).locator("button.exit.add").click()
-    p.page.mouse.move(2, 2)
-    p.page.wait_for_timeout(250)
-    SHOTS.mkdir(parents=True, exist_ok=True)
-    top = p.page.locator("header.app-head").bounding_box()
-    card = by_id(p, NVME).bounding_box()
-    p.page.screenshot(path=str(SHOTS / "install-guide-1280.png"), clip={
-        "x": 0, "y": 0, "width": 1280, "height": card["y"] + card["height"] + 16 - top["y"] + top["y"]})
+        p.page.wait_for_timeout(300)
+        p.page.screenshot(path=str(SHOTS / f"app-1-create-confirm-details-{width}.png"), full_page=True)

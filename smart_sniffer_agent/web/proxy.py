@@ -3,44 +3,29 @@
 
 Serves static files from /opt/web/ at the root path and proxies:
   /api/*  -> localhost:$AGENT_PORT  (this app's Go agent, app token injected)
-  /mock/* -> localhost:$MOCK_PORT   (the replica agent, /mock/ rewritten to /api/)
 
-It also answers the Control Center's own routes:
-  GET  /app/info                 versions, ports, identity, network, replicas
-  POST /evaluate                 the verdict (and view) for a drive, or for a
-                                 ZFS pool ({"pool": {...}})
-  POST /fleet/scan               scan a block for agents; GET and DELETE
-                                 /fleet/scan/<id> poll and cancel it
-  POST /fleet/probe              check one host by hand
-  GET, POST /fleet/hosts         the field agents stored in the app options;
-  PATCH, DELETE /fleet/hosts/<id>  password, hidden, removal
-  GET  /fleet/hosts/<id>/drives  one judged read of self, replicas or a host
-  GET  /ha/devices               entries and device pages in Home Assistant,
-                                 and what the trash can do there per card
-  POST /ha/add                   add self, the replicas or a host to it
-  GET, POST /replicas            replica files: the list, an upload
-  POST /replicas/add             add replica cards from files
-  POST /replicas/save-as         save a real drive as a replica file
-  GET  /replicas/<card>/file     download a replica as it reads now
-  DELETE /replicas/<card>        take a replica off the page
-  GET  /cards                    the card order and the hidden cards
-  PUT  /cards/order              save the card order
-  PATCH /cards/<id>              hide or show one card
-  PUT  /cards/<id>/name          name a card (empty for the original); a
-                                 drive or pool in Home Assistant takes it
-                                 as its device name (websocket API)
-  PUT  /hosts/<id>/name          name a field agent's machine
-  DELETE /cards/<id>             remove one card (not a drive of this machine);
-                                 ?ha=disable, delete or entry also disables or
-                                 deletes its device in Home Assistant, or
-                                 deletes its machine's entry (last card);
-                                 ?ha=replica deletes a replica's device once
-                                 the integration no longer sees the drive
-  GET  /cards/<id>/file          one card as a JSON file
-  GET, PUT /cards/<id>/thresholds  a drive's thresholds, from Home Assistant
-                                 when the drive is in it, else the app's own;
-  POST /cards/<id>/thresholds/accept  the flagged readings made normal;
-  POST /cards/<id>/thresholds/reset   every override cleared
+The page shows this box only: the drives of this app's own agent, read only,
+and one card that leads to the SMART Sniffer integration's Control Center
+(or says how to install or update it). Every other machine lives in the
+integration. The proxy answers the page's own routes:
+  GET  /app/info                 versions, ports, identity
+  POST /app/notice/dismiss       close the install or the update card, for
+                                 every browser ({"notice": "install"|"update"})
+  GET  /fleet/hosts/self/drives  one judged read of this box's agent
+  GET  /cards/<id>/file          one of this box's cards as a JSON file
+  GET  /ha/integration           the integration's state for the page: loaded
+                                 (v0.9+), no entries, restart pending, update
+                                 (0.8.x), missing; whether HAOS is an entry
+  POST /ha/add                   create the integration entry for this box
+                                 ({"target": "self"})
+  POST /app/handover             send the field machines to the integration
+                                 again now (no button; a manual retry)
+
+It also tells the integration where this box's agent is, through the
+Supervisor's discovery (service smart_sniffer, host and port only), but only
+while integration v0.9 or later is installed. The previous message is
+deleted on every start and a new one posted, so Home Assistant always hears
+of it once per run.
 
 The verdict comes from the integration's own rule modules (attention.py,
 devstat.py, extract.py, pool_health.py), which the Dockerfile takes from the
@@ -54,18 +39,26 @@ The Home Assistant routes talk to the Supervisor (and, through it, to Home
 Assistant Core) with the SUPERVISOR_TOKEN the Supervisor puts in the app's
 environment. The token is never logged and never sent to the browser.
 
+The field machines, names, hidden cards, order and thresholds an older
+version kept in the app options are handed over to the integration once it
+is v0.9 or later and says it takes them (Handover), and cleared here as it
+confirms each. This box's own settings are sent too and kept: its per-drive
+thresholds are still read, so its verdicts match what 0.3.x showed.
+
 Runs on the ingress port (8099) so Home Assistant can embed the page in the
 sidebar. Every request from the page goes to the same origin, so there is no
-CORS. Python standard library only.
+CORS. The port listens on every interface of the container, but only Home
+Assistant's ingress gateway (172.30.32.2) and the container itself
+(127.0.0.1) are answered; anyone else gets 403 for every request. The agent
+token comes from the AGENT_TOKEN environment variable, never the command line.
+Python standard library only.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
-import calendar
 import hashlib
-import html
 import http.client
 import importlib
 import ipaddress
@@ -83,8 +76,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import ModuleType
-from typing import Any, Callable
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
 # Ensure .js and .css MIME types are correct
 mimetypes.add_type("application/javascript", ".js")
@@ -98,7 +91,7 @@ STATIC_DIR = "/opt/web"
 # its parent holds VERSION (the smart-sniffer tag or branch they came from).
 DEFAULT_RULES_DIR = "/opt/ssrules/custom_components"
 
-# The hostname Home Assistant uses to reach this app's agents from the
+# The hostname Home Assistant uses to reach this app's agent from the
 # integration. run.sh passes the container's real hostname with --agent-host
 # (it follows the slug, so a local install is local-smart-sniffer-agent); this
 # default, the published app's hostname, is only for running the proxy by hand.
@@ -106,50 +99,37 @@ DEFAULT_AGENT_HOST = "0449a086-smart-sniffer-agent"
 
 INTEGRATION_DOMAIN = "smart_sniffer"
 SUPERVISOR_TIMEOUT = 5  # seconds, every Supervisor and Core call
-MAX_BODY = 4 * 1024 * 1024  # largest JSON request body the app routes accept
+MAX_BODY = 64 * 1024  # largest request body taken, for every route and /api/*
+# The only clients the proxy answers: Home Assistant's ingress gateway, which
+# every page request comes through, and this container itself.
+ALLOWED_CLIENTS = frozenset(ipaddress.ip_address(a) for a in ("172.30.32.2", "127.0.0.1", "::1"))
 HA_API_CACHE_SECONDS = 30
-THRESHOLD_MIN_SECONDS = 5  # the least time Home Assistant's thresholds are kept
-REFRESH_MINUTES = 15  # how often the page re-reads stored field agents
-REPLICA_AGENT_TIMEOUT = 1.0  # seconds, /app/info's check of the replica agent
-NOTICE_DISMISSED = "integration_notice_dismissed"  # app-state.json key
-AGENTIC_MEMO_SECONDS = 15  # how long one built Agentic access document is reused
-AGENTIC_MAX_AGE_SECONDS = 60  # how old this machine's and the replicas' cached read may be
-AGENTIC_FRESH_SECONDS = 30  # ?fresh=1: agents read longer ago than this are read again
-MAX_REPLICA_BYTES = 1_048_576  # a replica file, as the replica agent limits it
-
-# Matches the titles the integration's config flow gives its entries:
-#   user step:     "SMART Sniffer (<host>:<port>)"
-#   zeroconf step: "SMART Sniffer (<hostname>)"
-_TITLE_RE = re.compile(r"^SMART Sniffer \((?P<inner>.+)\)$")
+NOTICE_DISMISSED = "integration_notice_dismissed"  # app-state.json: the install card closed
+UPDATE_DISMISSED = "integration_update_dismissed"  # app-state.json: the update card closed
+DISCOVERY_UUID = "discovery_uuid"  # app-state.json: this app's last discovery message
+DISCOVERY_SERVICE = "smart_sniffer"
+# The integration's first version with the Control Center panel; from it on
+# the app posts its discovery and leads to the panel.
+PANEL_VERSION = (0, 9)
+DEFAULT_PANEL_PATH = "/smart-sniffer"
+# How often the integration is looked up while no page asks: discovery
+# follows an install or an update of the integration within this time.
+WATCH_SECONDS = 300.0
+WATCH_RETRY_SECONDS = 30.0  # sooner while Home Assistant does not answer
 
 INTEGRATION_URL = "/config/integrations/integration/smart_sniffer"
 
-# Every device of the integration with its id, name, serial number,
-# identifiers and config entry, printed as JSON by Core's template
-# endpoint, with the name the user gave it in Home Assistant (name_by_user).
-# The REST API has no device registry list; reading it here keeps the
-# websocket (used only for renames) out of every refresh. Sets become lists
-# for to_json.
-# The entry comes from config_entry_id() of the device's first entity:
-# device_attr(d, 'config_entries') raises on Home Assistant 2026.10, where
-# DeviceEntry.config_entries is deprecated.
-DEVICES_TEMPLATE = (
-    "{%- set ns = namespace(ids=[], entries=[]) -%}"
-    "{%- for e in integration_entities('smart_sniffer') -%}"
-    "{%- set d = device_id(e) -%}"
-    "{%- if d and d not in ns.ids -%}{%- set ns.ids = ns.ids + [d] -%}"
-    "{%- set ns.entries = ns.entries + [config_entry_id(e)] -%}{%- endif -%}"
-    "{%- endfor -%}"
-    "[{%- for d in ns.ids -%}"
-    '{"id": {{ d | to_json }}, '
-    '"name": {{ device_attr(d, \'name\') | to_json }}, '
-    '"name_by_user": {{ device_attr(d, \'name_by_user\') | to_json }}, '
-    '"serial_number": {{ device_attr(d, \'serial_number\') | to_json }}, '
-    '"identifiers": {{ (device_attr(d, \'identifiers\') or []) | list | map(\'list\') | list | to_json }}, '
-    '"config_entries": {{ [ns.entries[loop.index0]] | select | list | to_json }}}'
-    "{{ ',' if not loop.last else '' }}"
-    "{%- endfor -%}]"
-)
+
+def client_allowed(address: str) -> bool:
+    """Whether a request from this address is answered: the ingress gateway
+    or loopback, also when written as an IPv4-mapped IPv6 address."""
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip in ALLOWED_CLIENTS
 
 
 def log(message: str) -> None:
@@ -972,8 +952,8 @@ def pool_view(pool: dict[str, Any], verdict: dict[str, Any] | None,
 
 # ── A small websocket client (RFC 6455) ─────────────────────────────────────
 #
-# Home Assistant changes its device registry only over its websocket API, so
-# a rename made here reaches it through this client: the HTTP upgrade, masked
+# The integration's own commands (smart_sniffer/info) and manifest/get are
+# only on Home Assistant's websocket API, reached through this client: the HTTP upgrade, masked
 # text frames out, text frames in (continuations joined), ping answered with
 # pong, and close. No extensions, no TLS: the Supervisor's proxy to Core is
 # plain ws:// on the internal network.
@@ -984,11 +964,14 @@ WS_MAX_MESSAGE = 4 * 1024 * 1024
 
 class WebSocketError(Exception):
     """The websocket could not be opened, or broke, or closed. ``reason`` is
-    Home Assistant's own message when it refused a command, else the error."""
+    Home Assistant's own message when it refused a command, else the error;
+    ``code`` its error code (unknown_command, not_found), None when Home
+    Assistant gave no answer to the command at all."""
 
-    def __init__(self, message: str, reason: str | None = None) -> None:
+    def __init__(self, message: str, reason: str | None = None, code: str | None = None) -> None:
         super().__init__(message)
         self.reason = reason or message
+        self.code = code
 
 
 class WebSocket:
@@ -1176,10 +1159,13 @@ def ha_ws_command(url: str, token: str, command: dict[str, Any],
         if not reply.get("success"):
             error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
             reason = str(error.get("message") or error.get("code") or "no reason")
-            raise WebSocketError(f"Home Assistant refused {command.get('type')}: {reason}", reason)
+            code = error.get("code")
+            raise WebSocketError(f"Home Assistant refused {command.get('type')}: {reason}", reason,
+                                 str(code) if code else "unknown_error")
         return reply
     finally:
         ws.close()
+
 
 
 # ── Supervisor and Home Assistant Core ──────────────────────────────────────
@@ -1195,11 +1181,6 @@ class Supervisor:
         self._slug_failed_at: float | None = None
         self._ha_version: str | None = None
         self._ha_version_failed_at: float | None = None
-        self._network: dict[str, Any] | None = None
-        self._network_failed_at: float | None = None
-        self._host_addresses: set[str] = set()
-        self._docker_network: ipaddress.IPv4Network | None = None
-        self._installed_cache: tuple[float, bool | None] | None = None
 
     @property
     def available(self) -> bool:
@@ -1247,62 +1228,12 @@ class Supervisor:
         parsed = urlparse(self.base_url)
         return f"ws://{parsed.netloc}{parsed.path.rstrip('/')}/core/websocket"
 
-    def set_device_name(self, device_id: str, name: str | None) -> bool:
-        """Set a device's name_by_user in Home Assistant (None clears it),
-        over the websocket API: the only way Core changes its device
-        registry. False, logged, when it did not take."""
+    def ws(self, command: dict[str, Any]) -> Any:
+        """One Core websocket command; its result. Raises WebSocketError
+        (with Home Assistant's error code in .code when it refused it)."""
         if not self.token:
-            return False
-        try:
-            ha_ws_command(self.ws_url(), self.token, {
-                "type": "config/device_registry/update",
-                "device_id": device_id, "name_by_user": name})
-        except WebSocketError as err:
-            log(f"Home Assistant did not take the name of device {device_id}: {err}")
-            return False
-        return True
-
-    def registry_command(self, command: dict[str, Any]) -> str | None:
-        """One device registry command over the websocket API. None when Home
-        Assistant took it, else the reason it gave (or why it was not asked)."""
-        if not self.token:
-            return "the app has no Supervisor token"
-        try:
-            ha_ws_command(self.ws_url(), self.token, command)
-        except WebSocketError as err:
-            log(f"Home Assistant did not take {command.get('type')} for device "
-                f"{command.get('device_id')}: {err}")
-            return err.reason
-        return None
-
-    def poll_device(self, device_id: str) -> bool:
-        """Have the integration poll the agent behind a device now:
-        homeassistant.update_entity on one of the device's entities, which
-        for a coordinator's entity asks the coordinator for a refresh. Core
-        answers once it has run (or after its own 10 s). False when there
-        was no entity to update or Core did not take the call."""
-        # expand() keeps the entities that have a state: a disabled one
-        # cannot be updated.
-        status, entities = self.core("POST", "/template", {"template": (
-            "{{ expand(device_entities(%s)) | map(attribute='entity_id') | list | to_json }}"
-            % json.dumps(device_id))})
-        if status != 200 or not isinstance(entities, list) or not entities:
-            log(f"No entity of device {device_id} to update")
-            return False
-        status, _ = self.core("POST", "/services/homeassistant/update_entity",
-                              {"entity_id": str(entities[0])})
-        return status == 200
-
-    def delete_entry(self, entry_id: str) -> str | None:
-        """Delete a config entry, which takes its devices and entities. None
-        when Home Assistant did, else the reason."""
-        status, body = self.core("DELETE", f"/config/config_entries/entry/{quote(entry_id, safe='')}")
-        if status == 200:
-            return None
-        message = body.get("message") if isinstance(body, dict) else None
-        reason = str(message) if message else (f"HTTP {status}" if status else "it did not answer")
-        log(f"Home Assistant did not delete entry {entry_id}: {reason}")
-        return reason
+            raise WebSocketError("the app has no Supervisor token")
+        return ha_ws_command(self.ws_url(), self.token, command).get("result")
 
     def core_reachable(self) -> bool:
         status, _ = self.core("GET", "/")
@@ -1358,79 +1289,6 @@ class Supervisor:
         self._ha_version_failed_at = time.monotonic()
         return None
 
-    def network(self) -> dict[str, Any] | None:
-        """The host's own block from the Supervisor's network info: the first
-        interface that is primary and connected with an IPv4 address, as
-        {"block", "address", "prefix", "source"}. Kept for the process life
-        once known; None when the Supervisor cannot tell."""
-        if self._network:
-            return self._network
-        if not self.available:
-            return None
-        failed = self._network_failed_at
-        if failed is not None and time.monotonic() - failed < HA_API_CACHE_SECONDS:
-            return None
-        status, info = self.call("GET", "/network/info")
-        data = info.get("data") if isinstance(info, dict) else None
-        interfaces = data.get("interfaces") if isinstance(data, dict) else None
-        if status == 200 and isinstance(interfaces, list):
-            self._read_host_addresses(data)
-            for iface in interfaces:
-                if not (isinstance(iface, dict) and iface.get("primary") and iface.get("connected")):
-                    continue
-                ipv4 = iface.get("ipv4") if isinstance(iface.get("ipv4"), dict) else {}
-                for text in ipv4.get("address") or []:
-                    try:
-                        address = ipaddress.ip_interface(str(text))
-                    except ValueError:
-                        continue
-                    if address.version != 4:
-                        continue
-                    self._network = {
-                        "block": str(address.network),
-                        "address": str(address.ip),
-                        "prefix": address.network.prefixlen,
-                        "source": "supervisor",
-                    }
-                    return self._network
-        self._network_failed_at = time.monotonic()
-        return None
-
-    def _read_host_addresses(self, data: dict[str, Any]) -> None:
-        """Every IPv4 address of the host from the network info, on any
-        interface, primary or not, connected or not; the host's own address
-        on the Supervisor's hassio network (its gateway); and that network,
-        whose addresses are all containers on this machine."""
-        found: set[str] = set()
-        for iface in data.get("interfaces") or []:
-            ipv4 = iface.get("ipv4") if isinstance(iface, dict) else None
-            for text in (ipv4.get("address") or []) if isinstance(ipv4, dict) else []:
-                try:
-                    address = ipaddress.ip_interface(str(text))
-                except ValueError:
-                    continue
-                if address.version == 4:
-                    found.add(str(address.ip))
-        docker = data.get("docker") if isinstance(data.get("docker"), dict) else {}
-        try:
-            found.add(str(ipaddress.IPv4Address(str(docker.get("gateway")))))
-        except ValueError:
-            pass
-        try:
-            net = ipaddress.ip_network(str(docker.get("address")), strict=False)
-        except ValueError:
-            net = None
-        # Only a private block of sensible size, never a whole LAN by mistake.
-        if net is not None and net.version == 4 and net.is_private and net.prefixlen >= 16:
-            self._docker_network = net  # type: ignore[assignment]
-        self._host_addresses = found
-
-    def own_addresses(self) -> tuple[set[str], ipaddress.IPv4Network | None]:
-        """The host's IPv4 addresses and its hassio network, as the
-        Supervisor's network info lists them; empty when it cannot tell."""
-        self.network()
-        return set(self._host_addresses), self._docker_network
-
     def entries(self) -> list[dict[str, Any]] | None:
         """The integration's config entries; None when Core cannot answer."""
         status, entries = self.core(
@@ -1446,30 +1304,23 @@ class Supervisor:
     def integration_installed(self, entries: list[dict[str, Any]] | None = None) -> bool | None:
         """Whether the integration is there: any entry, set up as a component,
         or offering a config flow (installed through HACS, no entry yet).
-        None when Core cannot be reached. Cached HA_API_CACHE_SECONDS."""
-        cached = self._installed_cache
-        if entries is None and cached and time.monotonic() - cached[0] < HA_API_CACHE_SECONDS:
-            return cached[1]
-        # Entries just read prove Core answers; only ask when there are none.
-        if not self.available or (entries is None and not self.core_reachable()):
-            self._installed_cache = (time.monotonic(), None)
+        None when Core cannot be reached."""
+        if not self.available:
             return None
         if entries is None:
-            entries = self.entries() or []
-        installed = bool(entries)
-        if not installed:
-            status, config = self.core("GET", "/config")
-            if status == 200 and isinstance(config, dict):
-                installed = INTEGRATION_DOMAIN in (config.get("components") or [])
-        if not installed:
-            status, handlers = self.core("GET", "/config/config_entries/flow_handlers")
-            if status == 200 and isinstance(handlers, list):
-                installed = INTEGRATION_DOMAIN in handlers
-        self._installed_cache = (time.monotonic(), installed)
-        return installed
-
-    def forget_installed(self) -> None:
-        self._installed_cache = None
+            entries = self.entries()
+            if entries is None:
+                return None
+        if entries:
+            return True
+        status, config = self.core("GET", "/config")
+        if status == 200 and isinstance(config, dict) and \
+                INTEGRATION_DOMAIN in (config.get("components") or []):
+            return True
+        status, handlers = self.core("GET", "/config/config_entries/flow_handlers")
+        if status == 200 and isinstance(handlers, list):
+            return INTEGRATION_DOMAIN in handlers
+        return None
 
     def hacs_installed(self) -> bool | None:
         """Whether HACS is set up in Home Assistant: hacs among the loaded
@@ -1483,6 +1334,232 @@ class Supervisor:
         if status != 200 or not isinstance(config, dict) or not isinstance(config.get("components"), list):
             return None
         return "hacs" in config["components"]
+
+    def discovery_post(self, config: dict[str, Any]) -> str | None:
+        """Post this app's discovery message; its uuid, or None when the
+        Supervisor did not take it."""
+        status, reply = self.call("POST", "/discovery",
+                                  {"service": DISCOVERY_SERVICE, "config": config})
+        data = reply.get("data") if isinstance(reply, dict) else None
+        uuid = data.get("uuid") if isinstance(data, dict) else None
+        if status == 200 and isinstance(uuid, str) and uuid:
+            return uuid
+        return None
+
+    def discovery_delete(self, uuid: str) -> bool:
+        """Delete one of this app's discovery messages. True when it is gone,
+        also when the Supervisor no longer had it."""
+        status, _ = self.call("DELETE", f"/discovery/{quote(uuid, safe='')}")
+        return status in (200, 404)
+
+
+# ── The integration, as this page needs it ──────────────────────────────────
+#
+# Looked up through the Supervisor's Core websocket:
+#   1. smart_sniffer/info answers: integration v0.9 or later is loaded. It
+#      gives whether HAOS is one of its machines and the panel's path.
+#   2. Unknown command: manifest/get gives the installed version, with the
+#      entries and the older installed check beside it.
+#        0.9 or later, entries exist:  installed, Home Assistant not restarted
+#        0.9 or later, no entries:     installed, no machine yet (not loaded)
+#        older:                        0.8.x, to be updated
+#        not there:                    missing
+# A lookup that cannot finish keeps the state unknown (None); nothing on the
+# page or in the discovery changes on an unknown.
+
+STATE_LOADED = "loaded"
+STATE_NO_ENTRIES = "no_entries"
+STATE_RESTART = "restart"
+STATE_UPDATE = "update"
+STATE_MISSING = "missing"
+PANEL_STATES = (STATE_LOADED, STATE_NO_ENTRIES, STATE_RESTART)
+_PANEL_PATH_RE = re.compile(r"^/[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def version_tuple(text: Any) -> tuple[int, ...] | None:
+    """(0, 9, 2) from "0.9.2", "v0.9.0-beta.1" or "0.10"; None when it is
+    not a version."""
+    if not isinstance(text, str):
+        return None
+    match = re.match(r"^v?(\d+)\.(\d+)(?:\.(\d+))?", text.strip())
+    if not match:
+        return None
+    return tuple(int(g) for g in match.groups() if g is not None)
+
+
+def panel_capable(version: Any) -> bool:
+    found = version_tuple(version)
+    return found is not None and found[:2] >= PANEL_VERSION
+
+
+def detect_integration(sv: Supervisor) -> dict[str, Any]:
+    """One lookup: {"state", "version", "panel", "panel_path", "haos_entry",
+    "app_import"} (app_import: the handover version it takes, or None).
+    state None when it could not be told."""
+    out: dict[str, Any] = {"state": None, "version": None, "panel": None,
+                           "panel_path": DEFAULT_PANEL_PATH, "haos_entry": None,
+                           "app_import": None}
+    if not sv.available:
+        return out
+    try:
+        info = sv.ws({"type": f"{INTEGRATION_DOMAIN}/info"})
+    except WebSocketError as err:
+        if err.code is None:
+            return out  # Core not answering: unknown
+        if err.code != "unknown_command":
+            # The command is there but refused: v0.9+ is loaded; what it
+            # knows is not.
+            log(f"smart_sniffer/info refused: {err.reason}")
+            out.update(state=STATE_LOADED, panel=True)
+            return out
+    else:
+        info = info if isinstance(info, dict) else {}
+        path = info.get("panel_path")
+        out.update(
+            state=STATE_LOADED,
+            version=info.get("version") if isinstance(info.get("version"), str) else None,
+            panel=info.get("panel") is not False,
+            panel_path=path if isinstance(path, str) and _PANEL_PATH_RE.match(path) else DEFAULT_PANEL_PATH,
+            haos_entry=info.get("haos_entry") if isinstance(info.get("haos_entry"), bool) else None,
+            app_import=info.get("app_import") if isinstance(info.get("app_import"), int) else None,
+        )
+        return out
+    # Not loaded, or older than 0.9: the version on disk.
+    version: str | None = None
+    missing = False
+    try:
+        manifest = sv.ws({"type": "manifest/get", "integration": INTEGRATION_DOMAIN})
+        if isinstance(manifest, dict) and isinstance(manifest.get("version"), str):
+            version = manifest["version"]
+    except WebSocketError as err:
+        if err.code is None:
+            return out
+        missing = err.code == "not_found"
+    entries = sv.entries()
+    if entries is None:
+        return out
+    out["version"] = version
+    if version is None:
+        installed = False if missing and not entries else sv.integration_installed(entries)
+        if installed is None:
+            return out
+        # Installed but no version to tell by: treated as an older one.
+        out["state"] = STATE_UPDATE if installed else STATE_MISSING
+        return out
+    if panel_capable(version):
+        out["state"] = STATE_RESTART if entries else STATE_NO_ENTRIES
+        out["haos_entry"] = False if not entries else None
+    else:
+        out["state"] = STATE_UPDATE
+    return out
+
+
+class Discovery:
+    """This app's Supervisor discovery message for the integration.
+
+    Posted only while integration v0.9 or later is installed (older versions
+    do not know the service and would show an empty Discovered card), and
+    deleted otherwise. The first sync of a run deletes the message of the
+    previous run, whose uuid the app keeps, and posts a new one: the new uuid
+    always reaches Core, so the integration hears of the agent once per run.
+    The message names the agent's host and port only; no token."""
+
+    def __init__(self, sv: Supervisor, state: AppState, host: str, port: int) -> None:
+        self.sv = sv
+        self.state = state
+        self.host = host
+        self.port = port
+        self.lock = threading.Lock()
+        self.started = False
+
+    def config(self) -> dict[str, Any]:
+        return {"host": self.host, "port": self.port}
+
+    def _delete(self) -> None:
+        uuid = self.state.get(DISCOVERY_UUID)
+        if not isinstance(uuid, str) or not uuid:
+            return
+        if self.sv.discovery_delete(uuid):
+            self.state.set(DISCOVERY_UUID, None)
+            log("Discovery for the integration withdrawn")
+
+    def sync(self, integration_state: str | None) -> None:
+        if not self.sv.available:
+            return
+        with self.lock:
+            if not self.started:
+                self._delete()
+                if self.state.get(DISCOVERY_UUID):
+                    return  # the old one could not be deleted: try again next time
+                self.started = True
+            if integration_state is None:
+                return
+            if integration_state in PANEL_STATES:
+                if not self.state.get(DISCOVERY_UUID):
+                    uuid = self.sv.discovery_post(self.config())
+                    if uuid:
+                        self.state.set(DISCOVERY_UUID, uuid)
+                        log(f"Discovery posted for the integration: {self.host}:{self.port}")
+                    else:
+                        log("The Supervisor did not take the discovery for the integration")
+            else:
+                self._delete()
+
+
+class IntegrationWatch:
+    """The integration's state, read at most every ha_cache_seconds; one
+    lookup at a time. Every lookup also keeps the discovery in step."""
+
+    def __init__(self, sv: Supervisor, discovery: Discovery | None,
+                 cache_seconds: float = HA_API_CACHE_SECONDS) -> None:
+        self.sv = sv
+        self.discovery = discovery
+        self.cache_seconds = cache_seconds
+        self.lock = threading.Lock()
+        self.cached: tuple[float, dict[str, Any]] | None = None
+        self.last_known: dict[str, Any] | None = None
+
+    def get(self, fresh: bool = False) -> dict[str, Any]:
+        started = time.monotonic()
+        with self.lock:
+            cached = self.cached
+            if cached and (cached[0] >= started or
+                           (not fresh and time.monotonic() - cached[0] < self.cache_seconds)):
+                return cached[1]
+            result = detect_integration(self.sv)
+            if result["state"] is None and self.last_known is not None:
+                # Unknown now (Core restarting): the page keeps its last state.
+                result = {**self.last_known, "stale": True}
+            elif result["state"] is not None:
+                self.last_known = result
+            self.cached = (time.monotonic(), result)
+        if self.discovery is not None and not result.get("stale"):
+            try:
+                self.discovery.sync(result["state"])
+            except Exception as err:  # noqa: BLE001 -- the page answers anyway
+                log(f"Discovery failed: {type(err).__name__}: {err}")
+        return result
+
+    def forget(self) -> None:
+        with self.lock:
+            self.cached = None
+
+    def peek(self) -> dict[str, Any] | None:
+        """The last lookup's result, without a lookup of its own."""
+        cached = self.cached
+        return cached[1] if cached else None
+
+    def run(self) -> None:
+        """The background watch: a lookup at start, then every
+        WATCH_SECONDS (WATCH_RETRY_SECONDS while the state is unknown)."""
+        while True:
+            try:
+                result = self.get(fresh=True)
+                wait = WATCH_RETRY_SECONDS if result.get("state") is None else WATCH_SECONDS
+            except Exception as err:  # noqa: BLE001 -- the watch never stops
+                log(f"Integration lookup failed: {type(err).__name__}: {err}")
+                wait = WATCH_RETRY_SECONDS
+            time.sleep(wait)
 
 
 # ── Talking to agents ───────────────────────────────────────────────────────
@@ -1502,7 +1579,7 @@ class AgentReply:
 def agent_call(host: str, port: int, method: str, path: str, *, token: str = "",
                body: Any = None, raw_body: bytes | None = None,
                connect_timeout: float = 3.0, read_timeout: float = 5.0) -> AgentReply:
-    """One HTTP request to an agent (or the replica agent). Never raises.
+    """One HTTP request to an agent. Never raises.
     The token, when given, goes in the Authorization header only."""
     conn = http.client.HTTPConnection(host, port, timeout=connect_timeout)
     try:
@@ -1532,154 +1609,6 @@ def agent_call(host: str, port: int, method: str, path: str, *, token: str = "",
         conn.close()
 
 
-# ── Field agents: addresses, probing and the scan ───────────────────────────
-
-SCAN_WORKERS = 64
-SCAN_CONNECT_TIMEOUT = 0.4
-SCAN_READ_TIMEOUT = 1.0
-PROBE_TIMEOUT = 3.0
-SCAN_KEEP_SECONDS = 600  # a finished scan can be read for 10 minutes
-MIN_SCAN_PREFIX = 22  # wider blocks are refused with a suggestion
-LOOKUP_BUDGET = 1.0  # seconds for one reverse or forward name lookup
-RESERVED_HOST_IDS = ("self", "replicas")
-
-_HOSTNAME_RE = re.compile(
-    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
-)
-
-
-def valid_address(text: Any) -> str | None:
-    """An IPv4 literal or a host name, lower-cased; None when it is neither."""
-    if not isinstance(text, str):
-        return None
-    text = text.strip().lower()
-    try:
-        return str(ipaddress.IPv4Address(text))
-    except ValueError:
-        pass
-    if re.fullmatch(r"[0-9.]+", text):
-        return None  # looks like an address but is not one
-    return text if _HOSTNAME_RE.match(text) else None
-
-
-def valid_port(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, str) and value.strip().isdigit():
-        value = int(value.strip())
-    if isinstance(value, int) and 1 <= value <= 65535:
-        return value
-    return None
-
-
-def host_id(address: str, port: int) -> str:
-    return f"{address.lower()}:{port}"
-
-
-def _with_budget(func, *args, budget: float = LOOKUP_BUDGET) -> Any:
-    """Run a blocking lookup in a thread; None when it takes longer than the
-    budget or fails."""
-    box: list[Any] = []
-
-    def run() -> None:
-        try:
-            box.append(func(*args))
-        except (OSError, UnicodeError, ValueError):
-            pass
-
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    worker.join(budget)
-    return box[0] if box else None
-
-
-def resolve_ipv4(name: str, budget: float = LOOKUP_BUDGET) -> str | None:
-    """The first IPv4 address of a name (or the literal itself)."""
-    try:
-        return str(ipaddress.IPv4Address(name))
-    except ValueError:
-        pass
-    infos = _with_budget(socket.getaddrinfo, name, None, socket.AF_INET, socket.SOCK_STREAM,
-                         budget=budget)
-    for info in infos or []:
-        return str(info[4][0])
-    return None
-
-
-_IPV4_CACHE: dict[str, tuple[float, str | None]] = {}
-
-
-def cached_ipv4(name: str) -> str | None:
-    """resolve_ipv4(), remembered for five minutes."""
-    hit = _IPV4_CACHE.get(name)
-    if hit and time.monotonic() - hit[0] < 300:
-        return hit[1]
-    address = resolve_ipv4(name)
-    _IPV4_CACHE[name] = (time.monotonic(), address)
-    return address
-
-
-def reverse_name(address: str) -> str | None:
-    """A short host name for an address, within the lookup budget."""
-    found = _with_budget(socket.gethostbyaddr, address)
-    if not found:
-        return None
-    try:  # no PTR record: some resolvers answer the address itself
-        ipaddress.IPv4Address(str(found[0]))
-        return None
-    except ValueError:
-        pass
-    name = str(found[0]).split(".")[0]
-    return name or None
-
-
-def _route_targets(text: str) -> list[str]:
-    """One address per route in /proc/net/route: the gateway, or for a route
-    with none, the first address of its network. The kernel writes each
-    field as the raw 32-bit value in host byte order."""
-    targets: list[str] = []
-    for line in text.splitlines()[1:]:
-        fields = line.split()
-        if len(fields) < 8:
-            continue
-        try:
-            dest, gateway, mask = (struct.pack("=I", int(fields[i], 16)) for i in (1, 2, 7))
-        except (ValueError, struct.error):
-            continue
-        if gateway != bytes(4):
-            targets.append(socket.inet_ntoa(gateway))
-        elif mask != bytes(4):
-            net = ipaddress.IPv4Network(f"{socket.inet_ntoa(dest)}/{socket.inet_ntoa(mask)}",
-                                        strict=False)
-            if net.num_addresses > 1:
-                targets.append(str(net.network_address + 1))
-    return targets
-
-
-def local_ipv4_addresses(route_file: str = "/proc/net/route") -> set[str]:
-    """This container's own IPv4 addresses, with the standard library only:
-    what its host name resolves to, and for each route the source address
-    the kernel picks towards it (connecting a UDP socket sends nothing).
-    The scan is IPv4 only, so IPv6 addresses are not collected."""
-    found: set[str] = set()
-    infos = _with_budget(socket.getaddrinfo, socket.gethostname(), None, socket.AF_INET)
-    for info in infos or []:
-        found.add(str(info[4][0]))
-    try:
-        with open(route_file, encoding="ascii", errors="replace") as handle:
-            targets = _route_targets(handle.read())
-    except OSError:
-        targets = []
-    for target in targets:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.connect((target, 9))
-                found.add(str(sock.getsockname()[0]))
-        except OSError:
-            continue
-    found.discard("0.0.0.0")
-    return found
-
 
 def _is_agent_health(reply: AgentReply) -> bool:
     body = reply.body
@@ -1692,199 +1621,12 @@ def _is_agent_health(reply: AgentReply) -> bool:
     )
 
 
-def _wants_password(reply: AgentReply) -> bool:
-    """A 401 with the agent's own body. The real agent leaves /api/health
-    public; the mock agent run with --token does not, and is still an agent."""
-    return reply.status == 401 and isinstance(reply.body, dict) and reply.body.get("error") == "unauthorized"
-
-
-def probe(address: str, port: int, connect_timeout: float, read_timeout: float,
-          connect_to: str | None = None,
-          own_names: set[str] | frozenset[str] = frozenset()) -> tuple[str, dict[str, Any] | None]:
-    """Is there an agent on address:port? Returns ("ok", scan row),
-    ("not_answering", None), ("not_an_agent", None), or ("own", None) when
-    its health names one of own_names (this app's agents). Sends GET
-    /api/health and GET /api/drives only, never with credentials."""
-    target = connect_to or address
-    health = agent_call(target, port, "GET", "/api/health",
-                        connect_timeout=connect_timeout, read_timeout=read_timeout)
-    if health.status is None:
-        return "not_answering", None
-    body: dict[str, Any] = {}
-    if _is_agent_health(health):
-        body = health.body
-        named = body.get("hostname")
-        if own_names and isinstance(named, str) and named.split(".")[0].lower() in own_names:
-            return "own", None
-        drives = agent_call(target, port, "GET", "/api/drives",
-                            connect_timeout=connect_timeout, read_timeout=read_timeout)
-        if drives.status is None:
-            return "not_answering", None
-        auth = "password" if drives.status == 401 else "open"
-        count = len(drives.body) if drives.status == 200 and isinstance(drives.body, list) else None
-    elif _wants_password(health):
-        auth, count = "password", None
-    else:
-        return "not_an_agent", None
-    if count is None and isinstance(body.get("drives"), int):
-        count = body["drives"]
-    endpoints = body.get("endpoints") if isinstance(body.get("endpoints"), list) else []
-    pools = body.get("pools") if isinstance(body.get("pools"), int) else (
-        0 if body and "/api/pools" not in endpoints else None)
-    hostname = body.get("hostname") if isinstance(body.get("hostname"), str) else None
-    if not hostname:
-        try:
-            ipaddress.IPv4Address(address)
-            hostname = reverse_name(address)
-        except ValueError:
-            hostname = address.split(".")[0]
-    return "ok", {
-        "id": host_id(address, port), "address": address, "port": port,
-        "hostname": hostname or address,
-        "version": body.get("version") if isinstance(body.get("version"), str) else None,
-        "drives": count, "pools": pools, "auth": auth, "added": False,
-    }
-
-
-def parse_block(text: Any) -> ipaddress.IPv4Network:
-    """An IPv4 CIDR block (a bare address is a /32); ApiError 400 otherwise."""
-    if not isinstance(text, str) or not text.strip():
-        raise ApiError(400, "bad_block", "the block must be an IPv4 address or CIDR block")
-    try:
-        net = ipaddress.ip_network(text.strip(), strict=False)
-    except ValueError:
-        raise ApiError(400, "bad_block", "the block must be an IPv4 address or CIDR block") from None
-    if net.version != 4:
-        raise ApiError(400, "bad_block", "only IPv4 blocks can be scanned")
-    return net  # type: ignore[return-value]
-
-
-class Scan:
-    def __init__(self, scan_id: str, block: ipaddress.IPv4Network, port: int) -> None:
-        self.id = scan_id
-        self.block = block
-        self.port = port
-        hosts = list(block.hosts()) if block.prefixlen < 31 else list(block)
-        self.addresses = [str(a) for a in hosts]
-        self.total = len(self.addresses)
-        self.probed = 0
-        self.found: list[dict[str, Any]] = []
-        self.state = "running"
-        self.started_at = utc_now()
-        self.finished_at: str | None = None
-        self.finished_mono: float | None = None
-        self.cancel = threading.Event()
-        self.lock = threading.Lock()
-
-    def snapshot(self) -> dict[str, Any]:
-        with self.lock:
-            return {
-                "scan_id": self.id, "block": str(self.block), "port": self.port,
-                "state": self.state, "probed": self.probed, "total": self.total,
-                "found": [dict(row) for row in self.found],
-                "started_at": self.started_at, "finished_at": self.finished_at,
-            }
-
-    def finish(self, state: str) -> None:
-        with self.lock:
-            if self.state == "running":
-                self.state = state
-                self.finished_at = utc_now()
-                self.finished_mono = time.monotonic()
-
-
-class ScanManager:
-    """One scan at a time; a new one cancels the running one."""
-
-    def __init__(self) -> None:
-        self.scans: dict[str, Scan] = {}
-        self.lock = threading.Lock()
-
-    def _purge(self) -> None:
-        now = time.monotonic()
-        for scan_id, scan in list(self.scans.items()):
-            if scan.finished_mono is not None and now - scan.finished_mono > SCAN_KEEP_SECONDS:
-                del self.scans[scan_id]
-
-    def get(self, scan_id: str) -> Scan | None:
-        with self.lock:
-            self._purge()
-            return self.scans.get(scan_id)
-
-    def start(self, block: ipaddress.IPv4Network, port: int, skip: Callable[[str], bool],
-              stored: list[dict[str, Any]],
-              own_names: set[str] | frozenset[str] = frozenset()) -> Scan:
-        """skip(address) is true for an address of this machine: nothing is
-        sent to it. own_names: this app's host names; an agent whose health
-        names one is left out of the results."""
-        scan = Scan(os.urandom(4).hex(), block, port)
-        with self.lock:
-            self._purge()
-            for other in self.scans.values():
-                if other.state == "running":
-                    other.cancel.set()
-                    other.finish("cancelled")
-            self.scans[scan.id] = scan
-        threading.Thread(target=self._run, args=(scan, skip, stored, own_names), daemon=True).start()
-        return scan
-
-    def cancel(self, scan_id: str) -> Scan | None:
-        scan = self.get(scan_id)
-        if scan is not None:
-            scan.cancel.set()
-            scan.finish("cancelled")
-        return scan
-
-    def _run(self, scan: Scan, skip: Callable[[str], bool], stored: list[dict[str, Any]],
-             own_names: set[str] | frozenset[str]) -> None:
-        added = stored_keys(stored)
-
-        def one(address: str) -> None:
-            if scan.cancel.is_set():
-                return
-            row = None
-            if not skip(address):
-                outcome, row = probe(address, scan.port, SCAN_CONNECT_TIMEOUT, SCAN_READ_TIMEOUT,
-                                     own_names=own_names)
-                if outcome != "ok":
-                    row = None
-            with scan.lock:
-                if scan.state != "running":
-                    return
-                scan.probed += 1
-                if row is not None:
-                    row["added"] = (row["address"], row["port"]) in added
-                    scan.found.append(row)
-
-        pool = ThreadPoolExecutor(max_workers=SCAN_WORKERS, thread_name_prefix="scan")
-        try:
-            for address in scan.addresses:
-                if scan.cancel.is_set():
-                    break
-                pool.submit(one, address)
-        finally:
-            pool.shutdown(wait=not scan.cancel.is_set(), cancel_futures=scan.cancel.is_set())
-        scan.finish("cancelled" if scan.cancel.is_set() else "done")
-
-
-def stored_keys(stored: list[dict[str, Any]]) -> set[tuple[str, int]]:
-    """(address, port) pairs a scan row is compared with: each stored host's
-    address, and the IPv4 address its name resolves to."""
-    keys: set[tuple[str, int]] = set()
-    for host in stored:
-        address, port = host["address"], host["port"]
-        keys.add((address, port))
-        resolved = resolve_ipv4(address)
-        if resolved:
-            keys.add((resolved, port))
-    return keys
-
-
-# ── Field agents: stored hosts and the last-good cache ──────────────────────
+# ── Small stores in /data, and the options of older versions ────────────────
 
 class AppState:
     """/data/app-state.json: small page settings that follow the user to every
-    browser, such as the dismissed integration notice. Written atomically."""
+    browser, such as the closed install card, and the uuid of this app's
+    discovery message. Written atomically."""
 
     def __init__(self, path: str | None) -> None:
         self.path = path
@@ -1919,22 +1661,24 @@ class AppState:
                 log(f"Cannot write {self.path}: {err.strerror or err}; kept in memory")
 
 
-class FleetCache:
-    """/data/fleet-cache.json: per host the last good response, its time,
-    when the host was added and since when it is hidden. Written atomically."""
+class ReadCache:
+    """The last good read of this box's agent, so the page shows it (marked
+    stale) while the agent does not answer. Kept in memory. An older
+    version's /data/fleet-cache.json is read once at start for this box's
+    entry and never written; the Handover removes it once the integration
+    has taken every field machine."""
 
-    def __init__(self, path: str | None) -> None:
-        self.path = path
+    def __init__(self, legacy_path: str | None = None) -> None:
         self.lock = threading.Lock()
         self.hosts: dict[str, dict[str, Any]] = {}
-        self._warned = False
-        if path:
+        if legacy_path:
             try:
-                with open(path, encoding="utf-8") as handle:
+                with open(legacy_path, encoding="utf-8") as handle:
                     data = json.load(handle)
                 hosts = data.get("hosts") if isinstance(data, dict) else None
-                if isinstance(hosts, dict):
-                    self.hosts = {k: v for k, v in hosts.items() if isinstance(v, dict)}
+                own = hosts.get("self") if isinstance(hosts, dict) else None
+                if isinstance(own, dict):
+                    self.hosts["self"] = {k: own[k] for k in ("response", "last_answer") if k in own}
             except (OSError, ValueError):
                 pass
 
@@ -1944,48 +1688,7 @@ class FleetCache:
 
     def update(self, key: str, **fields: Any) -> None:
         with self.lock:
-            entry = self.hosts.setdefault(key, {})
-            entry.update(fields)
-            self._save()
-
-    def drop(self, key: str) -> None:
-        with self.lock:
-            if self.hosts.pop(key, None) is not None:
-                self._save()
-
-    def _save(self) -> None:
-        if not self.path:
-            return
-        tmp = f"{self.path}.tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump({"version": 1, "hosts": self.hosts}, handle)
-            os.replace(tmp, self.path)
-        except OSError as err:
-            if not self._warned:
-                log(f"Cannot write {self.path}: {err.strerror or err}; the cache stays in memory")
-                self._warned = True
-
-
-def _normalize_hosts(raw: Any) -> list[dict[str, Any]]:
-    hosts: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict):
-            continue
-        address = valid_address(item.get("address"))
-        port = valid_port(item.get("port"))
-        if address is None or port is None or host_id(address, port) in seen:
-            continue
-        seen.add(host_id(address, port))
-        password = item.get("password")
-        hosts.append({
-            "address": address, "port": port,
-            "password": password if isinstance(password, str) else "",
-            "hidden": item.get("hidden") is True,
-            "removed": _str_list(item.get("removed")),
-        })
-    return hosts
+            self.hosts.setdefault(key, {}).update(fields)
 
 
 def _str_list(raw: Any) -> list[str]:
@@ -2014,57 +1717,464 @@ def _normalize_thresholds(raw: Any) -> dict[str, dict[str, int]]:
     return out
 
 
-def _serialize_thresholds(thresholds: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
-    return [{"card": card, "label": label, "value": int(value)}
-            for card in sorted(thresholds) for label, value in sorted(thresholds[card].items())]
+# Options of older versions, removed at start when the Supervisor does not
+# report the schema to compare with.
+REMOVED_OPTIONS = ("mock_mode", "mock_port")
 
 
-MAX_NAME = 100  # the longest card or machine name kept
+def _schema_names(schema: Any) -> set[str]:
+    """Top-level option names from the Supervisor's schema: a list of
+    {"name": ...} (its UI form) or a mapping. Empty when unknown."""
+    if isinstance(schema, dict):
+        return {str(k) for k in schema}
+    if isinstance(schema, list):
+        return {str(item["name"]) for item in schema if isinstance(item, dict) and item.get("name")}
+    return set()
 
 
-def clean_name(raw: Any) -> str:
-    """A name as stored: one line, trimmed, at most MAX_NAME characters."""
-    text = " ".join(str(raw).split()) if isinstance(raw, str) else ""
-    return text[:MAX_NAME].strip()
+class LegacyOptions:
+    """The app options as 0.3.x left them. Read only here, except that
+    options the schema no longer has (mock_port, mock_mode) are dropped once
+    at start; every other option is written back exactly as it was read.
+    The field machines and their settings leave through the Handover, which
+    shares this lock."""
+
+    MEMO_SECONDS = 60
+
+    def __init__(self, supervisor: Supervisor) -> None:
+        self.sv = supervisor
+        self.lock = threading.Lock()
+        self._thresholds: dict[str, dict[str, int]] | None = None
+        self._memo_at = 0.0
+
+    def _info(self) -> dict[str, Any]:
+        if not self.sv.available:
+            raise ApiError(503, "supervisor_unavailable", "the Supervisor is not available")
+        status, info = self.sv.call("GET", "/addons/self/info")
+        data = info.get("data") if isinstance(info, dict) else None
+        options = data.get("options") if isinstance(data, dict) else None
+        if status != 200 or not isinstance(options, dict):
+            raise ApiError(502, "supervisor_failed", "could not read the app options")
+        return data  # type: ignore[return-value]
+
+    def drop_stale_options(self) -> list[str]:
+        with self.lock:
+            data = self._info()
+            options = data["options"]
+            names = _schema_names(data.get("schema"))
+            stale = [key for key in options
+                     if (key not in names if names else key in REMOVED_OPTIONS)]
+            if stale:
+                kept = {k: v for k, v in options.items() if k not in stale}
+                status, reply = self.sv.call("POST", "/addons/self/options", {"options": kept})
+                if status != 200:
+                    message = reply.get("message") if isinstance(reply, dict) else None
+                    raise ApiError(502, "supervisor_failed", message or "could not save the app options")
+            return stale
+
+    def thresholds(self) -> dict[str, dict[str, int]]:
+        """The per-card thresholds 0.3.x kept in the options, by card id, read
+        again at most every MEMO_SECONDS; the last known (or none) when the
+        Supervisor cannot be read."""
+        if self._thresholds is not None and time.monotonic() - self._memo_at < self.MEMO_SECONDS:
+            return self._thresholds
+        try:
+            self._thresholds = _normalize_thresholds(self._info()["options"].get("thresholds"))
+        except ApiError:
+            pass
+        self._memo_at = time.monotonic()
+        return self._thresholds or {}
 
 
-def _normalize_names(raw: Any, key: str) -> dict[str, str]:
-    """Names given in the Control Center from the options: a list of {key,
-    name} (the Supervisor's schema has no free-form maps) as {id: name}.
-    Anything malformed or empty is dropped."""
-    out: dict[str, str] = {}
+def drop_stale_options(store: LegacyOptions) -> None:
+    """Run once at start: remove options left from an older version."""
+    try:
+        stale = store.drop_stale_options()
+    except ApiError as err:
+        log(f"Could not check the app options for old settings: {err.message or err.code}")
+        return
+    if stale:
+        log(f"Removed the old option{'s' if len(stale) > 1 else ''} {', '.join(stale)} from the app options")
+
+
+# ── Handing the field machines over to the integration ──────────────────────
+#
+# App 0.3.x kept its field machines (address, port, password), their labels,
+# card names, hidden cards, the card order and per-card thresholds in the
+# app options. The SMART Sniffer integration (v0.9 and later) owns all of
+# that now. Once its smart_sniffer/info says it takes a handover
+# ("app_import"), the app sends everything once over the Supervisor's Core
+# websocket (smart_sniffer/app/import starts a job; .../result is polled),
+# then clears from its options exactly what the integration confirmed. This
+# box's own settings (its thresholds, names, hidden cards) are sent too, so
+# the integration has them for HAOS, and kept here: this page still uses
+# them. Nothing is sent while the integration is missing or older.
+#
+# The integration keeps a ledger of what it did, so a lost answer, a retry
+# or a second start never makes a machine twice or brings back one the user
+# deleted. A machine it could not take stays here, with its password, and is
+# sent again later (every HANDOVER_RETRY_SECONDS) until it is taken or the
+# user discards it in the integration's panel.
+
+HANDOVER_DONE = "handover_done"  # app-state.json: item ids of this box's settings sent
+HANDOVER_RETRY_SECONDS = 600.0  # while something is left to send
+HANDOVER_WAIT_SECONDS = 30.0  # while the integration cannot take it, or an answer was lost
+HANDOVER_POLL_SECONDS = 2.0
+HANDOVER_FIRST_SECONDS = 5.0  # after start, before the first look
+HANDOVER_POLL_LIMIT = 300.0  # seconds a job is waited for
+HANDOVER_FINAL = ("created", "created_offline", "matched", "applied", "pending", "kept",
+                  "replicas_dropped", "discarded")
+HANDOVER_SELF_ID = "self"
+HANDOVER_ORDER_ID = "card_order"
+HANDOVER_REPLICAS_ID = "replicas"
+REPLICA_HOST_KEY = "replicas"
+OPTION_LISTS = ("card_order", "hidden_cards", "thresholds", "card_names", "host_names")
+
+
+def handover_host_key(address: str, port: int) -> str:
+    """0.3.x's id of a field machine: "<address>:<port>", lower case."""
+    return f"{address.lower()}:{int(port)}"
+
+
+def handover_item_id(address: str, port: int) -> str:
+    """A field machine's item id: the same for the same machine on every
+    try, so the integration's ledger knows it again."""
+    return hashlib.sha256(handover_host_key(address, port).encode()).hexdigest()
+
+
+def _option_hosts(raw: Any) -> list[dict[str, Any]]:
+    """The field machines in the options, as 0.3.x wrote them; anything
+    malformed is left out (and left in the options)."""
+    hosts: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
             continue
-        ident, name = item.get(key), clean_name(item.get("name"))
-        if isinstance(ident, str) and ident and name:
-            out[ident] = name
+        address = item.get("address")
+        port = item.get("port")
+        if not isinstance(address, str) or not address.strip() or isinstance(port, bool) \
+                or not isinstance(port, int) or not 0 < port < 65536:
+            continue
+        key = handover_host_key(address.strip(), port)
+        if key in seen:
+            continue
+        seen.add(key)
+        password = item.get("password")
+        hosts.append({"address": address.strip(), "port": port, "key": key,
+                      "password": password if isinstance(password, str) else "",
+                      "hidden": item.get("hidden") is True,
+                      "removed": _str_list(item.get("removed"))})
+    return hosts
+
+
+def _option_names(raw: Any, field: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, dict) and isinstance(item.get(field), str) and item[field] \
+                and isinstance(item.get("name"), str) and item["name"].strip():
+            out[item[field]] = " ".join(item["name"].split())[:100]
     return out
 
 
-def _serialize_names(names: dict[str, str], key: str) -> list[dict[str, str]]:
-    return [{key: ident, "name": names[ident]} for ident in sorted(names)]
+def _host_of(card: str) -> str:
+    return split_card_id(card)[0].lower()
 
 
-def _serialize_host(host: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {"address": host["address"], "port": host["port"]}
-    if host.get("password"):
-        out["password"] = host["password"]
-    if host.get("hidden"):
-        out["hidden"] = True
-    if host.get("removed"):
-        out["removed"] = list(host["removed"])
+def build_handover(options: dict[str, Any], cache_hosts: dict[str, Any] | None = None,
+                   sent: list[str] | None = None) -> list[dict[str, Any]]:
+    """The items to send, from the options (and the old fleet cache's host
+    names): one per field machine, this box's settings, the card order, and
+    the old Replica settings to drop. Items already sent and kept here on
+    purpose (``sent``: this box's settings, the order) are left out."""
+    sent = sent or []
+    hosts = _option_hosts(options.get("hosts"))
+    names = _option_names(options.get("card_names"), "card")
+    labels = _option_names(options.get("host_names"), "host")
+    hidden = _str_list(options.get("hidden_cards"))
+    order = _str_list(options.get("card_order"))
+    thresholds = _normalize_thresholds(options.get("thresholds"))
+    cards: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def card(cid: str) -> dict[str, Any] | None:
+        host, key = split_card_id(cid)
+        if not key:
+            return None
+        return cards.setdefault(host.lower(), {}).setdefault(key, {})
+
+    for cid, name in names.items():
+        found = card(cid)
+        if found is not None:
+            found["name"] = name
+    for cid in hidden:
+        found = card(cid)
+        if found is not None:
+            found["hidden"] = True
+    for cid, values in thresholds.items():
+        found = card(cid)
+        if found is not None and values:
+            found["thresholds"] = dict(values)
+    items: list[dict[str, Any]] = []
+    for host in hosts:
+        item: dict[str, Any] = {
+            "item_id": handover_item_id(host["address"], host["port"]), "kind": "field",
+            "address": host["address"], "port": host["port"], "password": host["password"],
+            "hidden": host["hidden"], "removed": host["removed"],
+            "cards": cards.get(host["key"], {}),
+        }
+        if labels.get(host["key"]):
+            item["name"] = labels[host["key"]]
+        cached = ((cache_hosts or {}).get(host["key"]) or {}).get("response")
+        agent = cached.get("agent") if isinstance(cached, dict) else None
+        if isinstance(agent, dict):
+            if isinstance(agent.get("hostname"), str) and agent["hostname"]:
+                item["hostname"] = agent["hostname"][:253]
+            if isinstance(agent.get("agent_id"), str) and agent["agent_id"]:
+                item["agent_id"] = agent["agent_id"][:64]
+        items.append(item)
+    if cards.get("self") and HANDOVER_SELF_ID not in sent:
+        items.append({"item_id": HANDOVER_SELF_ID, "kind": "self", "cards": cards["self"]})
+    kept_order = [c for c in order if _host_of(c) != REPLICA_HOST_KEY]
+    if kept_order and HANDOVER_ORDER_ID not in sent:
+        items.append({"item_id": HANDOVER_ORDER_ID, "kind": "order", "order": kept_order})
+    replica_keys = [c for c in [*names, *hidden, *order, *thresholds]
+                    if _host_of(c) == REPLICA_HOST_KEY] + \
+        [k for k in labels if k.lower() == REPLICA_HOST_KEY]
+    if replica_keys:
+        items.append({"item_id": HANDOVER_REPLICAS_ID, "kind": "replicas"})
+    return items
+
+
+def clear_handed_over(options: dict[str, Any], done_hosts: set[str],
+                      drop_replicas: bool) -> dict[str, Any]:
+    """The options without what the integration confirmed: those field
+    machines (passwords included) and every name, hidden mark, order place
+    and threshold of theirs; the old Replica settings when confirmed
+    dropped. Settings of a machine no longer in the options (left by an
+    older version) go once no field machine is left. This box's own
+    settings and every other option stay as they are."""
+    out = dict(options)
+    hosts = options.get("hosts") if isinstance(options.get("hosts"), list) else []
+    kept_hosts = [h for h in hosts if not (
+        isinstance(h, dict) and isinstance(h.get("address"), str) and isinstance(h.get("port"), int)
+        and handover_host_key(h["address"].strip(), h["port"]) in done_hosts)]
+    out["hosts"] = kept_hosts
+    remaining = {k["key"] for k in _option_hosts(kept_hosts)}
+
+    def gone(host: str) -> bool:
+        host = host.lower()
+        if host == "self":
+            return False
+        if host == REPLICA_HOST_KEY:
+            return drop_replicas
+        return host in done_hosts or (not kept_hosts and host not in remaining)
+
+    for name in OPTION_LISTS:
+        raw = options.get(name)
+        if not isinstance(raw, list):
+            continue
+        kept = []
+        for item in raw:
+            if name in ("card_order", "hidden_cards"):
+                host = _host_of(item) if isinstance(item, str) else ""
+            elif name == "host_names":
+                host = str(item.get("host") or "") if isinstance(item, dict) else ""
+            else:
+                host = _host_of(str(item.get("card") or "")) if isinstance(item, dict) else ""
+            if not gone(host):
+                kept.append(item)
+        out[name] = kept
     return out
+
+
+class Handover:
+    """Sends the field machines to the integration and clears what it took."""
+
+    def __init__(self, sv: Supervisor, state: AppState, watch: IntegrationWatch,
+                 data_dir: str | None, options_lock: Any = None) -> None:
+        self.sv = sv
+        # Shared with LegacyOptions: one read-modify-write of the options at
+        # a time.
+        self.options_lock = options_lock or threading.Lock()
+        self.state = state
+        self.watch = watch
+        self.data_dir = data_dir
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.last: dict[str, Any] | None = None
+
+    def ready(self, integration: dict[str, Any]) -> bool:
+        """Integration v0.9 or later loaded, and it takes a handover."""
+        version = integration.get("app_import")
+        return (integration.get("state") == STATE_LOADED and not integration.get("stale")
+                and panel_capable(integration.get("version"))
+                and isinstance(version, int) and not isinstance(version, bool) and version >= 1)
+
+    def _options(self) -> dict[str, Any] | None:
+        status, info = self.sv.call("GET", "/addons/self/info")
+        data = info.get("data") if isinstance(info, dict) else None
+        options = data.get("options") if isinstance(data, dict) else None
+        return options if status == 200 and isinstance(options, dict) else None
+
+    def _cache_hosts(self) -> dict[str, Any]:
+        if not self.data_dir:
+            return {}
+        try:
+            with open(os.path.join(self.data_dir, "fleet-cache.json"), encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        hosts = data.get("hosts") if isinstance(data, dict) else None
+        return hosts if isinstance(hosts, dict) else {}
+
+    def pending(self) -> list[dict[str, Any]] | None:
+        """What is left to send; None when the options cannot be read."""
+        options = self._options()
+        if options is None:
+            return None
+        return build_handover(options, self._cache_hosts(), list(self.state.get(HANDOVER_DONE) or []))
+
+    def _ask(self, command: dict[str, Any]) -> Any:
+        return self.sv.ws(command)
+
+    def run_once(self) -> str:
+        """One handover: "nothing", "done", "partial", "lost" (no answer:
+        tried again soon; the integration's ledger keeps what it did) or
+        "unavailable"."""
+        with self.lock:
+            items = self.pending()
+            if items is None:
+                return "unavailable"
+            if not items:
+                return "nothing"
+            try:
+                started = self._ask({"type": f"{INTEGRATION_DOMAIN}/app/import", "items": items})
+                job_id = started.get("job_id") if isinstance(started, dict) else None
+            except WebSocketError as err:
+                log(f"Handover to the integration not started: {err.code or 'no answer'}")
+                return "lost"
+            if not isinstance(job_id, str):
+                return "lost"
+            report = self._wait(job_id)
+            if report is None:
+                return "lost"
+            return self._apply(items, report)
+
+    def _wait(self, job_id: str) -> dict[str, Any] | None:
+        deadline = time.monotonic() + HANDOVER_POLL_LIMIT
+        while time.monotonic() < deadline:
+            time.sleep(HANDOVER_POLL_SECONDS)
+            try:
+                answer = self._ask({"type": f"{INTEGRATION_DOMAIN}/app/import/result",
+                                    "job_id": job_id})
+            except WebSocketError as err:
+                if err.code == "not_found":
+                    return None  # Home Assistant restarted: sent again later
+                continue  # a lost poll: the job goes on
+            state = answer.get("state") if isinstance(answer, dict) else None
+            if state == "done" and isinstance(answer.get("report"), dict):
+                return answer["report"]
+            if state != "running":
+                return None
+        return None
+
+    def _apply(self, items: list[dict[str, Any]], report: dict[str, Any]) -> str:
+        outcomes = report.get("items") if isinstance(report.get("items"), dict) else {}
+
+        def final(item_id: str) -> bool:
+            row = outcomes.get(item_id)
+            return isinstance(row, dict) and row.get("outcome") in HANDOVER_FINAL
+
+        done_hosts = {handover_host_key(i["address"], i["port"])
+                      for i in items if i["kind"] == "field" and final(i["item_id"])}
+        drop_replicas = final(HANDOVER_REPLICAS_ID)
+        sent = list(self.state.get(HANDOVER_DONE) or [])
+        for item_id in (HANDOVER_SELF_ID, HANDOVER_ORDER_ID):
+            if final(item_id) and item_id not in sent:
+                sent.append(item_id)
+        left = [i for i in items if not final(i["item_id"])]
+        if done_hosts or drop_replicas:
+            with self.options_lock:
+                options = self._options()
+                if options is None:
+                    return "lost"
+                cleared = clear_handed_over(options, done_hosts, drop_replicas)
+                if cleared != options:
+                    status, reply = self.sv.call("POST", "/addons/self/options",
+                                                 {"options": cleared})
+                    if status != 200:
+                        message = reply.get("message") if isinstance(reply, dict) else None
+                        log(f"Handover: the app options could not be cleared "
+                            f"({message or status}); sent again later")
+                        return "lost"
+        self.state.set(HANDOVER_DONE, sent)
+        counts = {"machines": len(done_hosts), "left": sum(1 for i in left if i["kind"] == "field")}
+        self.last = {"at": utc_now(), **counts}
+        log(f"Handover to the integration: {counts['machines']} field machine"
+            f"{'s' if counts['machines'] != 1 else ''} taken, {counts['left']} left")
+        if not left:
+            self._finish(items, outcomes)
+            return "done"
+        return "partial"
+
+    def _finish(self, items: list[dict[str, Any]], outcomes: dict[str, Any]) -> None:
+        """Nothing left: the old fleet cache goes, and a note of the handover
+        (no password) is kept in /data/migration.json."""
+        if not self.data_dir:
+            return
+        try:
+            os.remove(os.path.join(self.data_dir, "fleet-cache.json"))
+        except OSError:
+            pass
+        note = {"at": utc_now(), "items": {
+            i["item_id"]: {"kind": i["kind"],
+                           **({"address": i["address"], "port": i["port"]}
+                              if i["kind"] == "field" else {}),
+                           "outcome": (outcomes.get(i["item_id"]) or {}).get("outcome")}
+            for i in items}}
+        path = os.path.join(self.data_dir, "migration.json")
+        try:
+            with open(f"{path}.tmp", "w", encoding="utf-8") as handle:
+                json.dump(note, handle)
+            os.replace(f"{path}.tmp", path)
+        except OSError as err:
+            log(f"Cannot write {path}: {err.strerror or err}")
+
+    def trigger(self) -> None:
+        self.wake.set()
+
+    def step(self) -> float:
+        """One turn of the background loop; the seconds until the next. It
+        uses the watch's last lookup (the watch looks at start and every
+        WATCH_SECONDS), so it adds no lookups of its own."""
+        integration = self.watch.peek() or {}
+        if not self.ready(integration):
+            return HANDOVER_WAIT_SECONDS
+        outcome = self.run_once()
+        if outcome == "partial":
+            return HANDOVER_RETRY_SECONDS
+        if outcome in ("lost", "unavailable"):
+            return HANDOVER_WAIT_SECONDS
+        return HANDOVER_RETRY_SECONDS
+
+    def run(self) -> None:
+        self.wake.wait(HANDOVER_FIRST_SECONDS)  # the watch's first lookup
+        self.wake.clear()
+        while True:
+            try:
+                wait = self.step()
+            except Exception as err:  # noqa: BLE001 -- the loop never stops
+                log(f"Handover failed: {type(err).__name__}: {err}")
+                wait = HANDOVER_WAIT_SECONDS
+            self.wake.wait(wait)
+            self.wake.clear()
 
 
 # ── Cards ───────────────────────────────────────────────────────────────────
 #
-# Every card on the page has an id that stays the same across reloads: the
-# host id ("self", "replicas" or "<address>:<port>"), a "|", then the key the
-# drive view already uses for Home Assistant: the drive's serial, else
-# "id:<drive id>"; "pool:<name>" for a pool; "fs:<filesystem id>" for a
-# filesystem that belongs to no drive or pool. A machine waiting for its
-# password (or never read) shows one card whose id is the host id alone.
+# Every card on the page has an id that stays the same across reloads:
+# "self", a "|", then the key the integration also uses for the drive: its
+# serial, else "id:<drive id>"; "pool:<name>" for a pool; "fs:<filesystem
+# id>" for a filesystem that belongs to no drive or pool.
 
 CARD_SEP = "|"
 
@@ -2131,375 +2241,10 @@ def attach_filesystems(host_key: str, items: list[dict[str, Any]],
     return leftover
 
 
-def _drop_ids(state: dict[str, Any], gone: set[str]) -> dict[str, Any] | None:
-    """The state without these card ids in the order, the hidden list and
-    the app's thresholds; None (nothing to write) when none has them."""
-    thresholds = state.get("thresholds") or {}
-    if not any(i in gone for i in state["card_order"] + state["hidden_cards"] + list(thresholds)
-               + list(state.get("card_names") or {})):
-        return None
-    state["card_order"] = [i for i in state["card_order"] if i not in gone]
-    state["hidden_cards"] = [i for i in state["hidden_cards"] if i not in gone]
-    state["thresholds"] = {k: v for k, v in thresholds.items() if k not in gone}
-    state["card_names"] = {k: v for k, v in (state.get("card_names") or {}).items() if k not in gone}
-    return state
-
-
-def _drop_cards(state: dict[str, Any], host_key: str, cid: str,
-                outcome: dict[str, Any]) -> dict[str, Any]:
-    """After a field card is removed: its id leaves the order and the hidden
-    list; when its machine went too, every id of that machine does."""
-    def gone(i: str) -> bool:
-        return i == cid or (bool(outcome.get("host")) and split_card_id(i)[0] == host_key)
-
-    state["card_order"] = [i for i in state["card_order"] if not gone(i)]
-    state["hidden_cards"] = [i for i in state["hidden_cards"] if not gone(i)]
-    state["thresholds"] = {k: v for k, v in (state.get("thresholds") or {}).items() if not gone(k)}
-    state["card_names"] = {k: v for k, v in (state.get("card_names") or {}).items() if not gone(k)}
-    if outcome.get("host"):
-        state["host_names"] = {k: v for k, v in (state.get("host_names") or {}).items()
-                               if k != host_key}
-    return state
-
-
 def card_list(response: dict[str, Any]) -> list[dict[str, Any]]:
     """Every card of a drives read: its items, then its FILESYSTEM cards."""
     return [c for c in (response.get("items") or []) + (response.get("filesystem_cards") or [])
             if isinstance(c, dict) and c.get("card_id")]
-
-
-def without_removed(response: dict[str, Any], removed: list[str]) -> dict[str, Any]:
-    """A drives read without the cards removed with the trash; the summary
-    counted again over what is left."""
-    if not removed:
-        return response
-    gone = {card_id(str(response.get("id")), r) for r in removed}
-    items = [i for i in response.get("items") or [] if i.get("card_id") not in gone]
-    fs_cards = [c for c in response.get("filesystem_cards") or [] if c.get("card_id") not in gone]
-    return {**response, "items": items, "filesystem_cards": fs_cards,
-            "summary": summarize(items, response.get("status") == "ok")}
-
-
-def card_keys(host_key: str, response: Any) -> set[str]:
-    """The key of every card a read of a machine has: its drives, pools and
-    FILESYSTEM cards, removed with the trash or not. A read cached before
-    cards had ids gets them as the stale read would give them."""
-    if not isinstance(response, dict):
-        return set()
-    keys: set[str] = set()
-    for item in response.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        cid = item.get("card_id")
-        if not cid:
-            cid = card_id(host_key, f"pool:{(item.get('pool') or {}).get('name')}"
-                          if item.get("type") == "pool"
-                          else drive_card_key(item.get("drive") or {}, str(item.get("id"))))
-        keys.add(str(split_card_id(cid)[1]))
-    for card in response.get("filesystem_cards") or []:
-        if isinstance(card, dict) and card.get("card_id"):
-            keys.add(str(split_card_id(card["card_id"])[1]))
-    return keys
-
-
-def every_card_removed(host: dict[str, Any], response: Any) -> bool:
-    """True when the machine's last read had cards and every one of them is
-    removed with the trash, so the page shows nothing of it. Hidden cards
-    count as shown: hiding is for a while. A machine never read shows its
-    own card, so it is not one of these."""
-    keys = card_keys(host_id(host["address"], host["port"]), response)
-    return bool(keys) and keys <= set(host.get("removed") or [])
-
-
-# What the trash can do in Home Assistant besides removing a card from the
-# page, as the integration's device_removal.py rules allow it:
-#   "entry"    the machine's last card: its whole config entry is deleted,
-#              which takes every device and entity of it;
-#   "delete"   the agent no longer reports the drive or pool, so the
-#              integration lets its device be deleted;
-#   "disable"  the agent still reports it (or is not reporting at all, when
-#              the integration deletes nothing): the device is disabled,
-#              which stops its entities and keeps their history;
-#   "replica"  a replica: the replica agent stops reporting it, the
-#              integration polls, and its device is deleted. The replicas'
-#              entry stays, even with no replica left.
-HA_REMOVAL_MODES = ("delete", "disable", "entry", "replica")
-# How long a replica's removal keeps asking Home Assistant to delete its
-# device, and the wait between asks. The integration judges by its last
-# poll, and a poll asked for within 10 s of another waits out the rest.
-HA_REPLICA_SETTLE_SECONDS = 12.0
-HA_REPLICA_RETRY_SECONDS = 1.0
-
-
-def ha_removal_mode(item_type: Any, card_key: str, target: dict[str, Any] | None,
-                    response: Any, last: bool, entries_only: bool = False,
-                    replica: bool = False) -> str | None:
-    """The Home Assistant removal for one card, or None when the card is not
-    in Home Assistant (no exit icon, or a grey one).
-
-    ``response`` is the machine's last read as the agent sent it, cards
-    removed with the trash included: what the agent reports. ``last`` is
-    whether this card is the machine's last one on the page. With
-    ``entries_only`` Core's device list could not be read, so only the
-    entry is known. A ``replica`` with a device is always "replica": its
-    removal stops the replica agent reporting it, and the entry stays."""
-    if target is None or item_type not in ("drive", "pool"):
-        return None
-    device = (target.get("devices") or {}).get(card_key)
-    if replica:
-        return "replica" if device is not None else None
-    if device is None and not entries_only:
-        return None
-    if last:
-        return "entry"
-    if device is None:
-        return None
-    if not isinstance(response, dict) or response.get("status") != "ok" or response.get("stale"):
-        return "disable"
-    items = [i for i in response.get("items") or [] if isinstance(i, dict)]
-    if item_type == "pool":
-        if response.get("pools_status") != "ok":
-            return "disable"
-        names = {str((i.get("pool") or {}).get("name")) for i in items if i.get("type") == "pool"}
-        return "disable" if card_key[len("pool:"):] in names else "delete"
-    identifier = (target.get("identifiers") or {}).get(card_key)
-    if identifier is None:
-        return "disable"  # the device's drive id is not known: never offer a delete
-    reported = {str(i.get("id")) for i in items if i.get("type") == "drive"}
-    return "disable" if identifier in reported else "delete"
-
-
-# Options of older versions, removed at start when the Supervisor does not
-# report the schema to compare with.
-REMOVED_OPTIONS = ("mock_mode",)
-
-
-def _schema_names(schema: Any) -> set[str]:
-    """Top-level option names from the Supervisor's schema: a list of
-    {"name": ...} (its UI form) or a mapping. Empty when unknown."""
-    if isinstance(schema, dict):
-        return {str(k) for k in schema}
-    if isinstance(schema, list):
-        return {str(item["name"]) for item in schema if isinstance(item, dict) and item.get("name")}
-    return set()
-
-
-def drop_stale_options(store: HostStore) -> None:
-    """Run once at start: remove options left from an older version."""
-    try:
-        stale = store.drop_stale_options()
-    except ApiError as err:
-        log(f"Could not check the app options for old settings: {err.message or err.code}")
-        return
-    if stale:
-        log(f"Removed the old option{'s' if len(stale) > 1 else ''} {', '.join(stale)} from the app options")
-
-
-class HostStore:
-    """The field agents, kept in the app's options (the source of truth).
-
-    The Supervisor's options call replaces the whole object, so every write
-    takes the process lock, reads the current options, replaces hosts only
-    and posts them back: one write per user action. Writing options does not
-    restart the app."""
-
-    MEMO_SECONDS = 5
-
-    def __init__(self, supervisor: Supervisor, cache: FleetCache | None = None) -> None:
-        self.sv = supervisor
-        self.cache = cache
-        self.lock = threading.Lock()
-        self.last_known: list[dict[str, Any]] | None = None
-        self.last_thresholds: dict[str, dict[str, int]] | None = None
-        self._memo_at = 0.0
-
-    def _info(self) -> dict[str, Any]:
-        """The Supervisor's info on this app, with its options."""
-        if not self.sv.available:
-            raise ApiError(503, "supervisor_unavailable", "the Supervisor is not available")
-        status, info = self.sv.call("GET", "/addons/self/info")
-        data = info.get("data") if isinstance(info, dict) else None
-        options = data.get("options") if isinstance(data, dict) else None
-        if status != 200 or not isinstance(options, dict):
-            raise ApiError(502, "supervisor_failed", "could not read the app options")
-        return data  # type: ignore[return-value]
-
-    def _options(self) -> dict[str, Any]:
-        return self._info()["options"]
-
-    def _save(self, options: dict[str, Any]) -> None:
-        """Replace the whole options object; the caller holds the lock."""
-        status, reply = self.sv.call("POST", "/addons/self/options", {"options": options})
-        if status != 200:
-            message = reply.get("message") if isinstance(reply, dict) else None
-            raise ApiError(502, "supervisor_failed", message or "could not save the app options")
-
-    def drop_stale_options(self) -> list[str]:
-        """Remove the options the app's schema no longer has, such as
-        mock_mode from 0.2.x, in one write under the same lock as the field
-        agent writes. The Supervisor keeps such an option after an update
-        until the options are next written, and warns about it on every
-        check. Without a schema from the Supervisor only REMOVED_OPTIONS go.
-        Returns the names removed."""
-        with self.lock:
-            data = self._info()
-            options = data["options"]
-            names = _schema_names(data.get("schema"))
-            stale = [key for key in options
-                     if (key not in names if names else key in REMOVED_OPTIONS)]
-            if stale:
-                self._save({k: v for k, v in options.items() if k not in stale})
-            return stale
-
-    def _response(self, host: dict[str, Any]) -> Any:
-        if self.cache is None:
-            return None
-        return self.cache.get(host_id(host["address"], host["port"])).get("response")
-
-    def shows_cards(self, host: dict[str, Any]) -> bool:
-        """False for a stored machine whose every card is removed."""
-        return not every_card_removed(host, self._response(host))
-
-    def _repair(self, options: dict[str, Any]) -> dict[str, Any]:
-        """Options read now, without the stored machines whose every card is
-        removed, such as one left behind when its last drive went while a
-        FILESYSTEM card was still counted. They go in one write, with their
-        card ids and their cache entries."""
-        hosts = _normalize_hosts(options.get("hosts"))
-        if all(self.shows_cards(h) for h in hosts):
-            return options
-        dropped: list[str] = []
-
-        def change(state: dict[str, Any]) -> dict[str, Any] | None:
-            dropped.clear()
-            dropped.extend(host_id(h["address"], h["port"]) for h in state["hosts"]
-                           if not self.shows_cards(h))
-            if not dropped:
-                return None
-            state["hosts"] = [h for h in state["hosts"]
-                              if host_id(h["address"], h["port"]) not in dropped]
-            for key in ("card_order", "hidden_cards"):
-                state[key] = [i for i in state[key] if split_card_id(i)[0] not in dropped]
-            state["thresholds"] = {k: v for k, v in state["thresholds"].items()
-                                   if split_card_id(k)[0] not in dropped}
-            state["card_names"] = {k: v for k, v in state["card_names"].items()
-                                   if split_card_id(k)[0] not in dropped}
-            state["host_names"] = {k: v for k, v in state["host_names"].items()
-                                   if k not in dropped}
-            return state
-
-        state = self.write_all(change)
-        for key in dropped:
-            if self.cache is not None:
-                self.cache.drop(key)
-            log(f"Field agent {key} dropped: every card of it was removed")
-        return {**options, "hosts": [_serialize_host(h) for h in state["hosts"]],
-                "card_order": state["card_order"], "hidden_cards": state["hidden_cards"],
-                "thresholds": _serialize_thresholds(state["thresholds"]),
-                "card_names": _serialize_names(state["card_names"], "card"),
-                "host_names": _serialize_names(state["host_names"], "host")}
-
-    def hosts(self) -> list[dict[str, Any]]:
-        options = self._repair(self._options())
-        hosts = _normalize_hosts(options.get("hosts"))
-        self.last_known = hosts
-        self.last_thresholds = _normalize_thresholds(options.get("thresholds"))
-        self._memo_at = time.monotonic()
-        return hosts
-
-    def thresholds_quick(self) -> dict[str, dict[str, int]]:
-        """The app's own thresholds by card id, read again at most every
-        MEMO_SECONDS; the last known (or none) when the Supervisor cannot be
-        read."""
-        if self.last_thresholds is not None and time.monotonic() - self._memo_at < self.MEMO_SECONDS:
-            return self.last_thresholds
-        try:
-            self.hosts()
-        except ApiError:
-            pass
-        return self.last_thresholds or {}
-
-    def hosts_quick(self) -> list[dict[str, Any]]:
-        """The stored hosts, read again at most every MEMO_SECONDS; the last
-        known list (or none) when the Supervisor cannot be read."""
-        if self.last_known is not None and time.monotonic() - self._memo_at < self.MEMO_SECONDS:
-            return self.last_known
-        try:
-            return self.hosts()
-        except ApiError:
-            return self.last_known or []
-
-    def find(self, key: str) -> dict[str, Any] | None:
-        return next((h for h in self.hosts_quick() if host_id(h["address"], h["port"]) == key), None)
-
-    def write(self, change) -> list[dict[str, Any]]:
-        """Apply change() to the stored hosts and save them in one options
-        write. change() returning None means nothing to save."""
-        def whole(state: dict[str, Any]) -> dict[str, Any] | None:
-            hosts = change(state["hosts"])
-            return None if hosts is None else {**state, "hosts": hosts}
-
-        return self.write_all(whole)["hosts"]
-
-    def cards(self) -> dict[str, Any]:
-        """The stored hosts, card order and hidden cards, read now."""
-        options = self._repair(self._options())
-        hosts = _normalize_hosts(options.get("hosts"))
-        self.last_known = hosts
-        self.last_thresholds = _normalize_thresholds(options.get("thresholds"))
-        self._memo_at = time.monotonic()
-        return {"hosts": hosts, "card_order": _str_list(options.get("card_order")),
-                "hidden_cards": _str_list(options.get("hidden_cards")),
-                "card_names": _normalize_names(options.get("card_names"), "card"),
-                "host_names": _normalize_names(options.get("host_names"), "host")}
-
-    def write_all(self, change) -> dict[str, Any]:
-        """One options write for hosts, card_order, hidden_cards, the app's
-        thresholds and the names given to cards and machines together.
-
-        change() gets {"hosts", "card_order", "hidden_cards", "thresholds",
-        "card_names", "host_names"} (copies; thresholds as {card id: {label:
-        int}}, names as {id: name}) and returns the new state, or None for
-        nothing to save. Every other option is written back as it was read."""
-        with self.lock:
-            options = self._options()
-            current = {"hosts": _normalize_hosts(options.get("hosts")),
-                       "card_order": _str_list(options.get("card_order")),
-                       "hidden_cards": _str_list(options.get("hidden_cards")),
-                       "thresholds": _normalize_thresholds(options.get("thresholds")),
-                       "card_names": _normalize_names(options.get("card_names"), "card"),
-                       "host_names": _normalize_names(options.get("host_names"), "host")}
-            state = change({"hosts": [dict(h) for h in current["hosts"]],
-                            "card_order": list(current["card_order"]),
-                            "hidden_cards": list(current["hidden_cards"]),
-                            "thresholds": {k: dict(v) for k, v in current["thresholds"].items()},
-                            "card_names": dict(current["card_names"]),
-                            "host_names": dict(current["host_names"])})
-            if state is None:
-                state = current
-            else:
-                state.setdefault("thresholds", current["thresholds"])
-                state.setdefault("card_names", current["card_names"])
-                state.setdefault("host_names", current["host_names"])
-                saved = {**options, "hosts": [_serialize_host(h) for h in state["hosts"]]}
-                for key in ("card_order", "hidden_cards"):
-                    if state[key] or key in options:
-                        saved[key] = _str_list(state[key])
-                thresholds = {k: v for k, v in state["thresholds"].items() if v}
-                state["thresholds"] = thresholds
-                if thresholds or "thresholds" in options:
-                    saved["thresholds"] = _serialize_thresholds(thresholds)
-                for key, field in (("card_names", "card"), ("host_names", "host")):
-                    names = {k: clean_name(v) for k, v in state[key].items() if clean_name(v)}
-                    state[key] = names
-                    if names or key in options:
-                        saved[key] = _serialize_names(names, field)
-                self._save(saved)
-                log(f"Field agents and cards saved ({len(state['hosts'])} agents stored)")
-            self.last_known = state["hosts"]
-            self.last_thresholds = state["thresholds"]
-            self._memo_at = time.monotonic()
-            return state
 
 
 # ── Reading an agent's drives ───────────────────────────────────────────────
@@ -2551,218 +2296,19 @@ def judge_pool(rules: Rules, pool: dict[str, Any], lab: dict[str, Any] | None,
     return verdict, pool_view(pool, verdict, lab)
 
 
-def _flow_message(step: Any, status: int | None) -> str:
-    """What a Home Assistant flow step says went wrong."""
-    if status is None:
-        return "Home Assistant is not answering"
-    if isinstance(step, dict):
-        if step.get("type") == "abort":
-            return str(step.get("reason") or "aborted")
-        errors = step.get("errors")
-        if isinstance(errors, dict) and errors:
-            return str(errors.get("base") or next(iter(errors.values())))
-        if step.get("message"):
-            return str(step["message"])
-        if step.get("type") in ("form", "menu"):
-            return f"unexpected step {step.get('step_id')}"
-    return f"HTTP {status}"
-
-
-# ── Agentic access ──────────────────────────────────────────────────────────
-# One JSON document of everything the Control Center knows, for an AI
-# assistant or a script: a header, one entry per agent, then a guide. Key
-# order is part of the contract (header first, guide last), so the document
-# is never dumped with sort_keys.
-
-AGENTIC_SCHEMA = "smart-sniffer-agentic-access"
-AGENTIC_SCHEMA_VERSION = 1
-AGENTIC_ABOUT = (
-    "SMART Sniffer drive health export from the SMART Sniffer App in Home Assistant. "
-    "A read-only snapshot of every agent the app's Control Center reads, with each drive's "
-    "raw SMART data, ZFS pools, filesystems and the health verdicts the Control Center shows. "
-    "Read the guide at the end before drawing conclusions."
-)
-AGENTIC_ERRORS = {
-    "unreachable": "The agent did not answer. Readings are from last_answer.",
-    "password_needed": "The agent needs a token and none is stored. Readings are from last_answer.",
-    "password_refused": "The agent refused the stored token. Readings are from last_answer.",
-}
-AGENTIC_NEVER_READ = "The agent has not answered since it was added. No readings."
-AGENTIC_GUIDE: dict[str, Any] = {
-    "purpose": (
-        "Read-only drive health data from SMART Sniffer agents, judged by the same rules the "
-        "SMART Sniffer integration uses in Home Assistant. Nothing in this document can change "
-        "a setting."
-    ),
-    "structure": [
-        "agents: one entry per agent. kind self is the agent inside this Home Assistant app, "
-        "reading this machine's drives. kind field is a SMART Sniffer agent on another machine. "
-        "kind replicas holds simulated drives for testing (simulated is true); they are not real "
-        "hardware, leave them out of real health answers.",
-        "counts covers the real agents only; replica drives are counted in replica_drives.",
-        "agents[].status is ok, unreachable, password_needed or password_refused. When it is not "
-        "ok, stale is true and the drives are the last good readings, taken at last_answer. Say "
-        "that the data may be out of date.",
-        "agents[].health is the agent's own /api/health answer from its last good read.",
-        "agents[].drives[].data is the agent's payload for the drive. data.smart_data is smartctl "
-        "JSON output, unchanged.",
-        "agents[].drives[].attention is the verdict. It is null when the rules were not loaded or "
-        "the drive could not be read (error is set); health is then not known.",
-        "agents[].pools[].verdict.state is YES (problems lists why) or NO. Pools have no MAYBE.",
-        "Filesystems sit on the drive or pool they belong to. agents[].filesystems holds those "
-        "that belong to neither, each as a card with the filesystem in data.",
-        "hidden true marks a card the user hid in the Control Center. It is still monitored.",
-    ],
-    "attention_states": {
-        "NO": "All monitored indicators are clear.",
-        "MAYBE": "Warning. An early sign of wear or degradation. Plan a replacement and watch "
-                 "the reasons.",
-        "YES": "Critical. Data is at risk. Back up now.",
-        "UNSUPPORTED": "No usable SMART data, so health cannot be judged. Often a USB bridge that "
-                       "does not pass SMART through. If data.smart_lost is true, the drive gave "
-                       "SMART data earlier in this agent run and has stopped; that is not the "
-                       "same as never supported.",
-    },
-    "severity": "critical goes with YES, warning with MAYBE, none with NO and UNSUPPORTED.",
-    "reasons": (
-        "attention.reasons lists what caused the state, one line each. attention.accepted lists "
-        "readings the user accepted with a custom threshold; they are known and not new "
-        "problems. attention.limits gives each threshold, its default and whether the user "
-        "changed it. attention.readings holds the values the rules used; prefer them over your "
-        "own reading of raw tables."
-    ),
-    "fields": [
-        "Wear, NVMe: nvme_smart_health_information_log.percentage_used counts up, percent of "
-        "rated life used. It can pass 100; that means the rated endurance is used up, not that "
-        "the drive has failed.",
-        "Wear, ATA: wear attributes such as Wear_Leveling_Count, SSD_Life_Left and "
-        "Media_Wearout_Indicator usually count down (normalized value is life remaining); the "
-        "rules turn them into percent used.",
-        "Wear, WD SSDs: on WD Blue, Red and Green SATA SSDs (model_family \"WD Blue / Red / Green "
-        "SSDs\") attribute 230 counts up and is already percent used. The rules use Device "
-        "Statistics Percentage Used Endurance Indicator first, and report wear as unknown when "
-        "attribute 230 and Average_PE_Cycles_TLC disagree badly.",
-        "Raw values: some vendors pack several numbers into one ATA raw value (for example "
-        "Seagate attribute 188). Treat large raw values with care; the rules decode the "
-        "counters they use.",
-        "Standby: data.in_standby true means the drive was spun down and the agent served its "
-        "cached readings. data.last_updated is when SMART data was last read; Home Assistant "
-        "shows it as the data_as_of attribute.",
-        "data.readable false means smartctl could not read the drive in the last cycle; the "
-        "readings are cached.",
-        "data.smart_available false means the drive answered without SMART data; "
-        "data.smart_unavailable_reason says why. data.smart_lost true means it had SMART data "
-        "earlier in this agent run. Both need agent 0.8.3 or later and are absent when not set.",
-        "Units: temperature.current is degrees Celsius. power_on_time.hours is hours. NVMe "
-        "data_units_read and data_units_written count units of 512000 bytes. "
-        "data.derived.host_writes.bytes and host_reads.bytes are bytes. Filesystem sizes are "
-        "bytes and use_percent is percent.",
-        "Times are UTC in ISO 8601.",
-    ],
-    "home_assistant_action": {
-        "action": "smart_sniffer.get_drive_data",
-        "what": "Returns the cached SMART data and verdicts for all drives of one SMART Sniffer "
-                "agent in Home Assistant. It only returns data, so it must be called with a "
-                "response variable.",
-        "required": "config_entry_id: the integration entry of the agent. It is "
-                    "agents[].home_assistant.config_entry_id here, when that agent is in Home "
-                    "Assistant.",
-        "example": "action: smart_sniffer.get_drive_data\ndata:\n  config_entry_id: "
-                   "<config_entry_id>\nresponse_variable: drive_data",
-        "response": "agent: name, host, os, uptime, version. drives: one object per drive id with "
-                    "model, serial, protocol, device_path, attention (state, severity, reasons, "
-                    "accepted), smart_data, device_statistics, derived. filesystems: mountpoint, "
-                    "total_bytes, used_bytes, use_percent. Pools are not included.",
-        "versions": "Integration 0.5.15 or later has the action. attention.accepted needs "
-                    "0.6.3. device_statistics and derived need 0.8.0.",
-    },
-    "links": {
-        "page": "agentic-access",
-        "raw": "agentic-access.json",
-        "download": "agentic-access.json?download=1",
-        "fresh": "agentic-access.json?fresh=1",
-        "note": "Paths are relative to the SMART Sniffer page in Home Assistant (the app's "
-                "ingress address). They work only in a browser logged in to Home Assistant. "
-                "fresh=1 reads again every agent last read more than 30 seconds ago.",
-    },
-}
-
-
-def _iso_epoch(text: Any) -> float | None:
-    """Seconds since the epoch of a utc_now() time, None when it is not one."""
-    if not isinstance(text, str):
-        return None
-    try:
-        return float(calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ")))
-    except ValueError:
-        return None
-
-
-def agentic_cards(response: dict[str, Any], hidden: set[str], names: dict[str, str],
-                  devices: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]],
-                                                    list[dict[str, Any]]]:
-    """(drives, pools, filesystems) of one cached drives read, as the export
-    gives them: the page's view left out, every card's name, hidden flag and
-    Home Assistant device beside the agent's own payload."""
-    def common(cid: str) -> dict[str, Any]:
-        key = split_card_id(cid)[1]
-        return {"name": names.get(cid), "hidden": cid in hidden,
-                "ha_device_id": devices.get(key) if key else None}
-
-    drives: list[dict[str, Any]] = []
-    pools: list[dict[str, Any]] = []
-    for item in response.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        cid = str(item.get("card_id") or "")
-        if item.get("type") == "pool":
-            pools.append({
-                "card_id": cid, **common(cid), "stale": bool(item.get("stale")),
-                "verdict": item.get("verdict"),
-                "filesystems": item.get("filesystems") or [],
-                "replica": item.get("lab"),
-                "data": item.get("pool"),
-            })
-            continue
-        verdict = item.get("verdict")
-        drives.append({
-            "card_id": cid, "id": item.get("id"), **common(cid),
-            "stale": bool(item.get("stale")),
-            "error": item.get("error"),
-            "attention": ({**verdict, "thresholds_source": item.get("thresholds_source")}
-                          if isinstance(verdict, dict) else None),
-            "filesystems": item.get("filesystems") or [],
-            "replica": item.get("lab"),
-            "data": item.get("drive"),
-        })
-    filesystems: list[dict[str, Any]] = []
-    for card in response.get("filesystem_cards") or []:
-        if not isinstance(card, dict):
-            continue
-        cid = str(card.get("card_id") or "")
-        filesystems.append({"card_id": cid, **common(cid), "stale": bool(card.get("stale")),
-                            "data": card.get("filesystem")})
-    return drives, pools, filesystems
-
-
-def agentic_bytes(document: dict[str, Any]) -> bytes:
-    """The document as served: indented, UTF-8, ending in a newline."""
-    return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-
-
 # ── Request handler ─────────────────────────────────────────────────────────
 
 # Path prefixes that belong to the proxy itself: anything under them that no
-# route matches is a JSON 404, never the page.
+# route matches is a JSON 404, never the page. The routes of 0.3.x (field
+# machines, replicas, card writes, thresholds, Agentic access) answer 404.
 _APP_PREFIXES = ("/app/", "/evaluate", "/fleet/", "/ha/", "/lab/", "/replicas", "/cards",
-                 "/agentic-access")
+                 "/hosts/", "/agentic-access", "/mock/")
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
     """Serves static files, proxies API requests, answers the app routes."""
 
     agent_port: int = 9099
-    mock_port: int = 9100
     static_dir: str = STATIC_DIR
     token: str = ""
     app_version: str | None = None
@@ -2770,80 +2316,51 @@ class ProxyHandler(BaseHTTPRequestHandler):
     mdns_name: str | None = None
     rules: Rules = Rules(DEFAULT_RULES_DIR)
     supervisor: Supervisor = Supervisor("http://supervisor", "")
-    host_store: HostStore = HostStore(supervisor)
-    cache: FleetCache = FleetCache(None)
+    options: LegacyOptions = LegacyOptions(supervisor)
+    cache: ReadCache = ReadCache()
     app_state: AppState = AppState(None)
-    scans: ScanManager = ScanManager()
-    ha_cache_seconds: float = HA_API_CACHE_SECONDS
-    ha_replica_seconds: float = HA_REPLICA_SETTLE_SECONDS
-    _ha_cache: tuple[float, dict[str, Any]] | None = None
-    # One Home Assistant lookup at a time: callers that arrive together
-    # share it. _ha_gen moves on whenever the cached lookup is dropped, so a
-    # background refresh begun before that does not put an old answer back.
-    _ha_lock = threading.Lock()
-    _ha_gen = 0
-    _thr_gen = 0
-    # Background refreshes in flight, by key; one per key at a time.
-    _bg_lock = threading.Lock()
-    _bg_running: set[str] = set()
-    # Entry ids whose diagnostics failed; kept for the process life.
-    _diagnostics_failed: set[str] = set()
-    # The integration's thresholds read: entry id -> (time, {drive id:
-    # {label: int}} or None when its diagnostics have none), and (entry id,
-    # drive id) -> (time, {label: int}) read through the options flow.
-    _thr_cache: dict[str, tuple[float, dict[str, dict[str, int]] | None]] = {}
-    _thr_flow_cache: dict[tuple[str, str], tuple[float, dict[str, int]]] = {}
-    # Agentic access: how long a built document is reused, how old this
-    # machine's and the replicas' cached read may be; the last document.
-    agentic_memo_seconds: float = AGENTIC_MEMO_SECONDS
-    agentic_max_age_seconds: float = AGENTIC_MAX_AGE_SECONDS
-    _agentic_doc: tuple[float, dict[str, Any]] | None = None
-    # Agents whose latest read failed: key -> (epoch seconds, status).
-    # Written by every read, the page's included; a good read clears it.
-    _last_failure: dict[str, tuple[float, str]] = {}
-    _agentic_lock = threading.Lock()
+    watch: IntegrationWatch = IntegrationWatch(supervisor, None)
+    handover: Handover | None = None
 
     # The routes answered by the proxy itself: (method, path pattern, handler
     # name). Path parameters are named groups, percent-decoded before use.
     ROUTES: list[tuple[str, str, str]] = [
         ("GET", r"/app/info", "_route_app_info"),
         ("POST", r"/app/notice/dismiss", "_route_notice_dismiss"),
-        ("POST", r"/evaluate", "_route_evaluate"),
-        ("POST", r"/fleet/scan", "_route_scan_start"),
-        ("GET", r"/fleet/scan/(?P<scan_id>[^/]+)", "_route_scan_get"),
-        ("DELETE", r"/fleet/scan/(?P<scan_id>[^/]+)", "_route_scan_cancel"),
-        ("POST", r"/fleet/probe", "_route_probe"),
-        ("GET", r"/fleet/hosts", "_route_hosts_list"),
-        ("POST", r"/fleet/hosts", "_route_hosts_add"),
-        ("PATCH", r"/fleet/hosts/(?P<key>[^/]+)", "_route_host_patch"),
-        ("DELETE", r"/fleet/hosts/(?P<key>[^/]+)", "_route_host_delete"),
-        ("GET", r"/fleet/hosts/(?P<key>[^/]+)/drives", "_route_host_drives"),
-        ("GET", r"/ha/devices", "_route_ha_devices"),
+        ("GET", r"/fleet/hosts/self/drives", "_route_self_drives"),
+        ("GET", r"/ha/integration", "_route_ha_integration"),
         ("POST", r"/ha/add", "_route_ha_add"),
-        ("GET", r"/replicas", "_route_replicas_list"),
-        ("POST", r"/replicas", "_route_replicas_upload"),
-        ("POST", r"/replicas/add", "_route_replicas_add"),
-        ("POST", r"/replicas/save-as", "_route_replicas_save_as"),
-        ("GET", r"/replicas/(?P<card_id>[^/]+)/file", "_route_replica_file"),
-        ("DELETE", r"/replicas/(?P<card_id>[^/]+)", "_route_replica_delete"),
-        ("GET", r"/cards", "_route_cards"),
-        ("PUT", r"/cards/order", "_route_cards_order"),
         ("GET", r"/cards/(?P<cid>[^/]+)/file", "_route_card_file"),
-        ("GET", r"/cards/(?P<cid>[^/]+)/thresholds", "_route_thresholds_get"),
-        ("PUT", r"/cards/(?P<cid>[^/]+)/thresholds", "_route_thresholds_put"),
-        ("POST", r"/cards/(?P<cid>[^/]+)/thresholds/accept", "_route_thresholds_accept"),
-        ("POST", r"/cards/(?P<cid>[^/]+)/thresholds/reset", "_route_thresholds_reset"),
-        ("PUT", r"/cards/(?P<cid>[^/]+)/name", "_route_card_name"),
-        ("PUT", r"/hosts/(?P<key>[^/]+)/name", "_route_host_name"),
-        ("PATCH", r"/cards/(?P<cid>[^/]+)", "_route_card_patch"),
-        ("DELETE", r"/cards/(?P<cid>[^/]+)", "_route_card_delete"),
-        ("GET", r"/agentic-access", "_route_agentic_page"),
-        ("GET", r"/agentic-access\.json", "_route_agentic_json"),
+        ("POST", r"/app/handover", "_route_handover"),
     ]
 
     def log_message(self, format, *args):
         """Send access logs to stdout for the app's log."""
         print(f"[webui] {self.address_string()} - {format % args}", flush=True)
+
+    def parse_request(self) -> bool:
+        """Read the request line and headers, then refuse, before anything
+        else is done: any client but the ingress gateway and loopback (403),
+        and a body over MAX_BODY (413, the body is never read)."""
+        if not super().parse_request():
+            return False
+        if not client_allowed(self.client_address[0]):
+            self.close_connection = True
+            self._send_json(403, {"error": "forbidden", "message": None})
+            return False
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = -1
+        if length < 0:
+            self.close_connection = True
+            self._send_json(400, {"error": "bad_request", "message": "bad Content-Length"})
+            return False
+        if length > MAX_BODY:
+            self.close_connection = True
+            self._send_json(413, {"error": "too_large", "message": "the request body is too large"})
+            return False
+        return True
 
     def do_GET(self):
         self._handle_request("GET")
@@ -2907,13 +2424,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._proxy_request(method, "127.0.0.1", self.agent_port, self.path)
             return
 
-        # Proxy /mock/* to the replica agent. Rewrite /mock/ -> /api/ because
-        # the replica agent serves the same /api/* routes.
-        if path.startswith("/mock/"):
-            rewritten = self.path.replace("/mock/", "/api/", 1)
-            self._proxy_request(method, "127.0.0.1", self.mock_port, rewritten, inject_token=False)
-            return
-
         # Serve static files (GET only for static)
         if method != "GET":
             self.send_error(405, "Method Not Allowed")
@@ -2954,28 +2464,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except ValueError:
             raise ApiError(400, "bad_request", "body is not JSON") from None
 
-    def _mock(self, method: str, path: str, body: Any = None, timeout: float = 5.0,
-              raw_body: bytes | None = None) -> AgentReply:
-        return agent_call("127.0.0.1", self.mock_port, method, path, body=body,
-                          raw_body=raw_body, connect_timeout=min(timeout, 2.0),
-                          read_timeout=timeout)
-
     # ── /app/info ──
-
-    def _replicas_info(self) -> dict[str, Any]:
-        reply = self._mock("GET", "/api/replicas", timeout=REPLICA_AGENT_TIMEOUT)
-        listing = reply.body if reply.status == 200 and isinstance(reply.body, dict) else None
-        if listing is None:
-            return {"agent": "down", "folder": None, "path": None, "shipped": None, "user": None}
-        folder = listing.get("folder") if isinstance(listing.get("folder"), dict) else {}
-        files = [f for f in listing.get("files") or [] if isinstance(f, dict) and f.get("valid")]
-        return {
-            "agent": "ok",
-            "folder": folder.get("status"),
-            "path": folder.get("path"),
-            "shipped": sum(1 for f in files if f.get("source") == "shipped"),
-            "user": sum(1 for f in files if f.get("source") == "user"),
-        }
 
     def _route_app_info(self, _parsed) -> None:
         sv = self.supervisor
@@ -2985,357 +2474,82 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "app_version": self.app_version,
             "rules_version": self.rules.version,
             "agent_port": self.agent_port,
-            "mock_port": self.mock_port,
             "hostname": self.agent_host,
             "slug": slug,
             "mdns_name": self.mdns_name,
             "ha_version": sv.ha_version(),
             "ha_api": ha_api,
             "supervisor": slug is not None,
-            "integration_installed": sv.integration_installed() if ha_api else None,
-            "network": sv.network(),
-            "replicas": self._replicas_info(),
-            "refresh_minutes": REFRESH_MINUTES,
         })
 
-    # ── /evaluate ──
+    # ── /fleet/hosts/self/drives ──
 
-    def _route_evaluate(self, _parsed) -> None:
-        body = self._read_json()
-        if not isinstance(body, dict):
-            raise ApiError(400, "bad_request", "body must be a drive or {\"pool\": {...}}")
-        if not self.rules.load():
-            raise ApiError(503, "rules_unavailable", "the integration rules are not loaded")
-        if "pool" in body and "smart_data" not in body:
-            pool = body["pool"]
-            if not isinstance(pool, dict):
-                raise ApiError(400, "bad_request", "pool must be an object")
-            if self.rules.pool_health is None:
-                raise ApiError(503, "rules_unavailable", "the pool rules are not loaded")
-            self._send_json(200, pool_verdict(pool, self.rules))
-            return
-        verdict = self.rules.evaluate(body)
-        self._send_json(200, {**verdict, "view": drive_view(body, verdict)})
+    def _route_self_drives(self, _parsed) -> None:
+        self._send_json(200, self._read_self())
 
-    # ── /fleet/scan, /fleet/probe ──
+    def _read_self(self) -> dict[str, Any]:
+        return self._read_agent("self", "127.0.0.1", self.agent_port, self.token)
 
-    def _route_scan_start(self, _parsed) -> None:
-        body = self._read_json()
-        if not isinstance(body, dict):
-            raise ApiError(400, "bad_request", "body must be an object")
-        block = parse_block(body.get("block"))
-        port = valid_port(body.get("port", 9099))
-        if port is None:
-            raise ApiError(400, "bad_port", "the port must be 1 to 65535")
-        network = self.supervisor.network()
-        if block.prefixlen < MIN_SCAN_PREFIX:
-            suggest_from = network["address"] if network else str(block.network_address)
-            suggest = ipaddress.ip_network(f"{suggest_from}/24", strict=False)
-            raise ApiError(422, "too_wide", f"blocks wider than /{MIN_SCAN_PREFIX} are not scanned",
-                           addresses=2 ** (32 - block.prefixlen) - 2, suggest=str(suggest))
-        own, hassio = self.supervisor.own_addresses()
-        own |= local_ipv4_addresses()
-        if network:
-            own.add(network["address"])
-
-        def skip(address: str) -> bool:
-            return address in own or (hassio is not None and ipaddress.IPv4Address(address) in hassio)
-
-        scan = self.scans.start(block, port, skip, self._added_hosts(), self._own_hosts())
-        log(f"Scan {scan.id}: {block} port {port}, {scan.total} addresses")
-        self._send_json(202, {"scan_id": scan.id, "total": scan.total})
-
-    def _route_scan_get(self, _parsed, scan_id: str) -> None:
-        scan = self.scans.get(scan_id)
-        if scan is None:
-            raise ApiError(404, "not_found", "no such scan, or it has expired")
-        self._send_json(200, scan.snapshot())
-
-    def _route_scan_cancel(self, _parsed, scan_id: str) -> None:
-        if self.scans.cancel(scan_id) is None:
-            raise ApiError(404, "not_found", "no such scan, or it has expired")
-        self._send_json(200, {"state": "cancelled"})
-
-    def _route_probe(self, _parsed) -> None:
-        body = self._read_json()
-        if not isinstance(body, dict):
-            raise ApiError(400, "bad_request", "body must be an object")
-        address = valid_address(body.get("host"))
-        port = valid_port(body.get("port", 9099))
-        if address is None or port is None:
-            raise ApiError(400, "bad_request", "host must be an IPv4 address or a host name, "
-                                               "port 1 to 65535")
-        connect_to = resolve_ipv4(address, budget=PROBE_TIMEOUT)
-        if connect_to is None:
-            raise ApiError(400, "cannot_resolve", f"{address} does not resolve")
-        outcome, row = probe(address, port, PROBE_TIMEOUT, PROBE_TIMEOUT, connect_to=connect_to)
-        if outcome == "not_answering":
-            raise ApiError(504, "not_answering", f"nothing answered on {address}, port {port}")
-        if row is None:
-            raise ApiError(404, "not_an_agent", f"{address}, port {port} is not a SMART Sniffer agent")
-        stored = self._added_hosts()
-        keys = {(h["address"], h["port"]) for h in stored}
-        row["added"] = (address, port) in keys or (
-            (connect_to, port) in stored_keys(stored))
-        # The address it was reached at, so the page can find a typed name
-        # among the scan's rows, which carry addresses.
-        row["resolved"] = connect_to
-        self._send_json(200, row)
-
-    def _added_hosts(self) -> list[dict[str, Any]]:
-        """The stored machines a scan or a check marks as added: those with a
-        card still on the page, hidden or not."""
-        return [h for h in self.host_store.hosts_quick() if self.host_store.shows_cards(h)]
-
-    # ── /fleet/hosts ──
-
-    def _host_object(self, host: dict[str, Any]) -> dict[str, Any]:
-        key = host_id(host["address"], host["port"])
-        cached = self.cache.get(key)
-        return {
-            "id": key, "address": host["address"], "port": host["port"],
-            "has_password": bool(host.get("password")), "hidden": bool(host.get("hidden")),
-            "hidden_since": cached.get("hidden_since") if host.get("hidden") else None,
-            "added_at": cached.get("added_at"),
-        }
-
-    def _route_hosts_list(self, _parsed) -> None:
-        hosts = self.host_store.hosts()
-        self._send_json(200, {"hosts": [self._host_object(h) for h in hosts]})
-
-    def _route_hosts_add(self, _parsed) -> None:
-        body = self._read_json()
-        items = body.get("hosts") if isinstance(body, dict) else None
-        if not isinstance(items, list) or not items:
-            raise ApiError(400, "bad_request", 'give {"hosts": [{"address", "port"}, ...]}')
-        wanted: list[dict[str, Any]] = []
-        for item in items:
-            address = valid_address(item.get("address")) if isinstance(item, dict) else None
-            port = valid_port(item.get("port", 9099)) if isinstance(item, dict) else None
-            if address is None or port is None:
-                raise ApiError(400, "bad_request",
-                               "each host needs an IPv4 address or host name and a port 1 to 65535")
-            wanted.append({"address": address, "port": port, "password": "", "hidden": False})
-
-        added: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-
-        def change(hosts: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
-            added.clear()
-            skipped.clear()
-            known = {host_id(h["address"], h["port"]): h for h in hosts}
-            new: list[dict[str, Any]] = []
-            for host in wanted:
-                key = host_id(host["address"], host["port"])
-                stored = known.get(key)
-                if stored is not None and stored["removed"]:
-                    # Added again: the cards removed with the trash come back.
-                    stored["removed"] = []
-                    added.append(stored)
-                    continue
-                if stored is not None:
-                    skipped.append({"address": host["address"], "port": host["port"],
-                                    "reason": "already_added"})
-                    continue
-                known[key] = host
-                new.append(host)
-                added.append(host)
-            return hosts + new if added else None  # nothing new: no write
-
-        self.host_store.write(change)
-        now = utc_now()
-        for host in added:
-            self.cache.update(host_id(host["address"], host["port"]), added_at=now,
-                              hidden_since=None)
-        self._send_json(201, {"added": [self._host_object(h) for h in added], "skipped": skipped})
-
-    def _route_host_patch(self, _parsed, key: str) -> None:
-        body = self._read_json()
-        if not isinstance(body, dict) or not ({"password", "hidden"} & set(body)):
-            raise ApiError(400, "bad_request", 'give "password" and/or "hidden"')
-        password = body.get("password")
-        hidden = body.get("hidden")
-        if "password" in body and not isinstance(password, str):
-            raise ApiError(400, "bad_request", "password must be a string")
-        if "hidden" in body and not isinstance(hidden, bool):
-            raise ApiError(400, "bad_request", "hidden must be true or false")
-        host = next((h for h in self.host_store.hosts()
-                     if host_id(h["address"], h["port"]) == key), None)
-        if host is None:
-            raise ApiError(404, "not_found", "no such field agent")
-        if password:
-            check = agent_call(host["address"], host["port"], "GET", "/api/drives",
-                               token=password, connect_timeout=AGENT_HEALTH_TIMEOUT,
-                               read_timeout=AGENT_READ_TIMEOUT)
-            if check.status is None:
-                raise ApiError(504, "not_answering", "the agent did not answer")
-            if check.status == 401:
-                raise ApiError(422, "password_refused", "the agent refused that password")
-            if check.status != 200:
-                raise ApiError(502, "agent_failed", f"the agent answered HTTP {check.status}")
-
-        def change(hosts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            for item in hosts:
-                if host_id(item["address"], item["port"]) == key:
-                    if "password" in body:
-                        item["password"] = password
-                    if "hidden" in body:
-                        item["hidden"] = hidden
-            return hosts
-
-        hosts = self.host_store.write(change)
-        if "hidden" in body:
-            self.cache.update(key, hidden_since=utc_now() if hidden else None)
-        updated = next((h for h in hosts if host_id(h["address"], h["port"]) == key), None)
-        if updated is None:
-            raise ApiError(404, "not_found", "no such field agent")
-        self._send_json(200, {"host": self._host_object(updated)})
-
-    def _route_host_delete(self, _parsed, key: str) -> None:
-        if not any(host_id(h["address"], h["port"]) == key for h in self.host_store.hosts()):
-            raise ApiError(404, "not_found", "no such field agent")
-        self.host_store.write(
-            lambda hosts: [h for h in hosts if host_id(h["address"], h["port"]) != key])
-        self.cache.drop(key)
-        self._send_json(200, {"removed": key})
-
-    # ── /fleet/hosts/<id>/drives ──
-
-    def _target(self, key: str) -> tuple[tuple[str, str, int, str], dict[str, Any] | None]:
-        """(kind, address, port, token) for self, replicas or a stored host,
-        and the stored host (None for self and replicas). 404 otherwise."""
-        if key == "self":
-            return ("self", "127.0.0.1", self.agent_port, self.token), None
-        if key == "replicas":
-            return ("replicas", "127.0.0.1", self.mock_port, ""), None
-        host = self.host_store.find(key)
-        if host is None:
-            raise ApiError(404, "not_found", "no such field agent")
-        return ("field", host["address"], host["port"], host.get("password") or ""), host
-
-    def _route_host_drives(self, _parsed, key: str) -> None:
-        target, host = self._target(key)
-        response = self._read_agent(key, *target)
-        if host is not None:
-            response = without_removed(response, host.get("removed") or [])
-            if host.get("hidden"):
-                self._migrate_hidden(key, response)
-        self._send_json(200, response)
-
-    def _migrate_hidden(self, key: str, response: dict[str, Any]) -> None:
-        """A machine hidden as a whole (0.3.0 before cards) hides each of its
-        cards instead, in one write; the machine's own hidden flag goes."""
-        ids = [c["card_id"] for c in card_list(response)] or [key]
-        try:
-            def change(state: dict[str, Any]) -> dict[str, Any]:
-                for host in state["hosts"]:
-                    if host_id(host["address"], host["port"]) == key:
-                        host["hidden"] = False
-                state["hidden_cards"] += [i for i in ids if i not in state["hidden_cards"]]
-                return state
-
-            self.host_store.write_all(change)
-            self.cache.update(key, hidden_since=None)
-        except ApiError as err:
-            log(f"Could not move {key}'s hidden flag to its cards: {err.message or err.code}")
-
-    def _agent_hostname(self, kind: str, address: str, health: dict[str, Any]) -> str | None:
-        name = health.get("hostname")
-        if isinstance(name, str) and name and kind == "field":
-            return name
-        if kind != "field":
-            return self.agent_host
-        try:
-            ipaddress.IPv4Address(address)
-        except ValueError:
-            return address.split(".")[0]
-        return reverse_name(address) or address
-
-    def _read_agent(self, key: str, kind: str, address: str, port: int, token: str) -> dict[str, Any]:
-        """One read of an agent: health, drive list, each drive, pools,
-        filesystems; every drive and pool judged, every card given its id.
-        On failure the last good read, marked stale."""
+    def _read_agent(self, key: str, address: str, port: int, token: str) -> dict[str, Any]:
+        """One read of this box's agent: health, drive list, each drive,
+        pools, filesystems; every drive and pool judged, every card given its
+        id. On failure the last good read, marked stale."""
         def call(path: str, timeout: float = AGENT_READ_TIMEOUT) -> AgentReply:
             return agent_call(address, port, "GET", path, token=token,
                               connect_timeout=AGENT_HEALTH_TIMEOUT, read_timeout=timeout)
 
         health = call("/api/health", AGENT_HEALTH_TIMEOUT)
         if health.status == 401:
-            return self._stale(key, kind, "password_refused" if token else "password_needed")
+            return self._stale(key, "password_refused" if token else "password_needed")
         if not _is_agent_health(health):
-            return self._stale(key, kind, "unreachable")
+            return self._stale(key, "unreachable")
         info = health.body
-        password_status = "password_refused" if token else "password_needed"
+        listing = call("/api/drives")
+        if listing.status == 401:
+            return self._stale(key, "password_refused" if token else "password_needed")
+        if listing.status != 200 or not isinstance(listing.body, list):
+            return self._stale(key, "unreachable")
+        summaries = [d for d in listing.body if isinstance(d, dict) and d.get("id")]
+
+        def read_one(summary: dict[str, Any]) -> dict[str, Any]:
+            reply = call(f"/api/drives/{quote(str(summary['id']), safe='')}")
+            if reply.status == 200 and isinstance(reply.body, dict):
+                return reply.body
+            return summary
+
+        with ThreadPoolExecutor(max_workers=DRIVE_READERS) as pool:
+            payloads = list(pool.map(read_one, summaries))
+        # A drive whose read failed is kept as its summary, unjudged.
+        failed_ids = {str(d.get("id")) for d in payloads if "smart_data" not in d}
 
         rules_ok = self.rules.load()
-        lab_drives: dict[str, dict[str, Any]] = {}
-        lab_pools: list[dict[str, Any]] | None = None
-        failed_ids: set[str] = set()
-        if kind == "replicas":
-            state = call("/api/state")
-            if state.status != 200 or not isinstance(state.body, dict):
-                return self._stale(key, kind, "unreachable")
-            drives = [d for d in state.body.get("drives") or [] if isinstance(d, dict)]
-            lab_pools = [p for p in state.body.get("pools") or [] if isinstance(p, dict)]
-            payloads: list[tuple[dict[str, Any], dict[str, Any] | None]] = [
-                ({k: v for k, v in d.items() if k != "lab"}, d.get("lab")) for d in drives]
-            for drive, lab in payloads:
-                lab_drives[str(drive.get("id"))] = lab or {}
-        else:
-            listing = call("/api/drives")
-            if listing.status == 401:
-                # The agent answered its health: the pending card (board 3.6)
-                # shows its version and drive count from it.
-                return self._stale(key, kind, password_status, live=info, address=address)
-            if listing.status != 200 or not isinstance(listing.body, list):
-                return self._stale(key, kind, "unreachable")
-            summaries = [d for d in listing.body if isinstance(d, dict) and d.get("id")]
-
-            def read_one(summary: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-                reply = call(f"/api/drives/{quote(str(summary['id']), safe='')}")
-                if reply.status == 200 and isinstance(reply.body, dict):
-                    return reply.body, None
-                return summary, None
-
-            with ThreadPoolExecutor(max_workers=DRIVE_READERS) as pool:
-                payloads = list(pool.map(read_one, summaries))
-            # A drive whose read failed is kept as its summary, unjudged.
-            failed_ids = {str(d.get("id")) for d, _ in payloads if "smart_data" not in d}
-
+        saved = self.options.thresholds() if rules_ok else {}
         items: list[dict[str, Any]] = []
-        resolve = self._threshold_resolver(key)
-        for drive, lab in payloads:
+        for drive in payloads:
             drive_id = str(drive.get("id"))
-            if kind != "replicas" and drive_id in failed_ids:
+            if drive_id in failed_ids:
                 items.append({"type": "drive", "id": drive_id, "drive": drive, "verdict": None,
                               "view": None, "lab": None, "error": "not_answering"})
                 continue
-            source, overrides = "app", {}
-            if rules_ok:
-                source, overrides, _entry = resolve(card_id(key, drive_card_key(drive, drive_id)),
-                                                    drive_id)
+            overrides = dict(saved.get(card_id(key, drive_card_key(drive, drive_id))) or {})
             verdict, view = judge_drive(self.rules, drive, rules_ok, overrides)
             items.append({"type": "drive", "id": drive_id, "drive": drive, "verdict": verdict,
-                          "view": view, "lab": lab if kind == "replicas" else None,
-                          "thresholds_source": source})
+                          "view": view, "lab": None, "thresholds_source": "app"})
 
         endpoints = info.get("endpoints") or []
         pools_status = "none"
-        pool_list: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
-        if lab_pools is not None:
-            pools_status = "ok"
-            pool_list = [({k: v for k, v in p.items() if k != "lab"}, p.get("lab")) for p in lab_pools]
-        elif "/api/pools" in endpoints:
+        pool_list: list[dict[str, Any]] = []
+        if "/api/pools" in endpoints:
             reply = call("/api/pools")
             if reply.status == 200 and isinstance(reply.body, list):
                 pools_status = "ok"
-                pool_list = [(p, None) for p in reply.body if isinstance(p, dict) and p.get("name")]
+                pool_list = [p for p in reply.body if isinstance(p, dict) and p.get("name")]
             else:
                 pools_status = "failed"
-        for pool_payload, lab in pool_list:
-            verdict, view = judge_pool(self.rules, pool_payload, lab, rules_ok)
+        for pool_payload in pool_list:
+            verdict, view = judge_pool(self.rules, pool_payload, None, rules_ok)
             items.append({"type": "pool", "id": f"pool.{pool_payload.get('name')}",
-                          "pool": pool_payload, "verdict": verdict, "view": view, "lab": lab})
+                          "pool": pool_payload, "verdict": verdict, "view": view, "lab": None})
         for item in items:
             card_key = (f"pool:{item['pool'].get('name')}" if item["type"] == "pool"
                         else drive_card_key(item["drive"], item["id"]))
@@ -3356,8 +2570,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         now = utc_now()
         response = {
-            "id": key, "kind": kind, "status": "ok", "read_at": now, "last_answer": now,
-            "agent": self._agent_info(kind, address, info,
+            "id": key, "kind": "self", "status": "ok", "read_at": now, "last_answer": now,
+            "agent": self._agent_info(info,
                                       sum(1 for i in items if i["type"] == "drive"),
                                       sum(1 for i in items if i["type"] == "pool")),
             "summary": summarize(items, True),
@@ -3370,26 +2584,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "health": info,
         }
         self.cache.update(key, response=response, last_answer=now)
-        type(self)._last_failure.pop(key, None)
         return response
 
-    def _agent_info(self, kind: str, address: str, info: dict[str, Any],
-                    drives: Any, pools: Any) -> dict[str, Any]:
+    def _agent_info(self, info: dict[str, Any], drives: Any, pools: Any) -> dict[str, Any]:
         """The response's agent block, from the agent's health answer."""
         return {
-            "hostname": self._agent_hostname(kind, address, info),
+            "hostname": self.agent_host,
             "version": info.get("version"), "os": info.get("os"),
             "os_name": info.get("os_name"), "uptime_seconds": info.get("uptime_seconds"),
             "drives": drives, "pools": pools,
         }
 
-    def _stale(self, key: str, kind: str, status: str, live: dict[str, Any] | None = None,
-               address: str = "") -> dict[str, Any]:
-        """The last good read of a host that did not answer as it should.
-        live: the health answer of an agent that wants a password; the agent
-        block then comes from it (drive and pool counts as health gives them)."""
+    def _stale(self, key: str, status: str) -> dict[str, Any]:
+        """The last good read of an agent that did not answer as it should."""
         cached = self.cache.get(key)
-        type(self)._last_failure[key] = (time.time(), status)
         last = cached.get("response") if isinstance(cached.get("response"), dict) else {}
         items = [{**item, "stale": True} for item in last.get("items") or []]
         for item in items:  # a read cached before cards had ids
@@ -3398,15 +2606,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                           if item.get("type") == "pool"
                                           else drive_card_key(item.get("drive") or {}, str(item.get("id"))))
         fs_cards = [{**c, "stale": True} for c in last.get("filesystem_cards") or []]
-        agent = last.get("agent")
-        if live is not None:
-            counts = [live.get(k) if isinstance(live.get(k), int) and not isinstance(live.get(k), bool)
-                      else (agent or {}).get(k) for k in ("drives", "pools")]
-            agent = self._agent_info(kind, address, live, *counts)
         return {
-            "id": key, "kind": kind, "status": status, "read_at": utc_now(),
+            "id": key, "kind": "self", "status": status, "read_at": utc_now(),
             "last_answer": cached.get("last_answer"),
-            "agent": agent,
+            "agent": last.get("agent"),
             "summary": summarize(items, False),
             "items": items,
             "filesystem_cards": fs_cards,
@@ -3414,1318 +2617,130 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "filesystems_status": last.get("filesystems_status"),
             "rules_version": last.get("rules_version") or self.rules.version,
             "stale": True,
-            "health": live if live is not None else last.get("health"),
+            "health": last.get("health"),
         }
 
-    # ── /agentic-access ──
-    # Built from the per-agent cache the page fills: an agent is read again
-    # only when its cached read is older than the page's own cadence (60 s
-    # for this machine and the replicas, REFRESH_MINUTES for field agents),
-    # and an agent that just failed is not asked again inside that window.
+    # ── /cards/<id>/file ──
 
-    def _send_bytes(self, code: int, body: bytes, content_type: str,
-                    headers: dict[str, str] | None = None) -> None:
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        for name, value in (headers or {}).items():
-            self.send_header(name, value)
-        self.end_headers()
-        self.wfile.write(body)
+    def _route_card_file(self, _parsed, cid: str) -> None:
+        """One of this box's drive or pool cards as a JSON file: what the
+        agent sent for it, with the filesystems on it."""
+        host_key, key = split_card_id(cid)
+        if host_key != "self" or not key:
+            raise ApiError(404, "not_found", "no such card")
+        response = self.cache.get("self").get("response")
+        item = next((c for c in card_list(response) if c["card_id"] == cid), None) \
+            if isinstance(response, dict) else None
+        if item is None:
+            item = next((c for c in card_list(self._read_self()) if c["card_id"] == cid), None)
+        if item is None or item.get("type") not in ("drive", "pool"):
+            raise ApiError(404, "not_found", "no such card")
+        if item["type"] == "pool":
+            pool = item.get("pool") or {}
+            doc = {"pool": pool, "filesystems": item.get("filesystems") or []}
+            name = f"pool-{pool.get('name')}"
+        else:
+            drive = item.get("drive") or {}
+            doc = {"drive": drive, "filesystems": item.get("filesystems") or []}
+            name = f"drive-{drive.get('model') or item.get('id')}"
+        self._send_file(json.dumps(doc, indent=2).encode(), name)
 
-    def _agentic_document(self, fresh: bool = False) -> dict[str, Any]:
-        """The document, built at most once per agentic_memo_seconds; one
-        build at a time, so requests that arrive together share it."""
-        cls = type(self)
-        with cls._agentic_lock:
-            memo = cls._agentic_doc
-            if not fresh and memo is not None and time.monotonic() - memo[0] < cls.agentic_memo_seconds:
-                return memo[1]
-            document = self._agentic_build(fresh)
-            cls._agentic_doc = (time.monotonic(), document)
-            return document
-
-    def _agentic_build(self, fresh: bool) -> dict[str, Any]:
-        cls = type(self)
-        generated = utc_now()
-        now = _iso_epoch(generated) or time.time()
-        sv = self.supervisor
-        try:
-            stored = self.host_store.cards()
-        except ApiError:
-            stored = None
-        hosts = stored["hosts"] if stored else self.host_store.hosts_quick()
-        hidden = set(stored["hidden_cards"]) if stored else set()
-        names = stored["card_names"] if stored else {}
-        host_names = stored["host_names"] if stored else {}
-        lookup: dict[str, Any] | None = None
-        if sv.available:
-            try:
-                lookup = self._ha_lookup()
-            except Exception as err:  # noqa: BLE001 -- the export goes on without it
-                log(f"Agentic access: Home Assistant lookup failed: {type(err).__name__}: {err}")
-
-        targets: list[tuple[str, tuple[str, str, int, str], dict[str, Any] | None]] = [
-            ("self", ("self", "127.0.0.1", self.agent_port, self.token), None)]
-        for host in hosts:
-            if self.host_store.shows_cards(host):
-                targets.append((host_id(host["address"], host["port"]),
-                                ("field", host["address"], host["port"], host.get("password") or ""),
-                                host))
-        targets.append(("replicas", ("replicas", "127.0.0.1", self.mock_port, ""), None))
-
-        def max_age(kind: str) -> float:
-            base = REFRESH_MINUTES * 60.0 if kind == "field" else float(cls.agentic_max_age_seconds)
-            return min(base, float(AGENTIC_FRESH_SECONDS)) if fresh else base
-
-        # The latest read of each agent, by the page or by an earlier
-        # export: its cached response, or its failure when that came after.
-        responses: dict[str, dict[str, Any] | None] = {}
-        to_read: list[tuple[str, tuple[str, str, int, str]]] = []
-        for key, target, _host in targets:
-            cached = self.cache.get(key).get("response")
-            read_at = _iso_epoch(cached.get("read_at")) if isinstance(cached, dict) else None
-            failed = cls._last_failure.get(key)
-            if failed is not None:
-                if now - failed[0] <= max_age(target[0]):
-                    responses[key] = self._stale(key, target[0], failed[1])
-                    continue
-            elif read_at is not None and now - read_at <= max_age(target[0]):
-                responses[key] = cached
-                continue
-            to_read.append((key, target))
-
-        def read(item: tuple[str, tuple[str, str, int, str]]) -> dict[str, Any] | None:
-            key, target = item
-            try:
-                return self._read_agent(key, *target)
-            except Exception as err:  # noqa: BLE001 -- that agent alone becomes an error
-                log(f"Agentic access: reading {key} failed: {type(err).__name__}: {err}")
-                return None
-
-        if to_read:
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                for (key, _target), response in zip(to_read, pool.map(read, to_read)):
-                    responses[key] = response
-
-        ha_targets = (lookup.get("targets") or {}) if lookup and lookup.get("reachable") else {}
-        agents: list[dict[str, Any]] = []
-        for key, target, host in targets:
-            try:
-                agents.append(self._agentic_agent(key, target, host, responses.get(key), now,
-                                                  hidden, names, host_names, ha_targets.get(key)))
-            except Exception as err:  # noqa: BLE001 -- one agent never fails the document
-                log(f"Agentic access: {key} failed: {type(err).__name__}: {err}")
-                agents.append({"id": key, "kind": target[0], "simulated": target[0] == "replicas",
-                               "status": "error", "stale": True,
-                               "error": {"code": "internal_error", "message": None}})
-
-        real = [a for a in agents if a.get("kind") != "replicas"]
-        counts = {
-            "agents": len(real),
-            "drives": sum(len(a.get("drives") or []) for a in real),
-            "pools": sum(len(a.get("pools") or []) for a in real),
-            "attention": sum(int((a.get("summary") or {}).get("attention") or 0) for a in real),
-            "maybe": sum(int((a.get("summary") or {}).get("maybe") or 0) for a in real),
-            "unsupported": sum(int((a.get("summary") or {}).get("unsupported") or 0) for a in real),
-            "unreachable_agents": sum(1 for a in real if a.get("status") != "ok"),
-            "replica_drives": sum(len(a.get("drives") or []) for a in agents
-                                  if a.get("kind") == "replicas"),
-        }
-        self_agent = next((a for a in agents if a.get("id") == "self"), {})
-        return {
-            "about": AGENTIC_ABOUT,
-            "schema": AGENTIC_SCHEMA,
-            "schema_version": AGENTIC_SCHEMA_VERSION,
-            "generated_at": generated,
-            "app_version": self.app_version,
-            "rules_version": self.rules.version if self.rules.load() else None,
-            "this_machine_agent_version": (self_agent.get("agent") or {}).get("version"),
-            "home_assistant": {
-                "version": sv.ha_version() if sv.available else None,
-                "reachable": bool(lookup and lookup.get("reachable")),
-                "integration_installed": lookup.get("installed") if lookup else None,
-            },
-            "counts": counts,
-            "agents": agents,
-            "guide": AGENTIC_GUIDE,
-        }
-
-    def _agentic_agent(self, key: str, target: tuple[str, str, int, str],
-                       host: dict[str, Any] | None, response: dict[str, Any] | None, now: float,
-                       hidden: set[str], names: dict[str, str], host_names: dict[str, str],
-                       ha_target: dict[str, Any] | None) -> dict[str, Any]:
-        """One agent's entry. Its token is only ever looked at as a yes/no."""
-        kind, _address, port, token = target
-        if response is None:
-            raise ValueError("no read")
-        if host is not None:
-            response = without_removed(response, host.get("removed") or [])
-        status = str(response.get("status") or "error")
-        last_answer = response.get("last_answer")
-        answered = _iso_epoch(last_answer)
-        error = None
-        if status != "ok":
-            error = {"code": status,
-                     "message": AGENTIC_ERRORS.get(status) if last_answer else AGENTIC_NEVER_READ}
-        agent = response.get("agent") if isinstance(response.get("agent"), dict) else None
-        devices = (ha_target or {}).get("devices") or {}
-        drives, pools, filesystems = agentic_cards(response, hidden, names, devices)
-        return {
-            "id": key,
-            "kind": kind,
-            "simulated": kind == "replicas",
-            "name": host_names.get(key) or (agent or {}).get("hostname"),
-            "address": host["address"] if host is not None else self.agent_host,
-            "port": port,
-            "has_token": bool(token),
-            "status": status,
-            "stale": bool(response.get("stale")),
-            "read_at": response.get("read_at"),
-            "last_answer": last_answer,
-            "data_age_seconds": max(0, int(now - answered)) if answered is not None else None,
-            "error": error,
-            "agent": agent,
-            "health": response.get("health"),
-            "summary": response.get("summary"),
-            "home_assistant": ({"config_entry_id": ha_target.get("entry_id"),
-                                "entry_state": ha_target.get("state")} if ha_target else None),
-            "pools_status": response.get("pools_status"),
-            "filesystems_status": response.get("filesystems_status"),
-            "drives": drives,
-            "pools": pools,
-            "filesystems": filesystems,
-        }
-
-    @staticmethod
-    def _agentic_flags(parsed) -> tuple[bool, bool]:
-        query = parse_qs(parsed.query or "")
-        return (query.get("fresh", [""])[0] == "1", query.get("download", [""])[0] == "1")
-
-    def _route_agentic_json(self, parsed) -> None:
-        fresh, download = self._agentic_flags(parsed)
-        document = self._agentic_document(fresh)
-        headers = {}
-        if download:
-            headers["Content-Disposition"] = (
-                f'attachment; filename="smart-sniffer-{document["generated_at"][:10]}.json"')
-        self._send_bytes(200, agentic_bytes(document), "application/json; charset=utf-8", headers)
-
-    def _route_agentic_page(self, parsed) -> None:
-        if parsed.path.endswith("/"):
-            # The page's links are relative to the ingress root; under a
-            # trailing slash they would not be.
-            self.send_response(301)
-            self.send_header("Location", "../agentic-access")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        fresh, _download = self._agentic_flags(parsed)
-        root = os.path.realpath(self.static_dir)
-        try:
-            with open(os.path.join(root, "agentic.html"), encoding="utf-8") as handle:
-                template = handle.read()
-        except OSError:
-            raise ApiError(404, "not_found", "agentic.html is missing") from None
-        document = self._agentic_document(fresh)
-        body = agentic_bytes(document)
-        every = document["agents"]
-        drives = sum(len(a.get("drives") or []) for a in every)
-        down = sum(1 for a in every if a.get("status") != "ok")
-        size = len(body)
-        meta = [f"generated {document['generated_at'][:10]} {document['generated_at'][11:16]} UTC",
-                f"{len(every)} agent{'' if len(every) == 1 else 's'}",
-                f"{drives} drive{'' if drives == 1 else 's'}"]
-        if down:
-            meta.append(f"{down} not answering")
-        meta.append(f"{size / 1024:.0f} KB" if size >= 1024 else f"{size} B")
-        page = (template
-                .replace("<!--AGENTIC_FILE-->",
-                         html.escape(f"smart-sniffer-{document['generated_at'][:10]}.json"))
-                .replace("<!--AGENTIC_META-->", html.escape("  ·  ".join(meta)))
-                .replace("<!--AGENTIC_JSON-->", html.escape(body.decode("utf-8"), quote=False)))
-        self._send_bytes(200, _version_assets(page.encode("utf-8"), root), "text/html; charset=utf-8")
-
-    # ── /replicas ──
-
-    def _mock_or_down(self, method: str, path: str, body: Any = None,
-                      raw_body: bytes | None = None) -> AgentReply:
-        reply = self._mock(method, path, body=body, raw_body=raw_body)
-        if reply.status is None:
-            raise ApiError(503, "replica_agent_down", "the replica agent is not answering")
-        return reply
-
-    def _relay(self, reply: AgentReply, ok: int | None = None) -> None:
-        """Answer with the replica agent's own status and JSON body."""
-        body = reply.body if reply.body is not None else {
-            "error": "replica_agent_failed", "message": f"HTTP {reply.status}"}
-        if isinstance(body, dict) and "error" in body and "message" not in body:
-            body = {**body, "message": None}
-        self._send_json(ok if ok is not None and reply.status in (200, 201) else reply.status, body)
-
-    def _route_replicas_list(self, _parsed) -> None:
-        self._relay(self._mock_or_down("GET", "/api/replicas"))
-
-    def _route_replicas_upload(self, _parsed) -> None:
-        try:
-            length = int(self.headers.get("Content-Length", 0) or 0)
-        except ValueError:
-            raise ApiError(400, "bad_request", "bad Content-Length") from None
-        if length > MAX_REPLICA_BYTES + 64 * 1024:
-            # Read and drop what was sent (up to a limit), so the page gets
-            # the answer rather than a broken connection.
-            remaining = length if length <= 16 * MAX_REPLICA_BYTES else 0
-            while remaining > 0:
-                chunk = self.rfile.read(min(remaining, 65536))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-            self.close_connection = True
-            raise ApiError(413, "too_large", "A replica file is at most 1 MB.")
-        raw = self.rfile.read(length) if length > 0 else b""
-        try:
-            doc = json.loads(raw)
-        except ValueError:
-            raise ApiError(422, "invalid_replica", "not valid JSON") from None
-        if not isinstance(doc, dict):
-            raise ApiError(422, "invalid_replica", "a replica file is a JSON object")
-        body = doc if set(doc) == {"file"} else {"file": doc}
-        self._relay(self._mock_or_down("POST", "/api/replicas", body=body))
-
-    def _route_replicas_add(self, _parsed) -> None:
-        body = self._read_json()
-        files = body.get("files") if isinstance(body, dict) else None
-        if not isinstance(files, list) or not files or not all(isinstance(f, str) for f in files):
-            raise ApiError(400, "bad_request", 'give {"files": ["<file id>", ...]}')
-        cards: list[dict[str, Any]] = []
-        failed: list[dict[str, Any]] = []
-        for file_id in files:
-            reply = self._mock_or_down("POST", "/api/drives", body={"replica": file_id})
-            if reply.status == 201 and isinstance(reply.body, dict):
-                cards.append({"file": file_id, "card_id": self._card_id(reply.body)})
-            else:
-                error = reply.body.get("error") if isinstance(reply.body, dict) else None
-                failed.append({"file": file_id, "error": error or f"http_{reply.status}"})
-        self._send_json(201, {"cards": cards, "failed": failed})
-
-    @staticmethod
-    def _card_id(added: dict[str, Any]) -> str:
-        if added.get("kind") == "pool":
-            return f"pool.{added.get('name') or added.get('id')}"
-        return str(added.get("id"))
-
-    @staticmethod
-    def _replica_path(card_id: str) -> str:
-        if card_id.startswith("pool."):
-            return f"/api/pools/{quote(card_id[len('pool.'):], safe='')}"
-        return f"/api/drives/{quote(card_id, safe='')}"
-
-    def _route_replica_file(self, _parsed, card_id: str) -> None:
-        reply = self._mock_or_down("GET", self._replica_path(card_id) + "/replica")
-        if reply.status != 200:
-            raise ApiError(404, "not_found", "no such replica")
-        self._send_file(reply, card_id)
-
-    def _send_file(self, reply: AgentReply | bytes, name: str) -> None:
-        """A JSON file as a download: the replica agent's answer (with its
-        own file name when it gives one) or bytes."""
-        raw = reply if isinstance(reply, bytes) else reply.raw
-        given = None if isinstance(reply, bytes) else reply.headers.get("content-disposition")
-        disposition = given or (
-            f'attachment; filename="{re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "card"}.json"')
+    def _send_file(self, raw: bytes, name: str) -> None:
+        """A JSON file as a download."""
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "card"
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Disposition", disposition)
+        self.send_header("Content-Disposition", f'attachment; filename="{safe}.json"')
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(raw)
 
-    def _route_replica_delete(self, _parsed, card_id: str) -> None:
-        reply = self._mock_or_down("DELETE", self._replica_path(card_id))
-        if reply.status != 200:
-            raise ApiError(404, "not_found", "no such replica")
-        self._send_json(200, {"removed": card_id})
+    # ── /ha/integration, /app/notice/dismiss ──
 
-    def _route_replicas_save_as(self, _parsed) -> None:
-        body = self._read_json()
-        source = body.get("host") if isinstance(body, dict) else None
-        drive_id = body.get("drive_id") if isinstance(body, dict) else None
-        if not isinstance(source, str) or not isinstance(drive_id, str) or not drive_id:
-            raise ApiError(400, "bad_request", 'give {"host": "self" or a field agent id, "drive_id"}')
-        entry = self._save_replica_file(source, drive_id)
-        added = self._mock_or_down("POST", "/api/drives", body={"replica": entry.get("id")})
-        card = self._card_id(added.body) if added.status == 201 and isinstance(added.body, dict) else None
-        self._send_json(201, {"file": entry, "card_id": card})
+    def _route_ha_integration(self, _parsed) -> None:
+        self._send_json(200, self._integration())
 
-    def _save_replica_file(self, source: str, drive_id: str) -> dict[str, Any]:
-        """Read a real drive (self or a stored field agent), judge it and save
-        it as a replica file in the user folder, serial and WWN replaced by
-        the replica agent. Returns the file's listing entry."""
-        if source == "self":
-            address, port, token = "127.0.0.1", self.agent_port, self.token
-        else:
-            host = self.host_store.find(source)
-            if host is None:
-                raise ApiError(404, "not_found", "no such field agent")
-            address, port, token = host["address"], host["port"], host.get("password") or ""
-        reply = agent_call(address, port, "GET", f"/api/drives/{quote(drive_id, safe='')}",
-                           token=token, connect_timeout=AGENT_HEALTH_TIMEOUT,
-                           read_timeout=AGENT_READ_TIMEOUT)
-        if reply.status is None:
-            raise ApiError(504, "not_answering", "the agent did not answer")
-        if reply.status == 401:
-            raise ApiError(422, "password_refused" if token else "password_needed",
-                           "the agent wants a password")
-        if reply.status != 200 or not isinstance(reply.body, dict):
-            raise ApiError(404, "not_found", "no such drive")
-        drive = reply.body
-        verdict = None
-        if self.rules.load():
-            full = self.rules.evaluate(dict(drive))
-            if full["state"] == "UNSUPPORTED":
-                raise ApiError(409, "unsupported_drive", "This drive gives no SMART data to copy.")
-            verdict = {"state": full["state"], "severity": full["severity"],
-                       "reasons": full["reasons"], "rules_version": full["rules_version"],
-                       "at": utc_now()}
-        saved = self._mock_or_down("POST", "/api/replicas",
-                                   body={"from_drive": drive, "verdict": verdict})
-        if saved.status != 201 or not isinstance(saved.body, dict):
-            body = saved.body if isinstance(saved.body, dict) else {}
-            extra = {k: v for k, v in body.items() if k not in ("error", "message")}
-            raise ApiError(saved.status or 502, str(body.get("error") or "replica_agent_failed"),
-                           body.get("message") or f"HTTP {saved.status}", **extra)
-        log(f"Saved a replica of drive {drive_id}")
-        return saved.body
-
-    # ── /cards ──
-
-    def _known_cards(self, hosts: list[dict[str, Any]]) -> set[str]:
-        """Every card id the last reads showed, and each stored machine's own
-        card (its password placeholder)."""
-        keys = ["self", "replicas"] + [host_id(h["address"], h["port"]) for h in hosts]
-        known = {k for k in keys[2:]}
-        for key in keys:
-            response = self.cache.get(key).get("response")
-            if isinstance(response, dict):
-                known |= {c["card_id"] for c in card_list(response)}
-        return known
-
-    def _route_cards(self, _parsed) -> None:
-        state = self.host_store.cards()
-        self._send_json(200, {"order": state["card_order"], "hidden": state["hidden_cards"],
-                              "names": state["card_names"], "host_names": state["host_names"]})
-
-    def _route_cards_order(self, _parsed) -> None:
-        body = self._read_json()
-        order = body.get("order") if isinstance(body, dict) else None
-        if not isinstance(order, list):
-            raise ApiError(400, "bad_request", 'give {"order": ["<card id>", ...]}')
-
-        def change(state: dict[str, Any]) -> dict[str, Any]:
-            hosts = {"self", "replicas"} | {host_id(h["address"], h["port"]) for h in state["hosts"]}
-            known = self._known_cards(state["hosts"])
-            wanted = [i for i in _str_list(order) if i in known]
-            # Cards the page did not send (a machine it could not read) keep
-            # their place after the ones it did, while their machine is stored.
-            kept = [i for i in state["card_order"]
-                    if i not in wanted and split_card_id(i)[0] in hosts]
-            state["card_order"] = wanted + kept
-            return state
-
-        state = self.host_store.write_all(change)
-        self._send_json(200, {"order": state["card_order"]})
-
-    def _check_card_host(self, cid: str, hosts: list[dict[str, Any]]) -> tuple[str, str | None]:
-        host_key, key = split_card_id(cid)
-        stored = {host_id(h["address"], h["port"]) for h in hosts}
-        if host_key not in ("self", "replicas") and host_key not in stored:
-            raise ApiError(404, "not_found", "no such card")
-        if host_key in ("self", "replicas") and key is None:
-            raise ApiError(404, "not_found", "no such card")
-        return host_key, key
-
-    def _route_card_patch(self, _parsed, cid: str) -> None:
-        body = self._read_json()
-        hidden = body.get("hidden") if isinstance(body, dict) else None
-        if not isinstance(hidden, bool):
-            raise ApiError(400, "bad_request", 'give {"hidden": true or false}')
-        self._check_card_host(cid, self.host_store.cards()["hosts"])
-
-        def change(state: dict[str, Any]) -> dict[str, Any] | None:
-            if (cid in state["hidden_cards"]) == hidden:
-                return None  # already so: no write
-            if hidden:
-                state["hidden_cards"].append(cid)
-            else:
-                state["hidden_cards"].remove(cid)
-            return state
-
-        state = self.host_store.write_all(change)
-        self._send_json(200, {"id": cid, "hidden": hidden, "hidden_cards": state["hidden_cards"]})
-
-    # ── Names: /cards/<id>/name and /hosts/<id>/name ──
-    #
-    # A card's name is kept in the app options (card_names). For a drive or
-    # pool whose device is in Home Assistant it is also written to that
-    # device's name_by_user, which the page shows first when it is set, so a
-    # rename made in Home Assistant shows here on the next refresh.
-
-    @staticmethod
-    def _name_body(body: Any) -> str:
-        name = body.get("name") if isinstance(body, dict) else None
-        if not isinstance(name, str):
-            raise ApiError(400, "bad_request", 'give {"name": "<text>"}, empty for the original')
-        return clean_name(name)
-
-    def _ha_device(self, host_key: str, key: str) -> str | None:
-        """The Home Assistant device id of a card, or None when it has none."""
-        if not self.supervisor.available:
-            return None
-        lookup = self._ha_lookup()
-        if not lookup.get("reachable") or lookup.get("installed") is False:
-            return None
-        target = (lookup.get("targets") or {}).get(host_key) or {}
-        device = (target.get("devices") or {}).get(key)
-        return device if isinstance(device, str) else None
-
-    def _route_card_name(self, _parsed, cid: str) -> None:
-        name = self._name_body(self._read_json())
-        host_key, key = self._check_card_host(cid, self.host_store.cards()["hosts"])
-        if key is None:
-            raise ApiError(404, "not_found", "a machine is renamed at /hosts/<id>/name")
-
-        def change(state: dict[str, Any]) -> dict[str, Any] | None:
-            if state["card_names"].get(cid, "") == name:
-                return None  # already so: no write
-            if name:
-                state["card_names"][cid] = name
-            else:
-                state["card_names"].pop(cid, None)
-            return state
-
-        self.host_store.write_all(change)
-        ha = None
-        device = self._ha_device(host_key, key)
-        if device is not None:
-            ha = "saved" if self.supervisor.set_device_name(device, name or None) else "failed"
-            if ha == "saved":
-                self._drop_ha_cache()  # the next /ha/devices reads the new name
-        self._send_json(200, {"id": cid, "name": name, "home_assistant": ha})
-
-    def _route_host_name(self, _parsed, key: str) -> None:
-        name = self._name_body(self._read_json())
-        if key in ("self", "replicas"):
-            raise ApiError(409, "fixed_name", "HAOS and REPLICA keep their names")
-
-        def change(state: dict[str, Any]) -> dict[str, Any] | None:
-            if not any(host_id(h["address"], h["port"]) == key for h in state["hosts"]):
-                raise ApiError(404, "not_found", "no such field agent")
-            if state["host_names"].get(key, "") == name:
-                return None
-            if name:
-                state["host_names"][key] = name
-            else:
-                state["host_names"].pop(key, None)
-            return state
-
-        self.host_store.write_all(change)
-        self._send_json(200, {"id": key, "name": name})
-
-    def _find_card(self, host_key: str, cid: str) -> dict[str, Any] | None:
-        """A card of the last read of its machine; read again when the last
-        read does not have it."""
-        response = self.cache.get(host_key).get("response")
-        found = next((c for c in card_list(response) if c["card_id"] == cid), None) \
-            if isinstance(response, dict) else None
-        if found is None:
-            target, _host = self._target(host_key)
-            found = next((c for c in card_list(self._read_agent(host_key, *target))
-                          if c["card_id"] == cid), None)
-        return found
-
-    def _route_card_delete(self, parsed, cid: str) -> None:
-        ha = (parse_qs(parsed.query).get("ha") or [None])[0]
-        if ha is not None and ha not in HA_REMOVAL_MODES:
-            raise ApiError(400, "bad_request", "ha must be delete, disable, entry or replica")
-        host_key, key = self._check_card_host(cid, self.host_store.cards()["hosts"])
-        if host_key == "self":
-            raise ApiError(409, "cannot_remove", "A drive of this machine can be hidden, not removed.")
-        # The replicas' entry stays, even with no replica left; ha=replica is
-        # for replicas only.
-        if (ha == "replica" and host_key != "replicas") or (ha == "entry" and host_key == "replicas"):
-            raise ApiError(400, "bad_request", "ha=replica is for replicas, which keep their entry")
-        # What Home Assistant has of the card is read before the page removal,
-        # which can take the machine (and its last read) with it.
-        ha_target = None
-        if ha is not None and self.supervisor.available:
-            lookup = self._ha_lookup()
-            if lookup.get("reachable") and lookup.get("installed") is not False:
-                ha_target = (lookup.get("targets") or {}).get(host_key)
-        answer = self._remove_card(host_key, key, cid)
-        machine_gone = bool(answer.pop("machine_gone", False))
-        if ha is not None:
-            reason = self._ha_remove(ha, ha_target, key, machine_gone)
-            answer["home_assistant"] = "failed" if reason else ("disabled" if ha == "disable" else "deleted")
-            answer["ha_error"] = reason
-        self._send_json(200, answer)
-
-    def _ha_remove(self, mode: str, target: dict[str, Any] | None, key: str | None,
-                   machine_gone: bool) -> str | None:
-        """After a card left the page: the Home Assistant side the page asked
-        for. None when done, else the reason, as Home Assistant gave it."""
-        if target is None:
-            return "the card is not in Home Assistant"
-        if mode == "replica":
-            return self._ha_remove_replica(target, key)
-        if mode == "entry":
-            if not machine_gone:
-                return "other cards of this machine are still on the page"
-            reason = self.supervisor.delete_entry(str(target["entry_id"]))
-        else:
-            device = (target.get("devices") or {}).get(key or "")
-            if not isinstance(device, str):
-                return "the card has no device in Home Assistant"
-            if mode == "disable":
-                command = {"type": "config/device_registry/update", "device_id": device,
-                           "disabled_by": "user"}
-            else:
-                command = {"type": "config/device_registry/remove_config_entry",
-                           "device_id": device, "config_entry_id": target["entry_id"]}
-            reason = self.supervisor.registry_command(command)
-        if reason is None:
-            self._drop_ha_cache()  # the next /ha/devices reads the change
-            return None
-        return reason.strip().rstrip(".") or "no reason given"
-
-    def _ha_remove_replica(self, target: dict[str, Any], key: str | None) -> str | None:
-        """Delete a removed replica's device. The integration refuses while
-        its last poll still has the drive (device_removal.py), so each try
-        first asks for a poll by updating one of the device's entities; a
-        refusal is tried again until ha_replica_seconds have passed."""
-        device = (target.get("devices") or {}).get(key or "")
-        if not isinstance(device, str):
-            return "the card has no device in Home Assistant"
-        command = {"type": "config/device_registry/remove_config_entry",
-                   "device_id": device, "config_entry_id": target["entry_id"]}
-        deadline = time.monotonic() + type(self).ha_replica_seconds
-        while True:
-            self.supervisor.poll_device(device)
-            reason = self.supervisor.registry_command(command)
-            if reason is None:
-                self._drop_ha_cache()  # the next /ha/devices reads the change
-                return None
-            if time.monotonic() + HA_REPLICA_RETRY_SECONDS > deadline:
-                return reason.strip().rstrip(".") or "no reason given"
-            time.sleep(HA_REPLICA_RETRY_SECONDS)
-
-    def _remove_card(self, host_key: str, key: str | None, cid: str) -> dict[str, Any]:
-        """Take a card off the page. The answer, with machine_gone (taken out
-        before it is sent) true when nothing of its machine is left."""
-        if host_key == "replicas":
-            item = self._find_card("replicas", cid)
-            if item is None or item.get("type") == "filesystem":
-                raise ApiError(404, "not_found", "no such replica")
-            reply = self._mock_or_down("DELETE", self._replica_path(str(item["id"])))
-            if reply.status != 200:
-                raise ApiError(404, "not_found", "no such replica")
-            # A replica's id leaves the order and the hidden list, if it was there.
-            self.host_store.write_all(lambda state: _drop_ids(state, {cid}))
-            response = self.cache.get("replicas").get("response")
-            left = [c for c in card_list(response) if c.get("type") in ("drive", "pool")
-                    and c["card_id"] != cid] if isinstance(response, dict) else []
-            return {"removed": cid, "host_removed": False, "machine_gone": not left}
-        response = self.cache.get(host_key).get("response")
-        if key is not None and key not in card_keys(host_key, response):
-            # The last read does not have this card (or there is none):
-            # read the machine, so every card it has is counted.
-            target, _host = self._target(host_key)
-            self._read_agent(host_key, *target)
-            response = self.cache.get(host_key).get("response")
-        outcome: dict[str, Any] = {}
-
-        def change_host(state: dict[str, Any]) -> dict[str, Any]:
-            host = next((h for h in state["hosts"]
-                         if host_id(h["address"], h["port"]) == host_key), None)
-            if host is None:
-                raise ApiError(404, "not_found", "no such field agent")
-            if key is not None and key not in host["removed"]:
-                host["removed"].append(key)
-            # The last card of a machine takes the machine with it:
-            # drives, pools and FILESYSTEM cards all count, hidden or
-            # not, and those removed before are gone.
-            outcome["host"] = key is None or every_card_removed(host, response)
-            if outcome["host"]:
-                state["hosts"] = [h for h in state["hosts"] if h is not host]
-            return state
-
-        self.host_store.write_all(lambda state: _drop_cards(change_host(state), host_key,
-                                                            cid, outcome))
-        host_removed = bool(outcome.get("host"))
-        if host_removed:
-            self.cache.drop(host_key)
-            log(f"Field agent {host_key} removed with its last card")
-        return {"removed": cid, "host_removed": host_removed, "machine_gone": host_removed}
-
-    def _route_card_file(self, _parsed, cid: str) -> None:
-        host_key, key = self._check_card_host(cid, self.host_store.hosts_quick())
-        if key is None:
-            raise ApiError(404, "not_found", "no such card")
-        item = self._find_card(host_key, cid)
-        if item is None or item.get("type") == "filesystem":
-            raise ApiError(404, "not_found", "no such card")
-        if host_key == "replicas":
-            reply = self._mock_or_down("GET", self._replica_path(str(item["id"])) + "/replica")
-            if reply.status != 200:
-                raise ApiError(404, "not_found", "no such replica")
-            self._send_file(reply, str(item["id"]))
-            return
-        if item.get("type") == "pool":
-            # A real agent reports a pool without its disk layout, which a
-            # replica file needs, so the file is the pool as the agent sent it.
-            pool = item.get("pool") or {}
-            doc = {"pool": pool, "filesystems": item.get("filesystems") or []}
-            self._send_file(json.dumps(doc, indent=2).encode(), f"pool-{pool.get('name')}")
-            return
-        # A real drive: saved as a replica file (serial and WWN replaced), and
-        # that file is the download.
-        entry = self._save_replica_file(host_key, str(item["id"]))
-        reply = self._mock_or_down("GET", f"/api/replicas/{quote(str(entry.get('id')), safe='')}")
-        if reply.status != 200:
-            raise ApiError(502, "replica_agent_failed", "the saved file could not be read back")
-        self._send_file(reply, str(entry.get("id")))
-
-    # ── /cards/<id>/thresholds ──
-    #
-    # One source of truth per drive: when the drive is in Home Assistant
-    # (the integration has its device: the blue exit icon) the integration's
-    # stored thresholds, read from the entry's diagnostics, and written
-    # through its options flow; otherwise the app's own, in the app options.
-
-    def _threshold_resolver(self, host_key: str) -> Callable[[str, str], tuple[str, dict[str, int], str | None]]:
-        """For one read of a machine: (card id, drive id) -> (source,
-        overrides, entry id). Home Assistant is looked up once, on the first
-        drive that needs it; each entry's thresholds are read once."""
-        memo: dict[str, Any] = {}
-
-        def resolve(cid: str, drive_id: str) -> tuple[str, dict[str, int], str | None]:
-            if "lookup" not in memo:
-                # A drive read never waits on a lookup it has an older answer
-                # for: that answer is used and a new one is read behind it.
-                memo["lookup"] = self._ha_lookup(allow_stale=True) if self.supervisor.available else None
-            entry_id = self._entry_for_card(memo["lookup"], host_key, cid)
-            if entry_id is not None:
-                return "integration", self._integration_thresholds(entry_id, drive_id), entry_id
-            return "app", dict(self.host_store.thresholds_quick().get(cid) or {}), None
-
-        return resolve
-
-    @staticmethod
-    def _entry_for_card(lookup: dict[str, Any] | None, host_key: str, cid: str) -> str | None:
-        """The integration entry that has this card's device, or None when
-        the card is not in Home Assistant."""
-        if not lookup or not lookup.get("reachable") or lookup.get("installed") is False:
-            return None
-        target = (lookup.get("targets") or {}).get(host_key)
-        if not target:
-            return None
-        key = split_card_id(cid)[1]
-        if key and (key in (target.get("devices") or {}) or lookup.get("lookup") == "entries_only"):
-            return target.get("entry_id")
-        return None
-
-    def _thr_fresh(self, at: float) -> bool:
-        """Home Assistant's thresholds are kept as long as its devices are,
-        and at least a few seconds, so one request reads them once."""
-        return time.monotonic() - at < max(type(self).ha_cache_seconds, THRESHOLD_MIN_SECONDS)
-
-    def _integration_thresholds(self, entry_id: str, drive_id: str) -> dict[str, int]:
-        """The overrides the integration stores for this drive: from the
-        entry's diagnostics, which carry them per drive; when they do not,
-        from its options flow's threshold form, left without saving."""
-        cls = type(self)
-        cached = cls._thr_cache.get(entry_id)
-        if cached is None or not self._thr_fresh(cached[0]):
-            if cached is not None and self._stale_ok():
-                # The last diagnostics now; new ones read behind this read.
-                gen = cls._thr_gen
-
-                def diagnostics() -> None:
-                    value = self._diagnostics_thresholds(entry_id)
-                    if cls._thr_gen == gen:
-                        cls._thr_cache[entry_id] = (time.monotonic(), value)
-
-                self._in_background(f"diag:{entry_id}", diagnostics)
-            else:
-                cached = (time.monotonic(), self._diagnostics_thresholds(entry_id))
-                cls._thr_cache[entry_id] = cached
-        drives = cached[1]
-        if drives is not None and drive_id in drives:
-            return dict(drives[drive_id])
-        flow = cls._thr_flow_cache.get((entry_id, drive_id))
-        if flow is None or not self._thr_fresh(flow[0]):
-            if flow is not None and self._stale_ok():
-                gen = cls._thr_gen
-
-                def form() -> None:
-                    try:
-                        values = self._flow_read_thresholds(entry_id, drive_id)
-                    except ApiError as err:
-                        log(f"Could not read the thresholds of {drive_id} from Home Assistant: {err.message}")
-                        return
-                    if cls._thr_gen == gen:
-                        cls._thr_flow_cache[(entry_id, drive_id)] = (time.monotonic(), values)
-
-                self._in_background(f"flow:{entry_id}:{drive_id}", form)
-                return dict(flow[1])
-            try:
-                values = self._flow_read_thresholds(entry_id, drive_id)
-            except ApiError as err:
-                log(f"Could not read the thresholds of {drive_id} from Home Assistant: {err.message}")
-                return {}
-            flow = (time.monotonic(), values)
-            cls._thr_flow_cache[(entry_id, drive_id)] = flow
-        return dict(flow[1])
-
-    def _diagnostics_thresholds(self, entry_id: str) -> dict[str, dict[str, int]] | None:
-        """{drive id: overrides} from the entry's diagnostics, for the drives
-        whose attention block names its thresholds (integration 0.7 and
-        later); None when the diagnostics cannot be read."""
-        if entry_id in self._diagnostics_failed:
-            return None
-        status, diag = self.supervisor.core(
-            "GET", f"/diagnostics/config_entry/{quote(entry_id, safe='')}")
-        if status != 200 or not isinstance(diag, dict):
-            self._diagnostics_failed.add(entry_id)
-            log(f"No diagnostics for entry {entry_id}; not asked again")
-            return None
-        data = diag.get("data") if isinstance(diag.get("data"), dict) else diag
-        out: dict[str, dict[str, int]] = {}
-        drives = data.get("drives") if isinstance(data, dict) else None
-        for drive_id, block in (drives.items() if isinstance(drives, dict) else []):
-            attention = block.get("attention") if isinstance(block, dict) else None
-            if isinstance(attention, dict) and "thresholds" in attention:
-                out[str(drive_id)] = clean_overrides(attention.get("thresholds"))
-        return out
-
-    def _defaults(self) -> Callable[[str], int | None]:
-        attention = self.rules.attention if self.rules.load() else None
-        if attention is None:
-            return lambda _label: None
-        return lambda label: int(attention.default_threshold(label))
-
-    def _options_flow(self, entry_id: str, drive_id: str) -> tuple[str, dict[str, Any]]:
-        """Start the integration's options flow for this entry and walk it
-        to the threshold form of this drive: (flow path, the form step).
-        ApiError 502 with the flow's own words when it goes elsewhere; the
-        flow is then aborted."""
-        sv = self.supervisor
-        status, step = sv.core("POST", "/config/config_entries/options/flow",
-                               {"handler": entry_id, "show_advanced_options": False})
-        if status != 200 or not isinstance(step, dict) or not step.get("flow_id"):
-            raise ApiError(502, "integration_failed", _flow_message(step, status))
-        path = f"/config/config_entries/options/flow/{quote(str(step['flow_id']), safe='')}"
-        try:
-            if step.get("type") == "menu":
-                status, step = sv.core("POST", path, {"next_step_id": "thresholds"})
-            if (status == 200 and isinstance(step, dict) and step.get("type") == "form"
-                    and step.get("step_id") == "thresholds"):
-                status, step = sv.core("POST", path, {"drive_id": drive_id})
-            if not (status == 200 and isinstance(step, dict) and step.get("type") == "form"
-                    and step.get("step_id") == "threshold_form"):
-                raise ApiError(502, "integration_failed", _flow_message(step, status))
-        except ApiError:
-            if isinstance(step, dict) and step.get("type") in ("form", "menu"):
-                sv.core("DELETE", path)
-            raise
-        return path, step
-
-    def _flow_read_thresholds(self, entry_id: str, drive_id: str) -> dict[str, int]:
-        """The overrides as the threshold form prefills them (the value in
-        force per label), the flow aborted without saving."""
-        path, step = self._options_flow(entry_id, drive_id)
-        self.supervisor.core("DELETE", path)
-        default = self._defaults()
-        out: dict[str, int] = {}
-        for field in step.get("data_schema") or []:
-            if not isinstance(field, dict) or not isinstance(field.get("name"), str):
-                continue
-            label, value = field["name"], field.get("default")
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            base = default(label)
-            if base is not None and int(value) != base:
-                out[label] = int(value)
-        return out
-
-    def _flow_write_thresholds(self, entry_id: str, drive_id: str,
-                               overrides: dict[str, int]) -> None:
-        """Save these overrides for the drive through the integration's
-        options flow: every label of its threshold form, the default where
-        there is no override, so an override not wanted any more clears."""
-        path, step = self._options_flow(entry_id, drive_id)
-        default = self._defaults()
-        values: dict[str, int] = {}
-        for field in step.get("data_schema") or []:
-            if not isinstance(field, dict) or not isinstance(field.get("name"), str):
-                continue
-            label = field["name"]
-            base = default(label)
-            if base is None:
-                base = field.get("default") if isinstance(field.get("default"), (int, float)) else 0
-            values[label] = int(overrides.get(label, base))
-        status, result = self.supervisor.core("POST", path, values)
-        if status != 200 or not isinstance(result, dict) or result.get("type") != "create_entry":
-            if isinstance(result, dict) and result.get("type") in ("form", "menu"):
-                self.supervisor.core("DELETE", path)
-            raise ApiError(502, "integration_failed", _flow_message(result, status))
-        self._forget_thresholds(entry_id)
-        log(f"Thresholds of {drive_id} saved in Home Assistant ({len(overrides)} changed from the default)")
-
-    def _forget_thresholds(self, entry_id: str | None = None) -> None:
-        cls = type(self)
-        cls._thr_gen += 1
-        if entry_id is None:
-            cls._thr_cache = {}
-            cls._thr_flow_cache = {}
-            return
-        cls._thr_cache.pop(entry_id, None)
-        cls._thr_flow_cache = {k: v for k, v in cls._thr_flow_cache.items() if k[0] != entry_id}
-
-    def _threshold_card(self, cid: str) -> tuple[str, dict[str, Any]]:
-        """(host id, item) for a real or replica drive card; 404 for a pool,
-        a FILESYSTEM card, a machine's own card or an unknown one. The
-        stored options and Home Assistant's thresholds are read now."""
-        self._forget_thresholds()
-        try:
-            hosts = self.host_store.hosts()
-        except ApiError:
-            hosts = self.host_store.hosts_quick()
-        host_key, key = self._check_card_host(cid, hosts)
-        if key is None:
-            raise ApiError(404, "not_found", "no such drive")
-        item = self._find_card(host_key, cid)
-        if item is None or item.get("type") != "drive" or not isinstance(item.get("drive"), dict):
-            raise ApiError(404, "not_found", "no such drive")
-        if not self.rules.load():
-            raise ApiError(503, "rules_unavailable", "the integration rules are not loaded")
-        return host_key, item
-
-    def _threshold_answer(self, cid: str, source: str, item: dict[str, Any],
-                          overrides: dict[str, int]) -> dict[str, Any]:
-        work = dict(item["drive"])
-        verdict = self.rules.evaluate(work, overrides)
-        return {"card_id": cid, "source": source, "labels": verdict["limits"]}
-
-    def _route_thresholds_get(self, _parsed, cid: str) -> None:
-        host_key, item = self._threshold_card(cid)
-        source, overrides, _entry = self._threshold_resolver(host_key)(cid, str(item["id"]))
-        self._send_json(200, self._threshold_answer(cid, source, item, overrides))
-
-    def _save_thresholds(self, cid: str, change: Callable[[list[dict[str, Any]], dict[str, int]], dict[str, int]]) -> None:
-        """Read the thresholds in force, apply change(limits, overrides) ->
-        new overrides, store them where they live, and answer the result."""
-        host_key, item = self._threshold_card(cid)
-        drive_id = str(item["id"])
-        source, overrides, entry_id = self._threshold_resolver(host_key)(cid, drive_id)
-        limits = self._threshold_answer(cid, source, item, overrides)["labels"]
-        wanted = change(limits, dict(overrides))
-        by_label = {lim["label"]: lim for lim in limits}
-        # Only genuine overrides are stored: a value equal to the default
-        # clears its label, as typing the default does in Home Assistant.
-        wanted = {label: int(value) for label, value in wanted.items()
-                  if label in by_label and int(value) != by_label[label]["default"]}
-        if source == "integration" and entry_id is not None:
-            self._flow_write_thresholds(entry_id, drive_id, wanted)
-        else:
-            def write(state: dict[str, Any]) -> dict[str, Any] | None:
-                if (state["thresholds"].get(cid) or {}) == wanted:
-                    return None
-                if wanted:
-                    state["thresholds"][cid] = wanted
-                else:
-                    state["thresholds"].pop(cid, None)
-                return state
-
-            self.host_store.write_all(write)
-        self._send_json(200, self._threshold_answer(cid, source, item, wanted))
-
-    def _route_thresholds_put(self, _parsed, cid: str) -> None:
-        body = self._read_json()
-        values = body.get("values") if isinstance(body, dict) else None
-        if not isinstance(values, dict):
-            raise ApiError(400, "bad_request", 'give {"values": {"<label>": <number>, ...}}')
-        for label, value in values.items():
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 \
-                    or int(value) != value:
-                raise ApiError(400, "bad_request", f"{label}: a whole number from 0 up")
-
-        def change(limits: list[dict[str, Any]], overrides: dict[str, int]) -> dict[str, int]:
-            known = {lim["label"] for lim in limits}
-            unknown = [label for label in values if label not in known]
-            if unknown:
-                raise ApiError(400, "bad_request", f"this drive has no threshold {unknown[0]}")
-            return {**overrides, **{label: int(v) for label, v in values.items()}}
-
-        self._save_thresholds(cid, change)
-
-    def _route_thresholds_accept(self, _parsed, cid: str) -> None:
-        def change(limits: list[dict[str, Any]], overrides: dict[str, int]) -> dict[str, int]:
-            flagged = [lim for lim in limits if lim["flagged"]]
-            if not flagged:
-                raise ApiError(409, "nothing_flagged", "no reading of this drive is flagged")
-            for lim in flagged:
-                overrides[lim["label"]] = accept_value(int(lim["reading"]), lim["compare"])
-            return overrides
-
-        self._save_thresholds(cid, change)
-
-    def _route_thresholds_reset(self, _parsed, cid: str) -> None:
-        self._save_thresholds(cid, lambda _limits, _overrides: {})
-
-    def _copy_thresholds(self, target: str) -> list[str]:
-        """After a machine is added to Home Assistant: each card of it whose
-        device is now there takes its app thresholds into the integration,
-        and they leave the app options. Returns the card ids copied."""
-        app = {cid: v for cid, v in self.host_store.thresholds_quick().items()
-               if split_card_id(cid)[0] == target and v}
-        if not app:
-            return []
-        self._forget_thresholds()
-        lookup = self._ha_lookup(fresh=True)
-        response = self.cache.get(target).get("response")
-        cards = {c["card_id"]: c for c in card_list(response)} if isinstance(response, dict) else {}
-        copied: list[str] = []
-        for cid, overrides in app.items():
-            item = cards.get(cid)
-            entry_id = self._entry_for_card(lookup, target, cid)
-            if item is None or entry_id is None:
-                continue
-            try:
-                self._flow_write_thresholds(entry_id, str(item.get("id")), overrides)
-            except ApiError as err:
-                log(f"Thresholds of {cid} stay in the app: {err.message}")
-                continue
-            copied.append(cid)
-        if copied:
-            def drop(state: dict[str, Any]) -> dict[str, Any]:
-                for cid in copied:
-                    state["thresholds"].pop(cid, None)
-                return state
-
-            self.host_store.write_all(drop)
-            log(f"Thresholds of {len(copied)} card{'s' if len(copied) > 1 else ''} moved to Home Assistant")
-        return copied
-
-    # ── /ha/devices ──
-
-    def _own_hosts(self) -> set[str]:
-        hosts = {self.agent_host.lower()}
-        try:
-            hosts.add(socket.gethostname().split(".")[0].lower())
-        except OSError:
-            pass
-        return hosts
-
-    def _entry_config(self, entry: dict[str, Any]) -> dict[str, Any] | None:
-        """host and port from an entry's diagnostics, or None.
-
-        Only a loaded entry has diagnostics: Core answers 500 for one that
-        never set up (setup_retry), so those are not asked. An entry whose
-        diagnostics failed once is not asked again while the proxy runs, so
-        a refresh does not fill Core's log."""
-        entry_id = entry.get("entry_id")
-        if not isinstance(entry_id, str) or not entry_id:
-            return None
-        if entry.get("state") != "loaded" or entry_id in self._diagnostics_failed:
-            return None
-        status, diag = self.supervisor.core(
-            "GET", f"/diagnostics/config_entry/{quote(entry_id, safe='')}"
-        )
-        if status != 200 or not isinstance(diag, dict):
-            self._diagnostics_failed.add(entry_id)
-            log(f"No diagnostics for entry {entry_id}; not asked again")
-            return None
-        data = diag.get("data") if isinstance(diag.get("data"), dict) else diag
-        config = data.get("config_entry") if isinstance(data, dict) else None
-        return config if isinstance(config, dict) else None
-
-    def _match_stored(self, host: str, port: int, stored: list[dict[str, Any]]) -> str | None:
-        """The stored field agent at host:port, compared on the stored address
-        and on the IPv4 address both names resolve to."""
-        host = host.lower()
-        candidates = [h for h in stored if h["port"] == port]
-        for item in candidates:
-            if item["address"] == host:
-                return host_id(item["address"], item["port"])
-        wanted = cached_ipv4(host)
-        if wanted is None:
-            return None
-        for item in candidates:
-            if cached_ipv4(item["address"]) == wanted:
-                return host_id(item["address"], item["port"])
-        return None
-
-    def _entry_target(self, entry: dict[str, Any], stored: list[dict[str, Any]]) -> str | None:
-        """Which target an entry belongs to: "self", "replicas", a stored
-        host's id, or None. Decided from the title the config flow wrote, and
-        for a zeroconf title (hostname only) from the entry's diagnostics."""
-        match = _TITLE_RE.match(str(entry.get("title") or ""))
-        if not match:
-            return None
-        inner = match.group("inner").strip()
-        own = self._own_hosts()
-        host, sep, port_text = inner.rpartition(":")
-        if sep and port_text.isdigit():
-            port = int(port_text)
-            if host.lower() in own:
-                if port == self.agent_port:
-                    return "self"
-                if port == self.mock_port:
-                    return "replicas"
-                return None
-            return self._match_stored(host, port, stored)
-        config = self._entry_config(entry)
-        port = valid_port(config.get("port")) if config else None
-        if inner.lower() in own:
-            # Both of this app's agents advertise the container hostname, so
-            # the port tells them apart; without it the entry is the agent's.
-            return "replicas" if port == self.mock_port else "self"
-        if config is None or port is None:
-            return None
-        found = self._match_stored(str(config.get("host") or ""), port, stored)
-        return found or self._match_stored(inner, port, stored)
-
-    def _stale_ok(self) -> bool:
-        """Whether a cached Home Assistant answer past its time may be used
-        while a new one is read behind it. Off when caching is (tests)."""
-        return type(self).ha_cache_seconds > 0
-
-    def _in_background(self, key: str, work: Callable[[], None]) -> None:
-        """Run work() in a thread, unless one for the same key still runs."""
-        cls = type(self)
-        with cls._bg_lock:
-            if key in cls._bg_running:
-                return
-            cls._bg_running.add(key)
-
-        def run() -> None:
-            try:
-                work()
-            except Exception as err:  # noqa: BLE001 -- a refresh never takes the server down
-                log(f"Background refresh {key} failed: {type(err).__name__}: {err}")
-            finally:
-                with cls._bg_lock:
-                    cls._bg_running.discard(key)
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _drop_ha_cache(self) -> None:
-        """Forget the cached lookup; the next one reads Home Assistant now."""
-        cls = type(self)
-        cls._ha_gen += 1
-        cls._ha_cache = None
-
-    def _ha_lookup(self, fresh: bool = False, allow_stale: bool = False) -> dict[str, Any]:
-        """The /ha/devices answer, cached ha_cache_seconds (30 s); dropped
-        after any /ha/add. One lookup runs at a time; callers that arrive
-        while it runs wait for it and share its answer. allow_stale: an
-        answer past its time is returned at once and a new one is read in
-        the background (drive reads, which must not wait on Core)."""
-        cls = type(self)
-        cached = cls._ha_cache
-        if not fresh and cached and time.monotonic() - cached[0] < cls.ha_cache_seconds:
-            return cached[1]
-        if not fresh and allow_stale and cached and self._stale_ok():
-            self._in_background("ha_lookup", lambda: self._ha_lookup(fresh=True))
-            return cached[1]
-        started = time.monotonic()
-        with cls._ha_lock:
-            cached = cls._ha_cache
-            # Another caller finished a lookup while this one waited.
-            if cached and cached[0] >= started:
-                return cached[1]
-            if not fresh and cached and time.monotonic() - cached[0] < cls.ha_cache_seconds:
-                return cached[1]
-            gen = cls._ha_gen
-            result = self._ha_lookup_now()
-            if cls._ha_gen == gen:
-                cls._ha_cache = (time.monotonic(), result)
-            return result
-
-    def _ha_lookup_now(self) -> dict[str, Any]:
-        """One lookup of the integration's entries and devices in Core."""
+    def _integration(self, fresh: bool = False) -> dict[str, Any]:
+        """What the page shows about the integration: the full-width card's
+        state, the Create line, and the closed cards."""
         sv = self.supervisor
         result: dict[str, Any] = {
-            "installed": None, "reachable": False, "lookup": None,
-            "integration_url": INTEGRATION_URL, "targets": {}, "hacs": None,
+            "reachable": False, "state": None, "version": None, "panel": None,
+            "panel_path": DEFAULT_PANEL_PATH, "haos_entry": None, "create": False,
+            "hacs": None, "integration_url": INTEGRATION_URL,
+            "dismissed": {"install": False, "update": False},
         }
-        if sv.available and sv.core_reachable():
-            entries = sv.entries() or []
+        if sv.available and sv.core_reachable_cached():
             result["reachable"] = True
-            result["installed"] = sv.integration_installed(entries)
-            if result["installed"] is False:
+            found = self.watch.get(fresh=fresh)
+            result.update({k: found.get(k) for k in
+                           ("state", "version", "panel", "panel_path", "haos_entry")})
+            state = result["state"]
+            if state == STATE_MISSING:
                 # The install guide names HACS first when it is missing too.
                 result["hacs"] = sv.hacs_installed()
-            elif result["installed"]:
-                # Seen installed: a notice dismissed before may show again
-                # if the integration is ever removed.
+            elif state is not None:
+                # Seen installed: a closed install card may show again if the
+                # integration is ever removed.
                 self.app_state.set(NOTICE_DISMISSED, False)
-            stored = self.host_store.hosts_quick()
-            targets: dict[str, dict[str, Any]] = {}
-            for entry in entries:
-                key = self._entry_target(entry, stored)
-                entry_id = entry.get("entry_id")
-                if key and key not in targets and isinstance(entry_id, str):
-                    targets[key] = {
-                        "entry_id": entry_id,
-                        "entry_url": f"{INTEGRATION_URL}#config_entry={quote(entry_id, safe='')}",
-                        "state": entry.get("state"),
-                        "devices": {},
-                        "names": {},
-                        "identifiers": {},
-                    }
-            status, devices = sv.call("POST", "/core/api/template",
-                                      {"template": DEVICES_TEMPLATE})
-            if status == 200 and isinstance(devices, list):
-                result["lookup"] = "registry"
-                by_entry = {t["entry_id"]: t for t in targets.values()}
-                for device in devices:
-                    if not isinstance(device, dict) or not isinstance(device.get("id"), str):
-                        continue
-                    for entry_id in device.get("config_entries") or []:
-                        target = by_entry.get(entry_id)
-                        if target is None:
-                            continue
-                        names = {k: device.get(k) if isinstance(device.get(k), str) else None
-                                 for k in ("name", "name_by_user")}
-
-                        def put(key: str) -> None:
-                            target["devices"][key] = device["id"]
-                            target["names"][key] = names
-
-                        prefix = f"{entry_id}_zpool_"
-                        ours = [str(i[1]) for i in device.get("identifiers") or []
-                                if isinstance(i, list) and len(i) == 2
-                                and i[0] == INTEGRATION_DOMAIN]
-                        # A drive device's identifier is the agent's drive id;
-                        # the agent, Disk Usage and pool devices carry the
-                        # entry id in theirs.
-                        drive_ident = next((i for i in ours if not i.startswith(f"{entry_id}_")), None)
-                        serial = device.get("serial_number")
-                        if isinstance(serial, str) and serial:
-                            put(serial)
-                            if drive_ident is not None:
-                                target["identifiers"][serial] = drive_ident
-                        for ident in device.get("identifiers") or []:
-                            if not (isinstance(ident, list) and len(ident) == 2
-                                    and ident[0] == INTEGRATION_DOMAIN):
-                                continue
-                            if str(ident[1]).startswith(prefix):
-                                put(f"pool:{str(ident[1])[len(prefix):]}")
-                            elif not serial and not str(ident[1]).startswith(f"{entry_id}_"):
-                                # A drive with no serial is known by its drive id.
-                                put(f"id:{ident[1]}")
-                                target["identifiers"][f"id:{ident[1]}"] = str(ident[1])
-            else:
-                result["lookup"] = "entries_only"
-            result["targets"] = targets
+            if state in PANEL_STATES:
+                # Seen at 0.9 or later: a closed update card may show again
+                # after a downgrade.
+                self.app_state.set(UPDATE_DISMISSED, False)
+            result["create"] = ((state == STATE_LOADED and result["haos_entry"] is False)
+                                or state == STATE_NO_ENTRIES)
+        result["dismissed"] = {"install": bool(self.app_state.get(NOTICE_DISMISSED)),
+                               "update": bool(self.app_state.get(UPDATE_DISMISSED))}
         return result
 
-    def _route_ha_devices(self, _parsed) -> None:
-        lookup = self._ha_lookup()
-        self._send_json(200, {**lookup, "ha_removal": self._ha_removals(lookup),
-                              "notice_dismissed": bool(self.app_state.get(NOTICE_DISMISSED))})
+    def _route_handover(self, _parsed) -> None:
+        """Send the field machines to the integration again now (a manual
+        retry; the page has no button for it). Only once the integration
+        takes a handover."""
+        if self.handover is None:
+            raise ApiError(503, "supervisor_unavailable", "the Supervisor is not available")
+        self.handover.trigger()
+        self._send_json(202, {"queued": True})
 
     def _route_notice_dismiss(self, _parsed) -> None:
-        """The integration notice, dismissed for every browser until the
-        integration is seen installed."""
-        self.app_state.set(NOTICE_DISMISSED, True)
-        self._send_json(200, {"notice_dismissed": True})
-
-    def _ha_removals(self, lookup: dict[str, Any]) -> dict[str, str]:
-        """Card id -> what the trash can do in Home Assistant (see
-        ha_removal_mode), for every card of a machine with an entry; cards
-        not in Home Assistant are left out. Worked out on each request, as
-        the last card of a machine changes with every removal. HAOS cards
-        have no trash, so none of theirs is here."""
-        out: dict[str, str] = {}
-        if not lookup.get("reachable") or lookup.get("installed") is False:
-            return out
-        entries_only = lookup.get("lookup") == "entries_only"
-        hosts = {host_id(h["address"], h["port"]): h for h in self.host_store.hosts_quick()}
-        for key, target in (lookup.get("targets") or {}).items():
-            if key == "self" or (key != "replicas" and key not in hosts):
-                continue
-            response = self.cache.get(key).get("response")
-            if not isinstance(response, dict):
-                continue
-            shown = response if key == "replicas" else \
-                without_removed(response, hosts[key].get("removed") or [])
-            cards = card_list(shown)
-            # A replica's FILESYSTEM card has no trash; a machine's counts,
-            # as removing the last card takes the machine. Hidden cards
-            # count as shown, as they do for that.
-            counted = [c for c in cards if key != "replicas" or c.get("type") in ("drive", "pool")]
-            for card in cards:
-                card_key = split_card_id(card["card_id"])[1] or ""
-                mode = ha_removal_mode(card.get("type"), card_key, target, response,
-                                       len(counted) == 1 and card is counted[0], entries_only,
-                                       replica=key == "replicas")
-                if mode is not None:
-                    out[card["card_id"]] = mode
-        return out
+        """The install card (no integration) or the update card (0.8.x),
+        closed for every browser until the integration is seen installed, or
+        seen at 0.9 or later."""
+        try:
+            body = self._read_json()
+        except ApiError:
+            body = {}
+        which = body.get("notice", "install") if isinstance(body, dict) else "install"
+        if which not in ("install", "update"):
+            raise ApiError(400, "bad_request", 'notice must be "install" or "update"')
+        self.app_state.set(NOTICE_DISMISSED if which == "install" else UPDATE_DISMISSED, True)
+        self._send_json(200, {"notice": which, "dismissed": True,
+                              "notice_dismissed": bool(self.app_state.get(NOTICE_DISMISSED))})
 
     # ── /ha/add ──
 
     def _route_ha_add(self, _parsed) -> None:
         body = self._read_json()
         target = body.get("target") if isinstance(body, dict) else None
-        if target == "self":
-            host, port, token = self.agent_host, self.agent_port, self.token
-        elif target == "replicas":
-            host, port, token = self.agent_host, self.mock_port, ""
-        elif isinstance(target, str):
-            stored = next((h for h in self.host_store.hosts()
-                           if host_id(h["address"], h["port"]) == target), None)
-            if stored is None:
-                raise ApiError(400, "bad_target", 'target must be "self", "replicas" or a field agent id')
-            host, port, token = stored["address"], stored["port"], stored.get("password") or ""
-        else:
-            raise ApiError(400, "bad_target", 'target must be "self", "replicas" or a field agent id')
+        if target != "self":
+            raise ApiError(400, "bad_target", 'target must be "self"')
         try:
-            outcome, code = self._ha_add(target, host, port, token)
+            outcome, code = self._ha_add(self.agent_host, self.agent_port, self.token)
         finally:
-            self._drop_ha_cache()
-            self.supervisor.forget_installed()
-        if outcome.get("result") in ("created", "reloaded", "already_added"):
-            copied = self._copy_thresholds(target)
-            if copied:
-                outcome["thresholds_copied"] = copied
+            self.watch.forget()
         self._send_json(code, outcome)
 
-    def _ha_add(self, target: str, host: str, port: int, token: str) -> tuple[dict[str, Any], int]:
+    def _ha_add(self, host: str, port: int, token: str) -> tuple[dict[str, Any], int]:
         def failed(message: str) -> tuple[dict[str, Any], int]:
             return {"error": "add_failed", "result": "error", "message": message}, 502
 
-        lookup = self._ha_lookup(fresh=True)
-        if not lookup["reachable"]:
-            return failed("unreachable")
-        existing = lookup["targets"].get(target)
         sv = self.supervisor
-        if existing:
-            entry_id = existing["entry_id"]
-            if target != "replicas":
-                return {"result": "already_added", "entry_id": entry_id}, 200
-            # All replicas share one entry: reload it so a new replica shows
-            # now rather than at the next poll.
-            status, _ = sv.core(
-                "POST", f"/config/config_entries/entry/{quote(entry_id, safe='')}/reload"
-            )
-            if status != 200:
-                return failed("flow_failed")
-            return {"result": "reloaded", "entry_id": entry_id}, 200
+        if not (sv.available and sv.core_reachable()):
+            return failed("unreachable")
+        found = self.watch.get(fresh=True)
+        if found.get("state") == STATE_LOADED and found.get("haos_entry") is True:
+            return {"result": "already_added", "entry_id": None}, 200
 
         status, flow = sv.core("POST", "/config/config_entries/flow", {
             "handler": INTEGRATION_DOMAIN,
@@ -4748,7 +2763,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             sv.core("DELETE", flow_path)  # do not leave a half-finished flow behind
         outcome = self._flow_outcome(step)
         if outcome[0].get("result") == "created":
-            log(f"Integration entry added for {target}")
+            log("Integration entry added for this box")
         return outcome
 
     @staticmethod
@@ -4781,7 +2796,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         """Forward a request to a backend service and relay the response."""
         try:
             # Read request body if present
-            content_length = int(self.headers.get("Content-Length", 0))
+            # parse_request() checked it: a number from 0 to MAX_BODY
+            content_length = int(self.headers.get("Content-Length", 0) or 0)
             body = self.rfile.read(content_length) if content_length > 0 else None
 
             # Build headers to forward (skip hop-by-hop)
@@ -4794,7 +2810,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             # Inject bearer token for ingress requests (HA's ingress proxy
             # doesn't know our token, so the web UI can't authenticate).
-            # This is safe: only localhost can reach this proxy.
+            # parse_request() has already refused every client but the
+            # ingress gateway and loopback, so no one else gets the token's
+            # access this way.
             if inject_token and self.token and "Authorization" not in headers:
                 headers["Authorization"] = f"Bearer {self.token}"
 
@@ -4905,8 +2923,6 @@ def main():
     parser = argparse.ArgumentParser(description="SMART Sniffer Web UI Proxy")
     parser.add_argument("--port", type=int, default=8099, help="Port to listen on")
     parser.add_argument("--agent-port", type=int, default=9099, help="This app's agent port")
-    parser.add_argument("--mock-port", type=int, default=9100, help="Replica agent port")
-    parser.add_argument("--token", type=str, default="", help="Bearer token for agent auth")
     parser.add_argument("--app-version", type=str, default=os.environ.get("APP_VERSION") or None,
                         help="App version shown on the page (default: $APP_VERSION)")
     parser.add_argument("--rules-dir", type=str, default=DEFAULT_RULES_DIR,
@@ -4914,30 +2930,22 @@ def main():
     parser.add_argument("--supervisor-url", type=str, default="http://supervisor",
                         help="Supervisor API base URL")
     parser.add_argument("--agent-host", type=str, default=DEFAULT_AGENT_HOST,
-                        help="Hostname Home Assistant uses to reach this app's agents "
+                        help="Hostname Home Assistant uses to reach this app's agent "
                              "(run.sh passes the container hostname)")
     parser.add_argument("--mdns-name", type=str, default="",
                         help="The agent's mDNS name, shown on the page (empty: none)")
     parser.add_argument("--ha-cache-seconds", type=float, default=HA_API_CACHE_SECONDS,
-                        help="How long /ha/devices is cached")
-    parser.add_argument("--ha-replica-seconds", type=float, default=HA_REPLICA_SETTLE_SECONDS,
-                        help="How long a replica's removal keeps asking Home Assistant "
-                             "to delete its device")
-    parser.add_argument("--agentic-memo-seconds", type=float, default=AGENTIC_MEMO_SECONDS,
-                        help="How long one Agentic access document is reused")
-    parser.add_argument("--agentic-max-age-seconds", type=float, default=AGENTIC_MAX_AGE_SECONDS,
-                        help="How old this machine's and the replicas' cached read may be "
-                             "before Agentic access reads them again")
+                        help="How long one lookup of the integration is used")
     parser.add_argument("--static-dir", type=str, default=STATIC_DIR,
                         help="Where the page, its scripts and images are")
     parser.add_argument("--data-dir", type=str, default="/data",
-                        help="Where fleet-cache.json is kept (empty: memory only)")
+                        help="Where app-state.json is kept (empty: memory only)")
     args = parser.parse_args()
 
     ProxyHandler.agent_port = args.agent_port
-    ProxyHandler.mock_port = args.mock_port
     ProxyHandler.static_dir = args.static_dir
-    ProxyHandler.token = args.token
+    # The agent token, from the environment so it never shows on a command line
+    ProxyHandler.token = os.environ.get("AGENT_TOKEN", "")
     ProxyHandler.app_version = args.app_version
     ProxyHandler.agent_host = args.agent_host.strip() or DEFAULT_AGENT_HOST
     ProxyHandler.mdns_name = args.mdns_name.strip() or None
@@ -4945,30 +2953,34 @@ def main():
     ProxyHandler.supervisor = Supervisor(
         args.supervisor_url, os.environ.get("SUPERVISOR_TOKEN", "")
     )
-    ProxyHandler.ha_cache_seconds = args.ha_cache_seconds
-    ProxyHandler.ha_replica_seconds = args.ha_replica_seconds
-    ProxyHandler.agentic_memo_seconds = args.agentic_memo_seconds
-    ProxyHandler.agentic_max_age_seconds = args.agentic_max_age_seconds
-    ProxyHandler.cache = FleetCache(
+    ProxyHandler.options = LegacyOptions(ProxyHandler.supervisor)
+    ProxyHandler.cache = ReadCache(
         os.path.join(args.data_dir, "fleet-cache.json") if args.data_dir else None
     )
-    ProxyHandler.host_store = HostStore(ProxyHandler.supervisor, ProxyHandler.cache)
     ProxyHandler.app_state = AppState(
         os.path.join(args.data_dir, "app-state.json") if args.data_dir else None
     )
+    discovery = Discovery(ProxyHandler.supervisor, ProxyHandler.app_state,
+                          ProxyHandler.agent_host, ProxyHandler.agent_port)
+    ProxyHandler.watch = IntegrationWatch(ProxyHandler.supervisor, discovery,
+                                          args.ha_cache_seconds)
+    ProxyHandler.handover = Handover(ProxyHandler.supervisor, ProxyHandler.app_state,
+                                     ProxyHandler.watch, args.data_dir or None,
+                                     ProxyHandler.options.lock)
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), ProxyHandler)
     server.daemon_threads = True
     log(f"Serving on port {args.port}")
     log(f"Proxying /api/* -> 127.0.0.1:{args.agent_port}")
-    log(f"Proxying /mock/* -> 127.0.0.1:{args.mock_port}")
     log(f"Integration rules: {ProxyHandler.rules.version or 'not found'}")
     log(f"Agent host for the integration: {ProxyHandler.agent_host}")
     if not ProxyHandler.supervisor.available:
-        log("No Supervisor token: field agents cannot be stored and Home Assistant routes are off")
+        log("No Supervisor token: the Home Assistant routes and the discovery are off")
     else:
-        threading.Thread(target=drop_stale_options, args=(ProxyHandler.host_store,),
+        threading.Thread(target=drop_stale_options, args=(ProxyHandler.options,),
                          daemon=True).start()
+        threading.Thread(target=ProxyHandler.watch.run, daemon=True).start()
+        threading.Thread(target=ProxyHandler.handover.run, daemon=True).start()
 
     try:
         server.serve_forever()
