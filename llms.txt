@@ -3,11 +3,13 @@
 > SMART Sniffer App is a Home Assistant OS add-on that monitors the health of the
 > drives in the HAOS machine -- the SSD or NVMe that Home Assistant OS runs on and any
 > other drive it can see. It runs a lightweight S.M.A.R.T. agent inside the HA
-> supervisor and shows drive health on its own page, the Control Center. The SMART
-> Sniffer HACS integration is optional: it turns the same data into native HA entities.
+> supervisor and shows this box's drives, read only, on its own page ("SMART Sniffer
+> App"). The SMART Sniffer HACS integration (v0.9+) turns the data into native HA
+> entities and has the Control Center for every machine.
 
-The agent in this add-on reads the drives inside the Home Assistant OS machine itself.
-Other machines run the standalone agent; the Control Center can show their drives too.
+Same Control Center. The App adds the drives of the box Home Assistant runs on. Install
+the integration for everything else: other machines run the standalone agent, and the
+integration's Control Center (a "SMART Sniffer" sidebar page for admins) shows them all.
 
 Key behaviors:
 - Reads S.M.A.R.T. data from the HAOS host drive via smartctl inside the HA container.
@@ -17,20 +19,22 @@ Key behaviors:
 - Advertises itself via mDNS so the SMART Sniffer integration can auto-discover it.
   The mDNS name is unique per HA instance (smartha-<ha-hostname>) to avoid collisions
   on multi-HA networks. Manual fallback: host 0449a086-smart-sniffer-agent, port 9099.
-- Includes replicas: fake drives and pools with SMART data you control, for safely
-  testing the integration without real hardware. A replica agent inside the add-on
-  serves them, and replica files survive restarts and updates.
+- With integration v0.9+ installed, posts a Supervisor discovery (service
+  smart_sniffer, host and port only) so HA offers the agent as "SMART Sniffer (HAOS)".
+- App 0.4.0 hands the field machines its 0.3.x page kept (address, port, password,
+  names, hidden cards, order, thresholds) to integration v0.9+ once, and removes each
+  from its options when the integration confirms it.
+- Replicas (test drives) moved into the integration in App 0.4.0 / integration v0.9;
+  the add-on no longer runs a replica agent.
 - Shows disk space for USB drives mounted under /media (read-only) and for the data
   disk, also after the "move data disk" function puts it on an external drive. The drives
   are found when the add-on starts.
-- The web UI (the Control Center page) is accessible from the HA add-on sidebar. It shows
-  this machine's drives, the replicas, and drives on other network machines that run
-  the SMART Sniffer agent (field agents).
-- Agentic access: a link in the Control Center footer opens all drive data as one JSON
-  document for AI assistants and scripts (<ingress>/agentic-access, raw JSON at
-  agentic-access.json): every agent, each drive's smartctl data and verdict, ZFS pools,
-  filesystems, and a guide to the fields and the smart_sniffer.get_drive_data action.
-  Behind the Home Assistant login (ingress only); tokens are never included.
+- The web UI is accessible from the HA sidebar as "SMART Sniffer App". It shows this
+  machine's drives, pools and filesystems, read only, with a card that opens the
+  integration's Control Center, or says how to install, update or finish updating
+  (restart) the integration.
+- Agentic access moved to the integration (Control Center footer, and
+  /api/smart_sniffer/agentic.json for admin long-lived tokens).
 - On some hardware, Protection Mode must be turned OFF (Settings -> Apps -> SMART
   Sniffer -> Protection mode) for the add-on to access drive device nodes.
 
@@ -40,17 +44,17 @@ Configuration options:
 - Agent Port (default: 9099)
 - Bearer Token (optional, must match what is configured in the integration)
 - Scan Interval in seconds (default: 60)
-- Replica Agent Port (default: 9100)
-- Field Agents, Card Order, Hidden Cards, Thresholds, Card Names, Machine Names (set
-  from the Control Center)
+- Field Agents, Card Order, Hidden Cards, Thresholds, Card Names, Machine Names: what
+  App 0.3.x kept. Field machines' entries are handed to the integration and removed;
+  this box's thresholds still judge its cards on the App page.
 
 What this add-on is NOT:
 - Not an agent for remote machines -- install the standalone Go agent from smart-sniffer
-  on NAS, Proxmox, workstations, Macs, and other machines; the Control Center shows
-  them as field agents.
-- Not a replacement for the integration -- the Control Center works without it, but
-  entities, history, notifications and automations come from the SMART Sniffer HACS
-  integration.
+  on NAS, Proxmox, workstations, Macs, and other machines, and add them in the
+  integration's Control Center.
+- Not a replacement for the integration -- the App's page shows this box without it,
+  but other machines, entities, history, notifications, automations and replicas come
+  from the SMART Sniffer HACS integration.
 - Not available on HACS -- install by adding the repo URL to the HA add-on store.
 - Not compatible with virtual disks (Proxmox VMs and similar) -- virtual drives may
   not support SMART commands.
@@ -58,15 +62,15 @@ What this add-on is NOT:
 ## Repositories
 
 - [smart-sniffer-app (this repo)](https://github.com/DAB-LABS/smart-sniffer-app):
-  Add-on source (smart_sniffer_agent/), configuration schema (repository.yaml),
-  replica agent, and the Control Center page.
+  Add-on source (smart_sniffer_agent/), configuration schema (repository.yaml), and
+  the App's read-only page.
 - [smart-sniffer](https://github.com/DAB-LABS/smart-sniffer): Primary repo. HACS
   integration, standalone Go agent for remote machines, and all project documentation.
 
 ## Documentation
 
 - [README](https://github.com/DAB-LABS/smart-sniffer-app/blob/main/README.md):
-  Installation steps, configuration reference, Control Center and replicas, Security and Permissions
+  Installation steps, configuration reference, the App's page, upgrading from 0.3.x, Security and Permissions
   section (why SYS_RAWIO/SYS_ADMIN are needed), and troubleshooting guide.
 - [CHANGELOG](https://github.com/DAB-LABS/smart-sniffer-app/blob/main/CHANGELOG.md):
   Release history for the add-on.

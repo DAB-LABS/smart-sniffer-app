@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0 -- Unreleased
+
+SMART Sniffer is evolving, for the better. The Control Center now lives in the SMART Sniffer integration, with all your machines in one place. This App keeps watching this Home Assistant box's drives and shows them on its own page. Update the integration to 0.9 first, restart Home Assistant, then update this App. Your 0.3.x machines move to the integration by themselves; replicas need to be created again there.
+
+### Changed
+- This box, read only: the page shows this machine's drives, pools and filesystems, in the same design as the Control Center. A card below them opens the Control Center, or explains how to install or update the integration.
+- The sidebar entry is now "SMART Sniffer App", and the page header reads "SMART SNIFFER | App · HAOS". No Refresh button: the page updates itself every 30 seconds.
+- Drive cards match the Control Center: the at-a-glance row, the Details header, Device Statistics, and click-to-copy values.
+- "Create sensors and alerts for HAOS" appears under the drives until the integration has this box.
+- Home Assistant finds this box for you: with integration 0.9 or later, it is offered as "SMART Sniffer (HAOS)".
+- Your 0.3.x machines move to the integration once, with their addresses, passwords, names, hidden cards, order and thresholds.
+- Ships agent v0.9.0.
+
+### Security
+- The App's page answers only Home Assistant's ingress.
+- The Bearer Token option shows as dots and is never passed on a command line.
+
+### Removed
+- Replicas (now in the integration, on every install type) and Agentic access (now in the Control Center). The Replica Agent Port option is removed at start.
+
+### Upgrade notes
+- Update the integration first. Next to integration 0.8.x, the App shows an update card and keeps your machines until you do.
+- This box's thresholds from 0.3.x still apply on the App's page.
+
 ## 0.3.1 -- 2026-10-17
 
 Adds **Agentic access**: everything the Control Center knows, as one JSON document for an AI assistant or a script. Disk space now shows for USB drives and the data disk, a Mac's filesystems sit on their drive's card, the page no longer opens blank while Home Assistant is busy, and the app ships with agent and rules from smart-sniffer v0.8.4.
