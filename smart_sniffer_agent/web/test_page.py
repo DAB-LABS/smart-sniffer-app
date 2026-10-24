@@ -957,7 +957,7 @@ def test_device_statistics_table_takes_the_stand_in_rows(open_page):
     attrs.wait_for()
     # The page 4 count is not in the attribute table but in Device
     # Statistics, under its own small heading, inside the same Details.
-    assert attrs.locator("tr", has_text="Reported uncorrectable").count() == 0
+    assert "from device statistics" not in attrs.inner_text().lower()
     assert c.locator(".details .devstat h4").inner_text().lower() == "device statistics"
     ds = c.locator("table.devstat-t")
     names = ds.locator("td.nm .lb").all_inner_texts()
@@ -1282,3 +1282,38 @@ def test_screenshots(open_page):
         by_id(p, BARRACUDA).locator(".chev").click()
         p.page.wait_for_timeout(300)
         p.page.screenshot(path=str(SHOTS / f"app-1-create-confirm-details-{width}.png"), full_page=True)
+
+
+# ── 0.4.1 ───────────────────────────────────────────────────────────────────
+
+
+def test_details_open_on_a_page_that_just_fits(browser, server):
+    """Test box, 2026-10-23 (integration page, same code): on a page short
+    enough to need no scrollbar, opening a card's Details froze the tab.
+    The taller page brought a scrollbar, the cards narrowed, and the row
+    aligner measured again with the card closed (no scrollbar, wider) and
+    open (scrollbar, narrower) without end. Chromium here keeps real
+    scrollbars that take width (headless hides them by default)."""
+    kwargs = {"ignore_default_args": ["--hide-scrollbars"]}
+    if os.environ.get("PW_CHROMIUM"):
+        kwargs["executable_path"] = os.environ["PW_CHROMIUM"]
+    scrollbars = browser.browser_type.launch(**kwargs)
+    p = Page(scrollbars, server)
+    try:
+        doc = p.page
+        assert doc.evaluate("document.documentElement.scrollHeight") <= 900
+        cards = doc.locator("article.card")
+        opened = 0
+        for i in range(cards.count()):
+            chev = cards.nth(i).locator("button.chev")
+            if not chev.count():
+                continue
+            chev.first.click(timeout=4000)
+            # A frozen page answers nothing; this times out there.
+            assert doc.evaluate("() => new Promise((r) => setTimeout(() => r(true), 200))")
+            chev.first.click(timeout=4000)
+            opened += 1
+        assert opened
+        p.close()
+    finally:
+        scrollbars.close()

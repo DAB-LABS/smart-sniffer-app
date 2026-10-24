@@ -1,6 +1,6 @@
 name: "SMART Sniffer App"
 description: "Drive health for the drives in this Home Assistant box, on its own page. The SMART Sniffer integration adds your other machines, entities, history, notifications and automations."
-version: "0.4.0"
+version: "0.4.1"
 slug: "smart_sniffer_agent"
 url: "https://github.com/DAB-LABS/smart-sniffer-app"
 arch:
