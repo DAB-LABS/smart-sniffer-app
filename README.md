@@ -60,11 +60,9 @@ https://github.com/DAB-LABS/smart-sniffer-app
 The integration turns drive data into Home Assistant entities, history, notifications and automations, and has the Control Center for all your machines. Use version 0.9 or later.
 
 1. Install [HACS](https://hacs.xyz) if you don't have it
-2. In HACS, click the **three-dot menu** > **Custom repositories**
-3. Add `https://github.com/DAB-LABS/smart-sniffer` with category **Integration**
-4. Search for **SMART Sniffer** in HACS, download it, and restart Home Assistant
-5. Add this box: press **Create sensors and alerts for HAOS** under DRIVES on the App's page, or **Add** on the **SMART Sniffer (HAOS)** card Home Assistant shows under **Settings > Devices & Services**
-6. Open the Control Center with **Open** on the card under the drives, or **SMART Sniffer** in the sidebar
+2. In HACS, search for **SMART Sniffer**, download it, and restart Home Assistant
+3. Add this box: press **Create sensors and alerts for HAOS** under DRIVES on the App's page, or **Add** on the **SMART Sniffer (HAOS)** card Home Assistant shows under **Settings > Devices & Services**
+4. Open the Control Center with **Open** on the card under the drives, or **SMART Sniffer** in the sidebar
 
 To add this box by hand instead: **Settings > Devices & Services > Add Integration > SMART Sniffer**, then the host and port from the app's startup log (`Integration host:`), for example `0449a086-smart-sniffer-agent` and port `9099`.
 
