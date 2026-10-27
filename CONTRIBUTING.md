@@ -1,92 +1,106 @@
 # Contributing to SMART Sniffer App
 
-Thanks for your interest in contributing! This project monitors the health of Home Assistant system drives, and every improvement helps keep people's systems safer.
+Thanks for your interest in contributing. This App watches the drives of the machine Home Assistant runs on, and every improvement helps keep people's systems safer.
 
-## Getting Started
+## Getting started
 
-1. **Fork** this repo and clone your fork
-2. Create a feature branch: `git checkout -b my-feature`
-3. Make your changes
-4. Push and open a Pull Request against `main`
+1. **Fork** this repo and clone your fork.
+2. Create a feature branch: `git checkout -b my-feature`.
+3. Make your changes, and run the tests (below).
+4. Push and open a pull request against `main`.
 
-## Development Setup
+## How the App is built
 
-The app runs as an HA add-on, so you'll need a Home Assistant instance for testing.
+- **The agent** (`smartha-agent`) reads SMART data from the host's drives with `smartctl`, serves it over HTTP on port 9099, and advertises itself with mDNS. It is the same Go agent the [integration repo](https://github.com/DAB-LABS/smart-sniffer) releases. The Dockerfile downloads it from the release named by `SS_TAG`, along with the integration's rule modules, so an App version always ships the agent and rules of the version it names.
+- **The page** (`smart_sniffer_agent/web/`) is the App's read-only page, served through Home Assistant's ingress by `web/proxy.py`. It shows this box's drives, pools and filesystems in the same design as the integration's Control Center, judged by the integration's own rules. `proxy.py` also posts the Supervisor discovery that lets the integration find this box, and hands the machines App 0.3.x kept over to the integration.
+- **Startup** (`run.sh`, `mounts.py`) reads the App's options, writes the agent's config (disk space mounts, and the token, root only), and starts the agent and the page.
 
-### Local Development (SAMBA)
+Everything else, other machines, replicas, entities and the Control Center, lives in the [SMART Sniffer integration](https://github.com/DAB-LABS/smart-sniffer).
 
-1. Enable the **Samba** add-on in HA
-2. Mount the `addons` share on your machine
-3. Copy the `smart_sniffer_agent/` folder into the `addons` share
-4. In HA, go to **Settings → Add-ons → Add-on Store**, click **⋮ → Check for updates**
-5. Install the local add-on and check the logs
+## Development setup
 
-### Repository Install (HACS)
+### The page, without Home Assistant
 
-1. Fork the repo and push your changes
-2. Add your fork as a custom repository in **Settings → Add-ons → Repositories**
-3. Install and test from there
+`web/devserver.py` serves the page and fakes every route it calls, so you can work on it without the App, the agent or Home Assistant. It needs Python 3.9 or later and the real Alpine and Tailwind files (the repo keeps placeholders):
 
-### Replicas
+```bash
+./setup-dev.sh                       # downloads alpine.min.js and tailwind.min.js into web/
+cd smart_sniffer_agent/web
+python3 devserver.py                 # http://127.0.0.1:8099/
+```
 
-Test without touching real hardware with replicas: fake drives and pools that the app's replica agent always serves. Add them on the Control Center page from the + card, switch their scenarios or edit raw values on their cards, and add them to Home Assistant with the exit icon. To the integration they look like real drives, so you can watch it respond.
+Switches in the environment or the page's query string pick what it shows, for example `?DRIVES=mixed&POOL=degraded` or `?INTEGRATION=missing`. The top of `devserver.py` lists them all. Point `SS_RULES_DIR` at an integration checkout's `custom_components` folder for the real verdicts. Do not commit the downloaded vendor files.
 
-## What Can You Work On?
+### The App, on a Home Assistant box
 
-Check the [TODO.md](TODO.md) for tracked items, or look at [open issues](https://github.com/DAB-LABS/smart-sniffer-app/issues). Good first contributions include:
+1. Install the **Samba share** App and mount the `addons` share on your machine.
+2. Run `./setup-dev.sh`, then copy the `smart_sniffer_agent/` folder into the `addons` share.
+3. In Home Assistant, go to **Settings > Apps > App Store**, open the three-dot menu and choose **Check for updates**.
+4. Install the local App and check its log.
 
-- Testing on Raspberry Pi (armv7, aarch64) and reporting results
-- Web UI improvements
+Or push your fork and add it as a repository: **Settings > Apps > App Store**, three-dot menu, **Repositories**.
+
+## Tests
+
+```bash
+pip install pytest playwright
+cd smart_sniffer_agent
+python3 -m pytest test_mounts.py test_dockerfile.py
+python3 -m pytest web
+```
+
+The `web/` tests drive the page in Chromium through Playwright and need the real vendor files: run `./setup-dev.sh` first, or set `VENDOR_DIR` to a folder that holds them. Run them one at a time (no `-n`); some share state.
+
+`test_dockerfile.py` fails if the agent is not downloaded from the `SS_TAG` release.
+
+## What can you work on?
+
+Check [TODO.md](TODO.md) for tracked items, or look at the [open issues](https://github.com/DAB-LABS/smart-sniffer-app/issues). Good first contributions include:
+
+- Testing on Raspberry Pi (aarch64) and reporting results
+- Improvements to the page
 - Documentation and troubleshooting guides
-- Bug reports with logs and system info
+- Bug reports with logs and system details
 
-## Architecture Overview
+## Code style
 
-The app has three main components:
+- **Shell scripts**: bash, `shellcheck` clean, arguments in arrays and quoted.
+- **Python**: standard library only in the App.
+- **The page**: plain HTML, CSS and JavaScript with Alpine.js and Tailwind, no build step. It follows the integration's Control Center panel; keep the two in step.
+- **Commits**: short, descriptive messages. Reference issue numbers when there is one.
 
-- **Go Agent** (`smartha-agent`) — reads SMART data from host drives via `smartctl`, serves it over HTTP, and advertises via mDNS. The binary is downloaded at build time from the [integration repo releases](https://github.com/DAB-LABS/smart-sniffer/releases).
-- **Replica Agent** (`mock-agent.py`): Python script that serves the replicas, fake drives and pools with SMART data you control.
-- **Control Center** (`web/`): the app's page, served via HA ingress by `web/proxy.py`. Shows this machine's drives, the replicas and field agents on other network machines.
-
-## Code Style
-
-- **Shell scripts** — POSIX-compatible where possible, `bashate` clean
-- **Python** — Standard library preferred, minimal dependencies
-- **HTML/JS** — Single-file approach (Alpine.js + Tailwind), no build step
-- **Commits** — Short, descriptive messages. Reference issue numbers when applicable.
-
-## Reporting Issues
+## Reporting issues
 
 Use the [bug report template](https://github.com/DAB-LABS/smart-sniffer-app/issues/new?template=bug_report.yml) and include:
 
-- HA version and installation type (HAOS, Supervised, etc.)
-- Hardware (x86, Pi 4, Pi 5, etc.)
-- App version (from the add-on info page)
-- App logs (Settings → Add-ons → SMART Sniffer App → Log)
+- Home Assistant version and installation type (HAOS, Supervised)
+- Hardware (x86, Raspberry Pi 4 or 5, and so on)
+- App version (on the App's page header, or **Settings > Apps > SMART Sniffer App**)
+- The App's log (**Settings > Apps > SMART Sniffer App > Log**)
 
-## Pull Requests
+## Pull requests
 
-- Keep PRs focused — one feature or fix per PR
-- Test on at least one architecture before submitting
-- Update `CHANGELOG.md` if your change is user-facing
-- The CI pipeline will build and lint automatically
+- Keep pull requests focused: one feature or fix each.
+- Test on at least one architecture before submitting.
+- Update `CHANGELOG.md` (both the root file and `smart_sniffer_agent/CHANGELOG.md`) if your change is user-facing.
+- The CI pipeline builds the image for amd64 and aarch64.
 
 ## Updating llms.txt
 
-`llms.txt` in the repo root is a machine-readable project summary used by LLMs and
-AI-powered search to accurately describe and recommend this project. Keep it current.
+`llms.txt` in the repo root is a machine-readable project summary used by LLMs and AI-powered search to describe and recommend this project. Keep it current.
 
-**Update `llms.txt` when your PR:**
-- Modifies `README.md` in a way that affects features, capabilities, supported
-  architectures, configuration options, or documentation structure
-- Adds a new feature or ships a known issue fix that changes how the add-on behaves
-- Changes architecture support status (e.g., a platform moves from untested to tested)
+**Update `llms.txt` when your pull request:**
+
+- changes `README.md` in a way that affects features, capabilities, supported architectures, configuration options or the documentation structure,
+- adds a feature or fixes a known issue in a way that changes how the App behaves,
+- changes architecture support.
 
 **Format rules:**
-- Follow the llmstxt.org spec: H1, blockquote summary, body, H2 link sections
-- Keep the file under ~200 lines
-- No em-dashes -- use double-hyphens (--), parentheses, or separate sentences
-- Every claim must be verifiable against README or CHANGELOG
+
+- Follow the llmstxt.org spec: H1, blockquote summary, body, H2 link sections.
+- Keep the file under about 200 lines.
+- No em dashes: use double hyphens (--), parentheses or separate sentences.
+- Every claim must be verifiable against the README or the CHANGELOG.
 
 ## License
 
