@@ -1,171 +1,193 @@
-![SMART Sniffer App for Home Assistant OS](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/SMARTsniffer_app.png)
+<p align="center">
+  <img src="smart_sniffer_agent/SMARTsniffer_app.png" alt="SMART Sniffer App for Home Assistant OS" width="100%">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![GitHub release](https://img.shields.io/github/v/release/DAB-LABS/smart-sniffer-app)](https://github.com/DAB-LABS/smart-sniffer-app/releases)
-[![HA App](https://img.shields.io/badge/Home%20Assistant-App-41BDF5?logo=homeassistant)](https://www.home-assistant.io/)
+**The drives inside your Home Assistant box, watched.**<br>
+*Sniff early. Sniff often.*
 
-> **SMART Sniffer is evolving, for the better.** With integration v0.9 the Control Center moves into the integration, so every machine lives in one place. This App keeps watching the drives of your Home Assistant box and shows them on its own page. Two parts, one place to look. Better together.
+[![Release](https://img.shields.io/github/v/release/DAB-LABS/smart-sniffer-app?style=flat-square)](https://github.com/DAB-LABS/smart-sniffer-app/releases/latest)
+[![License](https://img.shields.io/github/license/DAB-LABS/smart-sniffer-app?style=flat-square)](LICENSE)
+[![Home Assistant App](https://img.shields.io/badge/Home%20Assistant-App-41BDF5?style=flat-square&logo=homeassistant)](https://www.home-assistant.io/)
+[![SMART Sniffer integration](https://img.shields.io/badge/integration-v0.9%2B-41BDF5?style=flat-square)](https://github.com/DAB-LABS/smart-sniffer)
 
-## The Drives of This Box
+---
 
-Same Control Center. The App adds the drives of the box Home Assistant runs on. Install the integration for everything else.
+The SMART Sniffer App watches the drives of the machine Home Assistant runs on: the boot SSD or NVMe that HAOS lives on, the data disk, and any USB drive Home Assistant mounts. It reads their S.M.A.R.T. data, judges every drive with the same rules as the SMART Sniffer integration, and shows them on its own page. No SSH, no scripts, no external tools.
 
-This app reads S.M.A.R.T. data from the drives inside your Home Assistant machine (the boot SSD or NVMe that HAOS runs on, and any other drive it can see) and shows them on its own page, **SMART Sniffer App**, read only. No SSH access, no scripts, no external tools.
+<br>
 
-Your other machines, replicas (test drives), names, thresholds and Agentic access live in the **SMART Sniffer integration's Control Center**, a **SMART Sniffer** page in the sidebar (integration 0.9 and later, from HACS). The integration also turns this box's drives into sensors, history, notifications and automations. A card under the drives on the App's page opens the Control Center.
+## Better together
 
-![Agent Control Center](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/agent_control_center.png)
+SMART Sniffer comes in two parts.
 
-> **Got drives on other machines?** If you also run a NAS, Proxmox host, Mac, Linux box or Windows machine, the [SMART Sniffer Agent](https://github.com/DAB-LABS/smart-sniffer) installs directly on those hosts. One small binary per machine, no Docker required. The integration finds them on your network and shows them next to this box in the Control Center.
+- **The [SMART Sniffer integration](https://github.com/DAB-LABS/smart-sniffer)** (from HACS) owns every machine. Its **Control Center** in the sidebar shows every drive of every machine, with sensors, history, notifications, automations, replicas for testing and Agentic access.
+- **This App** does what only an App can do on Home Assistant OS: it runs the SMART Sniffer agent right inside the Home Assistant box, so that box's own drives get watched too.
 
-## Which Component Do I Need?
+Install both, and this box shows up in the Control Center next to your NAS, your Proxmox host and everything else. Two parts, one place to look.
 
-| Your setup | What to install | Repo |
-|---|---|---|
-| Drives inside your HAOS or Supervised machine | **This App**, and the **Integration** for sensors, alerts and the Control Center | You're here |
-| Drives on a NAS, Proxmox host, Mac, Linux box or Windows machine | The **Agent** on that machine, and the **Integration** | [smart-sniffer](https://github.com/DAB-LABS/smart-sniffer) |
-| Home Assistant Container or Core | The **Integration**, and the **Agent** on the Home Assistant machine (apps need the Supervisor) | [smart-sniffer](https://github.com/DAB-LABS/smart-sniffer) |
-| Test drives for trying alerts and automations | The **Integration**: + > Replica | [smart-sniffer](https://github.com/DAB-LABS/smart-sniffer) |
+<br>
 
-**Common combinations:**
+## The App's page
 
-- **Bare metal NUC or mini PC running HAOS**: the App and the Integration.
-- **HAOS in a VM with drives on the host**: the Agent on the host and the Integration. The App sees only the virtual disk.
-- **HAOS on bare metal and a NAS on the network**: the App for the HAOS drive, the Agent on the NAS, and the Integration to see both in one Control Center.
+<p align="center">
+  <img src="images/app-page.png" alt="The SMART Sniffer App page: one card per drive of this Home Assistant box" width="800">
+</p>
 
-## Installation
+**SMART Sniffer App** in the sidebar shows this box only, read only, in the same design as the Control Center:
 
-### Step 1: Add the Repository
+- **One card per drive**, ZFS pool and filesystem, with its health: **Attention**, **Maybe**, **Health OK** or **Health not known**, and the rows that caused it.
+- **At a glance**: temperature, days powered on, data written and read, and wear, plus the disk space of every mount, including USB drives under `/media` and the data disk after **Move data disk**.
+- **Details** with the model, serial, firmware, capacity and interface, every SMART attribute and the drive's Device Statistics. Click a number or a value for the exact figure and a copy button.
+- **A card under the drives** opens the Control Center, or tells you how to install or update the integration.
 
-1. In Home Assistant, go to **Settings > Apps > App Store**
-2. Click the **three-dot menu** (top right) > **Repositories**
-3. Add this URL:
+The page refreshes itself every 30 seconds. Each card downloads as a JSON file.
 
-```
-https://github.com/DAB-LABS/smart-sniffer-app
-```
+<br>
 
-4. Click **Add**, then close the dialog
+## App or integration?
 
-### Step 2: Install the App
+| Your setup | What to install |
+|---|---|
+| Home Assistant OS or Supervised, and you want the drives in that box | **This App** and the **integration** |
+| Drives on a NAS, Proxmox host, PC or Mac | The [agent](https://github.com/DAB-LABS/smart-sniffer#1-install-the-agent) on each of those machines, and the **integration** |
+| Home Assistant Container or Core | The **integration**, and the agent on the Home Assistant machine (Apps need the Supervisor) |
+| You want to try alerts and automations without a failing drive | The **integration**: **+ > Replica** in the Control Center |
 
-1. Find **SMART Sniffer App** in the app store (you may need to refresh)
-2. Click **Install**
-3. Once installed, click **Start**
-4. Click **Open Web UI**, or turn on **Show in sidebar** to open the page from the sidebar as **SMART Sniffer App**. It shows one card per drive.
-5. If a drive shows **Health not known**, or you see **"DRIVE ACCESS BLOCKED"** in the logs, turn off **Protection Mode**: go to **Settings > Apps > SMART Sniffer App > Protection mode**, switch it **OFF**, then restart the app (see [Security & Permissions](#security--permissions) for details)
+**Common setups:**
 
-### Step 3: Install the Integration
+- **HAOS on a NUC or mini PC**: the App and the integration.
+- **HAOS in a VM**: the agent on the host, and the integration. Inside a VM the App sees only the virtual disk.
+- **HAOS on bare metal, plus a NAS**: the App for this box, the agent on the NAS, and the integration to see both in one Control Center.
 
-The integration turns drive data into Home Assistant entities, history, notifications and automations, and has the Control Center for all your machines. Use version 0.9 or later.
+<br>
 
-1. Install [HACS](https://hacs.xyz) if you don't have it
-2. In HACS, search for **SMART Sniffer**, download it, and restart Home Assistant
-3. Add this box: press **Create sensors and alerts for HAOS** under DRIVES on the App's page, or **Add** on the **SMART Sniffer (HAOS)** card Home Assistant shows under **Settings > Devices & Services**
-4. Open the Control Center with **Open** on the card under the drives, or **SMART Sniffer** in the sidebar
+## Install
 
-To add this box by hand instead: **Settings > Devices & Services > Add Integration > SMART Sniffer**, then the host and port from the app's startup log (`Integration host:`), for example `0449a086-smart-sniffer-agent` and port `9099`.
+### 1. Add this repository and install the App
 
-## How It Works
+[![Add this repository to your Home Assistant.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FDAB-LABS%2Fsmart-sniffer-app)
 
-![SMART Sniffer Architecture](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/smartsniffer-architecture.png)
+Or by hand: **Settings > Apps > App Store**, the three-dot menu > **Repositories**, add `https://github.com/DAB-LABS/smart-sniffer-app`.
 
-The app runs `smartctl` inside its container to read SMART attributes from the host's drives, through the same agent you can install on other machines. Its page reads that agent and judges every drive with the integration's own rules, which are built into the app.
+Then find **SMART Sniffer App**, click **Install**, then **Start**. Turn on **Show in sidebar** to open its page from the sidebar.
 
-With integration 0.9 or later installed, the app tells Home Assistant where its agent is (host and port only, through the Supervisor's discovery), so Home Assistant can offer it. The integration polls the agent and creates the entities. The agent also advertises itself with mDNS (Zeroconf).
+If a drive shows **Health not known**, or the log says **DRIVE ACCESS BLOCKED**, turn off Protection Mode (see [Security & permissions](#security--permissions)) and restart the App.
 
-![Startup Summary](images/startup-summary-log.png)
+### 2. Install the integration
 
-## The App's Page
+[![Open your Home Assistant instance and open the SMART Sniffer repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=DAB-LABS&repository=smart-sniffer&category=integration)
 
-This box's cards, one per drive (including USB drives mounted under `/media` and the data disk, also after **Move data disk**), per ZFS pool and per filesystem that belongs to no drive or pool, each with its health word (Attention, Maybe, Health OK or Health not known), every row that caused it, its disk space, and Details for the full readings. The cards are read only. Large counts read as sizes and days, with the exact number a click away. Each card can be downloaded as a JSON file.
+SMART Sniffer is in the HACS default store: search for **SMART Sniffer**, download it (v0.9 or later), and restart Home Assistant.
 
-Under the cards, one card leads on:
+### 3. Add this box
 
-- **Integration 0.9 or later**: **Open** goes to the Control Center. Until the integration has its first machine, the card says so, and **Create sensors and alerts for HAOS** under DRIVES adds this box.
-- **Integration downloaded but Home Assistant not restarted**: it asks you to restart.
-- **Integration 0.8.x**: it asks you to update it, with **Open in HACS**.
-- **No integration**: it says how to install it. Close it with the x if you do not want it.
+The App tells Home Assistant where its agent is, so you do not have to type anything. Either:
 
-See [DOCS.md](smart_sniffer_agent/DOCS.md) for the details.
+- press **Create sensors and alerts for HAOS** under DRIVES on the App's page, or
+- press **Add** on **SMART Sniffer (HAOS)** under **Settings > Devices & services > Discovered**.
 
-## Upgrading from 0.3.x
+This box then appears in the Control Center as **HAOS**, with its sensors and alerts. It is never added twice.
 
-**Update the integration to 0.9 or later first**, restart Home Assistant, then update the App.
+To add it by hand instead: **Settings > Devices & services > Add integration > SMART Sniffer**, with the host and port from the App's log (`Integration host:`), for example `0449a086-smart-sniffer-agent` and `9099`.
 
-- **Your other machines move into the integration.** The App hands over the machines its 0.3.x page kept (address, port and password), with their names, hidden cards, card order and thresholds, once, and removes each from its options when the integration confirms it. The Control Center shows a line saying what moved.
-- **Replicas moved into the integration**, where they work on every Home Assistant install. The App's old Replica machine is removed; create replicas again in the Control Center with **+ > Replica**. Your own files in `/share/smart-sniffer/replicas` stay where they are.
-- **The sidebar entry is now "SMART Sniffer App"**, apart from the integration's "SMART Sniffer".
+<br>
 
 ## Configuration
 
-| Option | Default | Description |
+| Option | Default | What it does |
 |---|---|---|
-| Agent Port | `9099` | Port the agent listens on |
-| Bearer Token | _(empty)_ | Optional token for this machine's agent. Must match the token in the integration's entry for it. |
-| Scan Interval | `60` | How often SMART data is refreshed (seconds) |
-| Field Agents | _(empty)_ | Machines App 0.3.x kept, waiting to be handed to the integration. Each is removed once the integration has it. |
-| Card Order, Hidden Cards, Card Names, Machine Names | _(empty)_ | What App 0.3.x kept for its cards. A field machine's entries go to the integration with it; this box's stay here. |
-| Thresholds | _(empty)_ | Alert thresholds App 0.3.x kept. This box's still judge its cards on the App's page. |
+| Agent Port | `9099` | The port this box's agent listens on |
+| Bearer Token | _(empty)_ | Optional password for this box's agent. Set the same one in the integration's entry for this box. |
+| Scan Interval | `60` | How often the drives are read, in seconds |
 
-## Security & Permissions
+The other options (field agents, card order, hidden cards, names and thresholds) are what App 0.3.x kept. A field machine's entries move to the integration with it; this box's thresholds still judge its cards on the App's page.
 
-SMART Sniffer needs direct hardware access to read drive health data. This is not optional; it is how SMART monitoring works on Linux. Every tool that reads SMART data (`smartmontools`, `hdparm`, Scrutiny) needs the same access.
+<br>
 
-**What the app needs and why:**
+## Upgrading from 0.3.x
 
-| Permission | Purpose |
+**Update the integration to v0.9 or later first**, restart Home Assistant, then update the App.
+
+- **Your other machines move to the integration**, once, with their addresses, passwords, names, hidden cards, card order and thresholds. The Control Center shows a line saying what moved.
+- **Replicas now live in the integration**, on every install type. Create them again with **+ > Replica**. Your files in `/share/smart-sniffer/replicas` stay where they are.
+- **The sidebar entry is now "SMART Sniffer App"**, next to the integration's "SMART Sniffer".
+
+Next to integration 0.8.x, the App shows an update card and keeps your machines until you update.
+
+<br>
+
+## How it works
+
+<p align="center">
+  <img src="smart_sniffer_agent/smartsniffer-architecture.png" alt="SMART Sniffer architecture: one agent per machine, the App's agent inside Home Assistant OS, all reporting to the integration" width="100%">
+</p>
+
+The App runs the same SMART Sniffer agent you install on other machines, inside its container, with `smartctl` reading the host's drives. The App ships the agent of the integration release it is built against (v0.9.0 for App 0.4.x), and its page judges every drive with that release's own rules.
+
+With integration v0.9 or later installed, the App tells Home Assistant where its agent is (host and port only, through the Supervisor's discovery). The integration polls the agent and creates the entities. The agent also advertises itself with mDNS.
+
+The App's log starts with a summary:
+
+```
+SMART Sniffer App v0.4.1
+Agent: running on port 9099
+Integration host: 0449a086-smart-sniffer-agent:9099
+mDNS: smartha-homeassistant
+Auth: disabled
+Integration rules: v0.9.0
+Web UI: http://localhost:8099 (via ingress)
+Drives detected: 1
+Disk space: 2 mounts measured
+```
+
+<br>
+
+## Security & permissions
+
+Reading SMART data needs direct hardware access. Every SMART tool on Linux (`smartmontools`, `hdparm`, Scrutiny) needs the same.
+
+| Permission | Why |
 |---|---|
-| `SYS_RAWIO` | Send SCSI commands to SATA and SAS drives |
-| `SYS_ADMIN` | Send admin commands to NVMe drives |
-| `full_access` | Open drive device nodes (`/dev/sda`, `/dev/nvme0`) |
-| `hassio_api` | The app's own options, and the discovery message that tells integration 0.9 and later where this box's agent is (host and port only) |
-| `homeassistant_api` | Tells which SMART Sniffer integration is installed, adds this box to it, and hands over the machines App 0.3.x kept |
-| `discovery` | The `smart_sniffer` discovery service, posted only while integration 0.9 or later is installed |
-| `media` | Disk space of the USB drives Home Assistant mounts under `/media`, read-only |
-| Protection Mode OFF | May be needed to allow the drive permissions above to take effect |
+| `SYS_RAWIO` | SCSI commands to SATA and SAS drives |
+| `SYS_ADMIN` | Admin commands to NVMe drives |
+| `full_access` | Opening drive device nodes (`/dev/sda`, `/dev/nvme0`) |
+| `hassio_api` | The App's own options, and the discovery message that tells the integration where this box's agent is (host and port only) |
+| `homeassistant_api` | Seeing which SMART Sniffer integration is installed, adding this box to it, and handing over the machines App 0.3.x kept |
+| `discovery` | The `smart_sniffer` discovery service, posted only while integration v0.9 or later is installed |
+| `media` | The disk space of USB drives Home Assistant mounts under `/media`, read only |
 
-**What the app does NOT do:**
+**What the App does not do:**
 
-- Does not write to your drives
-- Does not contact other machines on your network
-- Does not send data outside your network or phone home
-- Outside its own container, reads only the disk space of what Home Assistant mounts under `/media`
+- It does not write to your drives.
+- It does not contact other machines on your network, or anything outside it.
+- Its page answers only Home Assistant's ingress, and the Bearer Token is never put on a command line.
 
-**Why you may need to turn off Protection Mode:**
+**Protection Mode.** On some hardware, Home Assistant's Protection Mode stops the App from opening drive device nodes: the drive shows **Health not known** and the log says **DRIVE ACCESS BLOCKED**. Go to **Settings > Apps > SMART Sniffer App**, switch **Protection mode** off, and restart the App. Home Assistant then shows a warning; that is expected.
 
-On some hardware, Home Assistant's Protection Mode stops the container from opening drive device nodes. The app can then see that your drive exists but cannot read its SMART data: you'll see a "DRIVE ACCESS BLOCKED" warning in the logs and the drive shows Health not known.
+<p align="center">
+  <img src="smart_sniffer_agent/protection_mode_button.png" alt="The Protection mode switch on the App's settings" width="600">
+</p>
 
-If this affects you, go to **Settings > Apps > SMART Sniffer App**, switch Protection Mode **OFF**, then restart the app.
+Everything is open source: the Go agent, the startup scripts, the AppArmor profile and the integration are all published for anyone to audit.
 
-![Protection Mode toggle](https://raw.githubusercontent.com/DAB-LABS/smart-sniffer-app/main/smart_sniffer_agent/protection_mode_button.png)
-
-After disabling Protection Mode, you'll see this warning. That's expected:
-
-![Protection Mode disabled warning](images/protection-mode-disabled-warning.png)
-
-**Our commitment to transparency:**
-
-SMART Sniffer is fully open source. The Go agent, startup scripts, AppArmor profile and integration code are all published here for anyone to audit. We ship a custom AppArmor security profile that documents exactly what the container accesses. We're committed to requesting only the minimum permissions needed and being upfront about why each one is required.
+<br>
 
 ## Troubleshooting
 
-**Drives show "Health not known" or no SMART data.** Check the app logs for "DRIVE ACCESS BLOCKED". If you see it, turn off Protection Mode (see above) and restart the app.
+**Health not known, or no SMART data.** Look for **DRIVE ACCESS BLOCKED** in the App's log. If it is there, turn off Protection Mode and restart the App.
 
-![Drive Access Blocked log](images/drive-access-blocked-log.png)
+**USB drive shows Health not known.** Many USB enclosures do not pass SMART through. That is the enclosure's bridge chip, not the App.
 
-**No drives detected.** The app needs `SYS_RAWIO` to read SMART data from host drives. This is configured automatically. Check the app logs if drives aren't appearing.
+**My other machines and replicas are gone from the App's page.** They moved to the integration's Control Center. Press **Open** on the card under the drives.
 
-**My other machines and replicas are gone from the App's page.** They moved to the integration's Control Center: press **Open** on the card under the drives. See [Upgrading from 0.3.x](#upgrading-from-03x).
+**Port 9099 is taken.** Change Agent Port, then the port in the integration's entry for this box.
 
-**Port conflicts.** If port 9099 is already in use, change the Agent Port in configuration and update the integration to match.
+**This box is not discovered.** Discovery needs integration v0.9 or later. If it still does not show, use **Create sensors and alerts for HAOS** on the App's page, or add it by hand (Install, step 3). With several Home Assistant instances, give each its own host name (**Settings > System > General**) so their mDNS names differ.
 
-**USB drives showing Health not known.** Many USB enclosures block SMART passthrough at the hardware level. This is a limitation of the USB bridge chip, not the app.
-
-**mDNS not discovered.** The app uses your HA hostname (Settings > System > General) to create a unique mDNS name. If you have multiple HA instances, make sure each has a different hostname. If discovery still doesn't work, add the agent with **Create sensors and alerts for HAOS** on the App's page or by hand as described in Step 3 above.
+<br>
 
 ## Links
 
-- [SMART Sniffer Agent & Integration](https://github.com/DAB-LABS/smart-sniffer): standalone agent for remote machines and the HACS integration
-- [CHANGELOG](CHANGELOG.md)
-- [Report an Issue](https://github.com/DAB-LABS/smart-sniffer-app/issues)
+- [SMART Sniffer integration and agent](https://github.com/DAB-LABS/smart-sniffer)
+- [Changelog](CHANGELOG.md)
+- [Report an issue](https://github.com/DAB-LABS/smart-sniffer-app/issues)
