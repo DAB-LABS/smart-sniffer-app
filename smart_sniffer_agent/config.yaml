@@ -45,9 +45,12 @@ homeassistant_api: true
 discovery:
   - smart_sniffer
 
-# /media: USB drives HA mounts there, measured for disk space. /share is no
-# longer mapped: replicas moved into the integration, and the files users
-# kept in /share/smart-sniffer/replicas stay where they are.
+# /media: USB drives HA mounts there, and drives added under Settings >
+# System > Storage > Local disk for Media, measured for disk space. Local
+# disks added for Backup or Share get SMART health but no disk space (backup
+# storage is not visible to apps). /share is no longer mapped: replicas moved
+# into the integration, and the files users kept in
+# /share/smart-sniffer/replicas stay where they are.
 map:
   - media:ro
 

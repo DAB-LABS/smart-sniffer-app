@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -252,3 +253,134 @@ def test_run_sh_makes_the_first_start_password_before_the_agent_config():
     assert 'GENERATED="$(python3 /opt/web/passwords.py --first-start /data)" || GENERATED=""' in RUN_SH
     assert '    TOKEN="${GENERATED}"' in RUN_SH
     assert "${GENERATED}" not in RUN_SH.split("bashio::log.info \"New install", 1)[1].split("\n", 1)[0]
+
+
+# ── HA 2026.11 Local disk: systemd automounts under /media ──────────────────
+#
+# Lines as a read-only study of the Supervisor, systemd and util-linux code
+# expects them in the App's mount table (IDs illustrative; not taken from a
+# live box). The disk sits on top of its automount's autofs line, with its
+# real /dev source.
+
+LD_MEDIA = "1203 1180 8:8 /supervisor/media /media ro,relatime master:61 - ext4 /dev/sda8 rw"
+LD_DATA = "1205 1180 8:8 /supervisor/apps/data/local_smart_sniffer_agent /data rw,relatime - ext4 /dev/sda8 rw"
+LD_AUTOFS = ("1215 1203 0:57 / /media/usbdisk ro,relatime master:402 - autofs systemd-1 "
+             "rw,fd=63,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=21733")
+LD_DISK = "1240 1215 8:17 / /media/usbdisk rw,relatime master:410 - ext4 /dev/sdb1 rw"
+LD_AUTOFS_WIN = ("1216 1203 0:58 / /media/win ro,relatime master:403 - autofs systemd-1 "
+                 "rw,fd=64,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=21734")
+LD_NTFS3 = "1241 1216 8:33 / /media/win rw,relatime master:411 - ntfs3 /dev/sdc1 rw,uid=0,gid=0,iocharset=utf8"
+LD_SYMLINK = ("1242 1215 8:17 / /media/usbdisk rw,relatime master:410 - ext4 "
+              "/mnt/data/supervisor/.mounts_devices/usbdisk rw")
+
+
+def mountinfo_file(tmp_path, *lines: str) -> Path:
+    path = tmp_path / "mountinfo"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+class Waker:
+    """Stands in for statvfs on an automount: records each wake and runs
+    what the test says happens then."""
+
+    def __init__(self, then=None) -> None:
+        self.woken: list[str] = []
+        self.then = then
+
+    def __call__(self, path: str) -> None:
+        self.woken.append(path)
+        if self.then:
+            self.then(path)
+
+
+def test_local_disk_already_mounted_is_kept_once_and_not_woken(tmp_path):
+    info = mountinfo_file(tmp_path, LD_MEDIA, LD_DATA, LD_AUTOFS, LD_DISK)
+    waker = Waker()
+    found = mounts.read_mounts(str(info), waker)
+    assert waker.woken == []
+    assert [(m.path, m.device) for m in mounts.select_mounts(found)] == [
+        ("/data", "/dev/sda8"), ("/media/usbdisk", "/dev/sdb1")]
+
+
+def test_local_disk_ntfs3_is_kept(tmp_path):
+    info = mountinfo_file(tmp_path, LD_MEDIA, LD_DATA, LD_AUTOFS_WIN, LD_NTFS3)
+    assert mounts.select_mounts(mounts.read_mounts(str(info), Waker())) == [
+        Mount("/data", "/dev/sda8", "ext4"), Mount("/media/win", "/dev/sdc1", "ntfs3")]
+
+
+def test_autofs_only_is_woken_and_kept_once_the_disk_appears(tmp_path):
+    info = mountinfo_file(tmp_path, LD_MEDIA, LD_DATA, LD_AUTOFS)
+
+    def mounted(_path: str) -> None:  # systemd mounts it, stacked on the autofs line
+        info.write_text("\n".join([LD_MEDIA, LD_DATA, LD_AUTOFS, LD_DISK]) + "\n")
+
+    waker = Waker(mounted)
+    found = mounts.select_mounts(mounts.read_mounts(str(info), waker))
+    assert waker.woken == ["/media/usbdisk"]
+    assert [m.path for m in found] == ["/data", "/media/usbdisk"]
+
+
+def test_autofs_only_with_no_disk_keeps_nothing_and_does_not_hang(tmp_path):
+    info = mountinfo_file(tmp_path, LD_MEDIA, LD_DATA, LD_AUTOFS, LD_AUTOFS_WIN)
+    stuck = Waker(lambda _path: time.sleep(30))  # systemd waits for a device that is not there
+    started = time.monotonic()
+    found = mounts.select_mounts(mounts.read_mounts(str(info), stuck, timeout=0.3))
+    assert time.monotonic() - started < 2
+    assert sorted(stuck.woken) == ["/media/usbdisk", "/media/win"]
+    assert found == [Mount("/data", "/dev/sda8", "ext4")]
+
+
+def test_the_real_wake_uses_statvfs_and_ignores_a_missing_disk(tmp_path, monkeypatch):
+    asked: list[str] = []
+
+    def statvfs(path):
+        asked.append(path)
+        raise OSError(19, "No such device")
+
+    monkeypatch.setattr(mounts.os, "statvfs", statvfs)
+    mounts.wake("/media/usbdisk")
+    assert asked == ["/media/usbdisk"]
+
+
+def test_only_media_automounts_are_woken():
+    lines = [LD_MEDIA, LD_AUTOFS.replace("/media/usbdisk", "/share/usbdisk"),
+             LD_AUTOFS.replace("/media/usbdisk", "/media"), LD_AUTOFS]
+    assert mounts.sleeping_automounts(mounts.parse_mountinfo("\n".join(lines))) == ["/media/usbdisk"]
+
+
+def test_a_symlink_source_is_dropped_and_not_resolved(tmp_path):
+    """systemd mounts by the real device, so a .mounts_devices source is not
+    expected; were it there, it is left out, as every non-/dev source is."""
+    info = mountinfo_file(tmp_path, LD_MEDIA, LD_DATA, LD_AUTOFS, LD_SYMLINK)
+    waker = Waker()
+    found = mounts.select_mounts(mounts.read_mounts(str(info), waker))
+    assert found == [Mount("/data", "/dev/sda8", "ext4")]
+    assert waker.woken == []  # mounted, just not by a /dev source
+
+
+def test_a_stale_line_after_an_unplug_does_not_crash(tmp_path, by_uuid, monkeypatch, capsys):
+    """The disk line can stay with its old /dev/sdX1 while that node is gone:
+    no UUID is found, and the config is still written."""
+    info = mountinfo_file(tmp_path, LD_MEDIA, LD_DATA, LD_AUTOFS,
+                          LD_DISK.replace("/dev/sdb1", "/dev/sdq9"))
+    monkeypatch.setattr(mounts, "wake", Waker())
+    out = tmp_path / "agent-config.yaml"
+    assert mounts.main(["--out", str(out), "--mountinfo", str(info), "--by-uuid", by_uuid]) == 0
+    config = json.loads(out.read_text())
+    assert config["filesystems"][-1] == {"path": "/media/usbdisk", "uuid": "", "device": "/dev/sdq9",
+                                         "fstype": "ext4"}
+    assert capsys.readouterr().out.splitlines()[-1] == "/media/usbdisk on /dev/sdq9 (ext4)"
+
+
+def test_main_wakes_an_automount_and_logs_only_mounts(tmp_path, monkeypatch, capsys):
+    """run.sh counts every line mounts.py prints as a mount measured, so a
+    wake prints nothing."""
+    info = mountinfo_file(tmp_path, LD_MEDIA, LD_DATA, LD_AUTOFS)
+    monkeypatch.setattr(mounts, "wake", Waker(
+        lambda _p: info.write_text("\n".join([LD_MEDIA, LD_DATA, LD_AUTOFS, LD_DISK]) + "\n")))
+    out = tmp_path / "agent-config.yaml"
+    assert mounts.main(["--out", str(out), "--mountinfo", str(info)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == ["/data on /dev/sda8 (ext4)", "/media/usbdisk on /dev/sdb1 (ext4)"]
+    assert captured.err == ""

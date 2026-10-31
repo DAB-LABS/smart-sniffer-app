@@ -153,9 +153,10 @@ unset GENERATED
 # ── Find the mounts to measure for disk space ────────────────────────────────
 # The agent measures disk space only for the filesystems its config lists.
 # mounts.py writes that config from the mounts Home Assistant gives the app:
-# the data disk (/data, also after Move data disk) and USB drives under
-# /media. It is a snapshot, so a
-# drive plugged in later shows after an app restart. If the mounts cannot be
+# the data disk (/data, also after Move data disk), and USB drives and Local
+# disk drives added for Media under /media (a Local disk automount not
+# mounted yet is woken first). It is a snapshot, so a drive plugged in or
+# added later shows after an app restart. If the mounts cannot be
 # read, disk space is off. The token option goes in the same config (root
 # only), handed to mounts.py in the environment so it is never on a command
 # line. If the config cannot be written, the agent starts without it, unless

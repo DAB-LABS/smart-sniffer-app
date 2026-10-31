@@ -24,6 +24,17 @@ written.
 drive picked with Move data disk), so they collapse to /data.
 Network shares, tmpfs and overlay mounts have no /dev/ device and are left out.
 
+Drives added in Home Assistant under Settings > System > Storage > Local
+disk (HA 2026.11) are systemd automounts. Each /media/<name> shows two
+lines: the automount's autofs (source "systemd-1") and, once the disk is
+mounted, the disk on top of it with its real device (systemd mounts it by
+its canonical /dev path, never by a symlink). The Supervisor normally
+mounts it before the App starts. A /media entry that shows only its autofs
+line (the disk was not there at boot, or was unplugged and plugged back) is
+woken once with statvfs, which mounts it (stat would not), within
+TRIGGER_SECONDS, and the mount table read again. A disk added after the App
+started shows after an App restart.
+
 Run with:
   python3 /opt/mounts.py --out /data/agent-config.yaml
 """
@@ -35,6 +46,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -42,6 +55,9 @@ MOUNTINFO = "/proc/self/mountinfo"
 BY_UUID = "/dev/disk/by-uuid"
 # In this order: the first mount of a device is the one kept.
 ROOTS = ("/data", "/media", "/share")
+# How long all waking of automounts may take together, so a disk that is not
+# there never holds up the App's start.
+TRIGGER_SECONDS = 5.0
 
 
 class Mount(NamedTuple):
@@ -91,6 +107,53 @@ def select_mounts(mounts: list[Mount]) -> list[Mount]:
     return list(firsts.values())
 
 
+def sleeping_automounts(mounts: list[Mount]) -> list[str]:
+    """The /media/<name> mount points that show only an autofs mount: a
+    systemd automount whose disk is not mounted yet."""
+    mounted = {m.path for m in mounts if m.fstype != "autofs"}
+    return list(dict.fromkeys(m.path for m in mounts
+                              if m.fstype == "autofs" and m.path.startswith("/media/")
+                              and m.path not in mounted))
+
+
+def wake(path: str) -> None:
+    """Ask for the filesystem at the path, which mounts an automount. statvfs,
+    not stat: the kernel never automounts for stat. A missing disk is an
+    error here, and is ignored."""
+    try:
+        os.statvfs(path)
+    except OSError:
+        pass
+
+
+def wake_all(paths: list[str], timeout: float | None = None,
+             waker: Callable[[str], None] | None = None) -> None:
+    """Wake every path at once and wait at most timeout seconds in all; a
+    wake still waiting then is left behind (its thread ends with the
+    process)."""
+    threads = [threading.Thread(target=waker or wake, args=(p,), daemon=True) for p in paths]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + (TRIGGER_SECONDS if timeout is None else timeout)
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+
+
+def read_mounts(mountinfo: str, waker: Callable[[str], None] | None = None,
+                timeout: float | None = None) -> list[Mount]:
+    """The mount table, after waking any /media automount not mounted yet
+    (and reading the table again when there was one)."""
+    def read() -> list[Mount]:
+        return parse_mountinfo(Path(mountinfo).read_text(encoding="utf-8", errors="replace"))
+
+    mounts = read()
+    sleeping = sleeping_automounts(mounts)
+    if sleeping:
+        wake_all(sleeping, timeout, waker)
+        mounts = read()
+    return mounts
+
+
 def uuid_for(device: str, by_uuid_dir: str = BY_UUID) -> str:
     """The filesystem UUID whose /dev/disk/by-uuid link points at the device,
     or "" when there is none (the agent then names it by its mountpoint).
@@ -132,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
 
     status = 0
     try:
-        mounts = select_mounts(parse_mountinfo(Path(args.mountinfo).read_text(encoding="utf-8", errors="replace")))
+        mounts = select_mounts(read_mounts(args.mountinfo))
     except OSError as err:
         print(err, file=sys.stderr)
         mounts, status = [], 2
