@@ -130,19 +130,19 @@ If the integration is still on 0.8.x, the App shows an update card and keeps you
   <img src="smart_sniffer_agent/smartsniffer-architecture.png" alt="SMART Sniffer architecture: one agent per machine, the App's agent inside Home Assistant OS, all reporting to the integration" width="100%">
 </p>
 
-The App runs the same SMART Sniffer agent you install on other machines, inside its container, with `smartctl` reading the host's drives. It ships the agent of the integration release it is built against (v0.9.0 for App 0.4.x), and its page judges every drive with that release's rules.
+The App runs the same SMART Sniffer agent you install on other machines, inside its container, with `smartctl` reading the host's drives. It ships the agent of the integration release it is built against (v1.0.0 for App 1.0), and its page judges every drive with that release's rules.
 
 With integration v0.9 or later installed, the App tells Home Assistant where its agent is: host, port and the agent's password, through the Supervisor's discovery, which only Home Assistant itself reads. The integration polls the agent and creates the entities. The agent also advertises itself over mDNS.
 
 The App's log starts with a summary:
 
 ```
-SMART Sniffer App v0.4.1
+SMART Sniffer App v1.0.0
 Agent: running on port 9099
 Integration host: 0449a086-smart-sniffer-agent:9099
 mDNS: smartha-homeassistant
-Auth: disabled
-Integration rules: v0.9.0
+Auth: enabled
+Integration rules: v1.0.0
 Web UI: http://localhost:8099 (via ingress)
 Drives detected: 1
 Disk space: 2 mounts measured

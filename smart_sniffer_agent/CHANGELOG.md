@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.0 -- draft
+
+SMART Sniffer 1.0. This box's agent now has a password: new installs get one, and you can see, generate or change it on the App's page. The SMART Sniffer integration on this Home Assistant follows it by itself. Update the integration to 1.0 first, then this App.
+
+### Added
+- **A password for this box's agent.** Without one, anyone on your network can read this box's drive data. New installs get one, three words and a number. Open a card's Details: under Connect by hand, Password has Show and Copy, a box to type your own, Generate and Save. Saving restarts the App, and the page comes back by itself.
+- **This Home Assistant keeps up with the password.** The App passes it to the integration with its discovery, which only Home Assistant reads, so the entry for this box keeps working after a change. Another Home Assistant asks for it: copy it from the App's page.
+- **This page uses the integration's thresholds** once integration 1.0 has this box, so the page and Home Assistant agree. A line under the cards says which thresholds are in use (smart-sniffer#11).
+- **Disk space for Local disk drives** (Home Assistant 2026.11, Settings > System > Storage) added for Media. Drives added for Backup or Share show their health, but no disk space.
+
+### Changed
+- **Serial numbers are masked on the cards**: only the last four characters show, so screenshots and videos do not carry them. Click one for the whole number and Copy.
+- Ships agent v1.0.0.
+
+### Upgrade notes
+- Update the integration to 1.0 first. With integration 0.9.x the App keeps working and judges with its own thresholds.
+- An updated App keeps the password setting it had, which for most is none. The page says so; set one there.
+- Once integration 1.0 has this box, its thresholds for this box apply on this page. The ones you saved in App 0.3.x moved there with your machines; change them in the Control Center.
+
 ## 0.4.1 -- 2026-10-23
 
 ### Fixed

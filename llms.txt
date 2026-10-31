@@ -19,12 +19,13 @@ Key behaviors:
   hardware, Protection Mode must be off (Settings -> Apps -> SMART Sniffer App ->
   Protection mode).
 - Ships the agent and the rule modules of the integration release named by SS_TAG in
-  its Dockerfile (v0.9.0 for App 0.4.x), never "latest".
+  its Dockerfile (v1.0.0 for App 1.0), never "latest".
 - The agent listens on port 9099 at the App's container host name (for example
   0449a086-smart-sniffer-agent) and advertises itself with mDNS under a name unique
   per Home Assistant instance (smartha-<ha-hostname>).
 - With integration v0.9+ installed, posts a Supervisor discovery (service
-  smart_sniffer, host and port only), so Home Assistant offers this box as "SMART
+  smart_sniffer: host, port and the agent's password when one is set; only Home
+  Assistant Core reads it), so Home Assistant offers this box as "SMART
   Sniffer (HAOS)". The App's page also has "Create sensors and alerts for HAOS". The box
   is never added twice. Manual fallback: the host and port from the App's log line
   "Integration host:".
@@ -32,12 +33,20 @@ Key behaviors:
   row (temperature, days powered on, data written and read, wear), disk space, a health
   word (Attention, Maybe, Health OK, Health not known) with the rows behind it, and
   Details (model, serial, firmware, capacity, interface, SMART attributes, Device
-  Statistics). It refreshes every 30 seconds. A card under the drives opens the
+  Statistics; the serial shows only its last four characters until clicked). It
+  refreshes every 30 seconds. A card under the drives opens the
   integration's Control Center, or says how to install, update or finish updating it.
-- Disk space covers USB drives mounted under /media (read only) and the data disk, also
-  after "Move data disk". Mounts are found when the App starts.
-- The page answers only Home Assistant's ingress. The Bearer Token option is a password
-  field and is never put on a command line.
+- Disk space covers USB drives mounted under /media (read only), drives added in Home
+  Assistant 2026.11+ as Local disk for Media (not Backup or Share), and the data disk,
+  also after "Move data disk". Mounts are found when the App starts.
+- The agent has a password (the Bearer Token option): generated on new installs, shown,
+  generated and changed on the App's page under Connect by hand. Saving restarts the App;
+  the integration on the same Home Assistant gets it through discovery. Another Home
+  Assistant finds the agent by mDNS and asks for the password.
+- With integration 1.0+ holding this box, the page judges drives with the integration's
+  thresholds for it; otherwise with the App's own. A line on the page says which.
+- The page answers only Home Assistant's ingress, so only Home Assistant admins see the
+  password. It is never put on a command line or in the log.
 - App 0.4.0 hands the machines App 0.3.x kept (address, port, password, names, hidden
   cards, order, thresholds) to integration v0.9+ once, and removes each from its
   options when the integration confirms it.
@@ -48,7 +57,8 @@ Supported architectures: amd64, aarch64. armv7 was dropped in v0.2.12.
 
 Configuration options:
 - Agent Port (default: 9099)
-- Bearer Token (optional, must match the integration's entry for this box)
+- Bearer Token: the agent's password (generated on new installs; change it on the App's
+  page, and the integration on this Home Assistant follows it)
 - Scan Interval in seconds (default: 60)
 - Field Agents, Card Order, Hidden Cards, Thresholds, Card Names, Machine Names: what
   App 0.3.x kept. Field machines' entries are handed to the integration and removed;
