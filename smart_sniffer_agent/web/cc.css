@@ -70,6 +70,7 @@ p.sec-label { margin: 22px 0 10px; }
 .agent-dot.up { background: var(--ok); }
 .agent-dot.down { background: var(--att); }
 .page-err { margin: 0 0 12px; font-size: 0.82rem; color: var(--paper); }
+.page-note { margin: 0 0 12px; font-size: 0.82rem; color: var(--grey); }
 .empty-line { margin: 0 0 14px; font-size: 0.86rem; color: var(--dim); max-width: 82ch; }
 .empty-line a { color: var(--grey); }
 .app-foot { margin-top: 34px; border-top: 1px solid var(--rule); padding-top: 14px; display: flex; gap: 8px 20px; flex-wrap: wrap; font-size: 0.82rem; color: var(--dim); }
@@ -639,3 +640,17 @@ table.attrs .thr-in.pending { color: var(--paper); font-weight: 700; }
   background: var(--panel-2); border: 1px solid var(--rule-2); border-radius: 4px; color: var(--paper);
   font-size: 0.8rem; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6); max-width: calc(100vw - 16px); }
 .numpop .copied { color: var(--dim); }
+
+/* App 1.0: the agent's password under Connect by hand. The value opens the
+   popover like Host and Port; the input, Generate and Save sit under it. */
+.pass-edit { flex-basis: 100%; display: grid; gap: 4px; padding-top: 4px; min-width: 0; }
+.pass-row { flex-wrap: wrap; gap: 5px 8px; }
+.pass-none { color: var(--dim); -webkit-user-select: none; user-select: none; }
+.pass-reveal { font-size: 0.72rem; color: var(--grey); }
+.pass-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.pass-input { flex: 1 1 14em; min-width: 0; padding: 3px 7px; font-size: 0.74rem; color: var(--paper);
+  background: var(--panel-2); border: 1px solid var(--rule-2); border-radius: 4px; }
+.pass-input:focus { outline: none; border-color: var(--grey); }
+.pass-warn { color: var(--grey); }
+.pass-err { color: var(--paper); }
+.thr-line { margin: 14px 0 0; font-size: 0.74rem; color: var(--dim); }

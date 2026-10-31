@@ -37,6 +37,11 @@ Referer.
     HACS            installed | missing       with missing: which install link the card has
     ADD             ok | error                /ha/add succeeds or answers flow_failed
     MDNS            on | off                  the agent's mDNS name in /app/info, or none
+    PASSWORD        text | none               the agent's password (the token option) at
+                                              start (default sneaky-4821-trenchcoat-falcon)
+    THRESHOLDS      app | integration         which thresholds the drives say judged them
+    RESTART         seconds                   how long the App is down after a password
+                                              Save (default 1.5); its run id then changes
     LATENCY         seconds                   added to every route (default 0.02)
     SELF_DELAY      seconds                   added to fleet/hosts/self/drives only (default 0):
                                               the page before this machine's first answer
@@ -105,9 +110,12 @@ DEFAULTS = {
     "HOSTNAME": "",
     "HA_VERSION": "2026.10.1",
     "MDNS": "on",
+    "PASSWORD": "sneaky-4821-trenchcoat-falcon",
+    "THRESHOLDS": "app",
+    "RESTART": "1.5",
 }
 # The switches that shape the in-memory world; a change rebuilds it.
-WORLD_KEYS = ("INTEGRATION", "HAOS_ENTRY", "DRIVES", "VDISK", "POOL")
+WORLD_KEYS = ("INTEGRATION", "HAOS_ENTRY", "DRIVES", "VDISK", "POOL", "PASSWORD")
 
 LOCK = threading.RLock()
 
@@ -677,6 +685,11 @@ class World:
         self.dismissed = {"install": False, "update": False}
         self.haos_created = False
         self.adds: list = []
+        password = flags.get("PASSWORD", "")
+        self.password = "" if password.lower() in ("", "none") else password
+        self.saves: list = []  # every password a Save sent
+        self.run = 1  # the App's run; a Save's restart starts the next
+        self.down_until = 0.0  # while the App restarts, its routes answer 502
 
 
 WORLDS: dict[tuple, World] = {}
@@ -694,7 +707,12 @@ def world_for(flags, fresh: bool = False) -> World:
 def drive_item(drive: dict, flags) -> dict:
     verdict = None if flags["RULES"] == "missing" else evaluate(drive)
     return {"type": "drive", "id": drive["id"], "drive": drive, "verdict": verdict,
-            "view": drive_view(drive, verdict), "lab": None, "thresholds_source": "app"}
+            "view": drive_view(drive, verdict), "lab": None,
+            "thresholds_source": thresholds_source(flags)}
+
+
+def thresholds_source(flags) -> str:
+    return "integration" if flags["THRESHOLDS"] == "integration" else "app"
 
 
 def pool_item(p: dict, flags) -> dict:
@@ -777,7 +795,8 @@ def self_response(flags, world: World) -> dict:
             "items": items, "filesystem_cards": fs_cards,
             "pools_status": "ok" if pools else "none",
             "filesystems_status": "ok" if fs_cards or any(i.get("filesystems") for i in items) else "none",
-            "rules_version": None if flags["RULES"] == "missing" else RULES_VERSION}
+            "rules_version": None if flags["RULES"] == "missing" else RULES_VERSION,
+            "thresholds_source": thresholds_source(flags)}
 
 
 def integration(flags, world: World) -> dict:
@@ -806,6 +825,19 @@ def integration(flags, world: World) -> dict:
     elif which == "missing":
         out.update(state="missing", hacs=flags["HACS"] != "missing")
     return out
+
+
+def suggest_password() -> str:
+    """A suggestion from the App's own generator, when it is beside this file."""
+    try:
+        sys.path.insert(0, str(WEB_DIR))
+        import passwords  # noqa: PLC0415
+
+        return passwords.generate()
+    except Exception:  # noqa: BLE001 -- a stand-in is good enough here
+        return f"sneaky-{int(time.time()) % 10000:04d}-cipher-otter"
+    finally:
+        sys.path.remove(str(WEB_DIR))
 
 
 def flags_for(handler) -> dict[str, str]:
@@ -925,10 +957,36 @@ class Handler(BaseHTTPRequestHandler):
             world_for(flags, fresh=True)
             return self._send(200, {"reset": True})
         world = world_for(flags)
+        if head == "dev" and parts[1:] == ["password"] and method == "GET":
+            return self._send(200, {"password": world.password, "saves": world.saves, "run": world.run})
+        if time.time() < world.down_until:
+            return self._send(502, body=b"502: Bad Gateway", ctype="text/plain")
         if head == "api":
             return self._agent_api(parts[1:], flags)
         if parts == ["app", "info"] and method == "GET":
-            return self._app_info(flags)
+            return self._app_info(flags, world)
+        if parts == ["app", "password"] and method == "GET":
+            return self._send(200, {"set": bool(world.password), "password": world.password,
+                                    "restarting": False, "short_below": 12})
+        if parts == ["app", "password", "suggest"] and method == "POST":
+            self._body()  # read, so the next request on this connection parses
+            return self._send(200, {"password": suggest_password()})
+        if parts == ["app", "password"] and method == "POST":
+            body = self._body()
+            if not isinstance(body, dict) or not isinstance(body.get("password"), str):
+                return self._err(400, "bad_request")
+            value = body["password"].strip()
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+                return self._err(400, "password_control",
+                                 "A password cannot hold line breaks, tabs or other control characters.")
+            if value == world.password:
+                return self._send(200, {"set": bool(value), "password": value, "saved": False,
+                                        "unchanged": True})
+            world.saves.append(value)
+            world.password = value
+            world.run += 1
+            world.down_until = time.time() + float(flags["RESTART"] or 0)
+            return self._send(200, {"set": bool(value), "saved": True, "restarting": True})
         if parts == ["app", "notice", "dismiss"] and method == "POST":
             body = self._body() or {}
             which = body.get("notice", "install") if isinstance(body, dict) else "install"
@@ -963,7 +1021,7 @@ class Handler(BaseHTTPRequestHandler):
                               headers={"Content-Disposition": f'attachment; filename="{safe}.json"'})
         return self._err(404, "not_found")
 
-    def _app_info(self, flags):
+    def _app_info(self, flags, world: World):
         version = flags["HA_VERSION"].strip()
         slug = flags["SLUG"].strip()
         return self._send(200, {
@@ -975,6 +1033,7 @@ class Handler(BaseHTTPRequestHandler):
             "mdns_name": "smartha-homeassistant" if flags["MDNS"] != "off" else None,
             "ha_version": None if flags["INTEGRATION"] == "unreachable" or version.lower() in ("", "none") else version,
             "ha_api": flags["INTEGRATION"] != "unreachable", "supervisor": True,
+            "started_at": f"run-{world.run}",
         })
 
     def _agent_api(self, parts, flags):

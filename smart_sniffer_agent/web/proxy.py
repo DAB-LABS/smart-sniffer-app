@@ -20,10 +20,17 @@ integration. The proxy answers the page's own routes:
                                  ({"target": "self"})
   POST /app/handover             send the field machines to the integration
                                  again now (no button; a manual retry)
+  GET  /app/password             the agent's password (the token option) as
+                                 it runs now, for Connect by hand
+  POST /app/password/suggest     a new suggestion; nothing is saved
+  POST /app/password             save the password ({"password": text, ""
+                                 for none) as the token option and restart
+                                 the App, so the agent and the discovery use it
 
 It also tells the integration where this box's agent is, through the
-Supervisor's discovery (service smart_sniffer, host and port only), but only
-while integration v0.9 or later is installed. The previous message is
+Supervisor's discovery (service smart_sniffer: host, port and the agent's
+password when one is set), but only while integration v0.9 or later is
+installed. The previous message is
 deleted on every start and a new one posted, so Home Assistant always hears
 of it once per run.
 
@@ -71,6 +78,7 @@ import struct
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -1392,6 +1400,59 @@ def panel_capable(version: Any) -> bool:
     return found is not None and found[:2] >= PANEL_VERSION
 
 
+# The integration's first version that answers smart_sniffer/app/thresholds:
+# the thresholds its entry for this box keeps, which then judge this page's
+# drives too, so the page and Home Assistant agree.
+THRESHOLDS_VERSION = (1, 0)
+THRESHOLDS_COMMAND = f"{INTEGRATION_DOMAIN}/app/thresholds"
+
+
+def integration_thresholds_ready(integration: dict[str, Any]) -> bool:
+    """Integration 1.0 or later loaded, with this box as one of its machines."""
+    found = version_tuple(integration.get("version"))
+    return (integration.get("state") == STATE_LOADED and not integration.get("stale")
+            and integration.get("haos_entry") is True
+            and found is not None and found[:2] >= THRESHOLDS_VERSION)
+
+
+def parse_integration_thresholds(result: Any) -> dict[str, dict[str, int]] | None:
+    """smart_sniffer/app/thresholds' answer as {key: {label: int}}: the
+    App's own shape, a mapping of drive to its overrides, or the options'
+    list of {card, label, value}; either may come wrapped in
+    {"thresholds": ...}. A key is the agent's drive id, the card key (serial,
+    or id:<drive id>) or the card id (self|<key>); thresholds_for() tries
+    each. None when the answer is neither."""
+    if isinstance(result, dict) and set(result) >= {"thresholds"} and \
+            isinstance(result["thresholds"], (dict, list)):
+        result = result["thresholds"]
+    if isinstance(result, list):
+        return _normalize_thresholds(result)
+    if not isinstance(result, dict):
+        return None
+    out: dict[str, dict[str, int]] = {}
+    for key, values in result.items():
+        if not isinstance(key, str) or not key or not isinstance(values, dict):
+            continue
+        clean = {label: int(value) for label, value in values.items()
+                 if isinstance(label, str) and label and not isinstance(value, bool)
+                 and isinstance(value, (int, float)) and value >= 0}
+        if clean:
+            out[key] = clean
+    return out
+
+
+def thresholds_for(table: dict[str, dict[str, int]], source: str, drive: dict[str, Any],
+                   drive_id: str) -> dict[str, int]:
+    """One drive's overrides from the thresholds in force."""
+    key = drive_card_key(drive, drive_id)
+    if source != "integration":
+        return dict(table.get(card_id("self", key)) or {})
+    for candidate in (drive_id, key, card_id("self", key)):
+        if candidate in table:
+            return dict(table[candidate])
+    return {}
+
+
 def detect_integration(sv: Supervisor) -> dict[str, Any]:
     """One lookup: {"state", "version", "panel", "panel_path", "haos_entry",
     "app_import"} (app_import: the handover version it takes, or None).
@@ -1462,18 +1523,28 @@ class Discovery:
     deleted otherwise. The first sync of a run deletes the message of the
     previous run, whose uuid the app keeps, and posts a new one: the new uuid
     always reaches Core, so the integration hears of the agent once per run.
-    The message names the agent's host and port only; no token."""
+    The message names the agent's host and port, and its password (the
+    token option) when one is set. Supervisor discovery is read only by Home
+    Assistant Core, the same channel apps such as Mosquitto use for their
+    credentials, so the integration's entry for this box keeps the password
+    without anyone typing it. A new password reaches it on the App's next
+    start, which a Save on the page makes happen at once."""
 
-    def __init__(self, sv: Supervisor, state: AppState, host: str, port: int) -> None:
+    def __init__(self, sv: Supervisor, state: AppState, host: str, port: int,
+                 token: str = "") -> None:
         self.sv = sv
         self.state = state
         self.host = host
         self.port = port
+        self.token = token
         self.lock = threading.Lock()
         self.started = False
 
     def config(self) -> dict[str, Any]:
-        return {"host": self.host, "port": self.port}
+        config: dict[str, Any] = {"host": self.host, "port": self.port}
+        if self.token:
+            config["token"] = self.token
+        return config
 
     def _delete(self) -> None:
         uuid = self.state.get(DISCOVERY_UUID)
@@ -1586,14 +1657,16 @@ def agent_call(host: str, port: int, method: str, path: str, *, token: str = "",
         conn.connect()
         if conn.sock is not None:
             conn.sock.settimeout(read_timeout)
-        headers = {"Accept": "application/json"}
+        headers: dict[str, Any] = {"Accept": "application/json"}
         data = raw_body
         if data is None and body is not None:
             data = json.dumps(body).encode()
         if data is not None:
             headers["Content-Type"] = "application/json"
         if token:
-            headers["Authorization"] = f"Bearer {token}"
+            # As UTF-8 bytes: http.client would encode a str as Latin-1 and
+            # fail on any other character a typed password may have.
+            headers["Authorization"] = f"Bearer {token}".encode("utf-8")
         conn.request(method, path, body=data, headers=headers)
         resp = conn.getresponse()
         raw = resp.read()
@@ -1772,6 +1845,16 @@ class LegacyOptions:
                     raise ApiError(502, "supervisor_failed", message or "could not save the app options")
             return stale
 
+    def save_token(self, token: str) -> None:
+        """Save the token option, every other option as it is."""
+        with self.lock:
+            options = dict(self._info()["options"])
+            options["token"] = token
+            status, reply = self.sv.call("POST", "/addons/self/options", {"options": options})
+            if status != 200:
+                message = reply.get("message") if isinstance(reply, dict) else None
+                raise ApiError(502, "supervisor_failed", message or "could not save the app options")
+
     def thresholds(self) -> dict[str, dict[str, int]]:
         """The per-card thresholds 0.3.x kept in the options, by card id, read
         again at most every MEMO_SECONDS; the last known (or none) when the
@@ -1784,6 +1867,31 @@ class LegacyOptions:
             pass
         self._memo_at = time.monotonic()
         return self._thresholds or {}
+
+
+# A password is sent as "Authorization: Bearer <password>" by the
+# integration and by this proxy, so it cannot hold a control character (a
+# line break would end the header) and spaces around it are lost on the way
+# (HTTP trims them): they are taken off here. Anything else goes, any length
+# up to PASSWORD_MAX; mounts.py writes it into the agent config as a JSON
+# string, escaped whatever it holds.
+PASSWORD_MAX = 1024
+PASSWORD_SHORT = 12  # under this the page says short passwords are easy to guess
+
+
+def clean_password(raw: Any) -> str:
+    """The password to save, from what the page sent; "" is none. ApiError
+    400 for one that cannot work."""
+    if not isinstance(raw, str):
+        raise ApiError(400, "bad_request", "the password must be text")
+    value = raw.strip()
+    if len(value) > PASSWORD_MAX:
+        raise ApiError(400, "password_too_long",
+                       f"A password can be up to {PASSWORD_MAX} characters.")
+    if any(unicodedata.category(ch) == "Cc" for ch in value):
+        raise ApiError(400, "password_control",
+                       "A password cannot hold line breaks, tabs or other control characters.")
+    return value
 
 
 def drop_stale_options(store: LegacyOptions) -> None:
@@ -2321,6 +2429,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
     app_state: AppState = AppState(None)
     watch: IntegrationWatch = IntegrationWatch(supervisor, None)
     handover: Handover | None = None
+    started_at: str = ""  # this run of the proxy (its start time); a Save's restart changes it
+    restart_delay: float = 1.0  # seconds between a Save's answer and the App's restart
+    restarting: bool = False
+    thresholds_problem: str | None = "not asked"  # the last smart_sniffer/app/thresholds failure logged
 
     # The routes answered by the proxy itself: (method, path pattern, handler
     # name). Path parameters are named groups, percent-decoded before use.
@@ -2332,6 +2444,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ("POST", r"/ha/add", "_route_ha_add"),
         ("GET", r"/cards/(?P<cid>[^/]+)/file", "_route_card_file"),
         ("POST", r"/app/handover", "_route_handover"),
+        ("GET", r"/app/password", "_route_password_get"),
+        ("POST", r"/app/password/suggest", "_route_password_suggest"),
+        ("POST", r"/app/password", "_route_password_save"),
     ]
 
     def log_message(self, format, *args):
@@ -2480,7 +2595,54 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "ha_version": sv.ha_version(),
             "ha_api": ha_api,
             "supervisor": slug is not None,
+            "started_at": self.started_at,
         })
+
+    # ── /app/password ──
+    #
+    # The agent's password is the App's token option. The page shows it
+    # under Connect by hand, suggests new ones and saves one. The page
+    # answers only Home Assistant's ingress, so only Home Assistant admins
+    # see it. A save writes the option through the Supervisor and restarts
+    # the App: run.sh gives the agent the new password, and the new run's
+    # discovery takes it to the integration's entry for this box.
+
+    def _password_state(self) -> dict[str, Any]:
+        return {"set": bool(self.token), "password": self.token,
+                "restarting": ProxyHandler.restarting, "short_below": PASSWORD_SHORT}
+
+    def _route_password_get(self, _parsed) -> None:
+        self._send_json(200, self._password_state())
+
+    def _route_password_suggest(self, _parsed) -> None:
+        import passwords  # beside this file, in /opt/web
+
+        self._send_json(200, {"password": passwords.generate()})
+
+    def _route_password_save(self, _parsed) -> None:
+        body = self._read_json()
+        if not isinstance(body, dict) or "password" not in body:
+            raise ApiError(400, "bad_request", "send {\"password\": text}")
+        password = clean_password(body.get("password"))
+        if ProxyHandler.restarting:
+            raise ApiError(409, "restarting", "The App is restarting with the last password saved.")
+        if password == self.token:
+            self._send_json(200, {**self._password_state(), "saved": False, "unchanged": True})
+            return
+        self.options.save_token(password)
+        ProxyHandler.restarting = True
+        log("Password saved" if password else "Password cleared")
+        self._send_json(200, {"set": bool(password), "saved": True, "restarting": True})
+        threading.Thread(target=self._restart_app, daemon=True).start()
+
+    def _restart_app(self) -> None:
+        """Restart the App, once the page has its answer."""
+        time.sleep(self.restart_delay)
+        log("Restarting the App so the agent uses the new password")
+        status, _ = self.supervisor.call("POST", "/addons/self/restart")
+        if status != 200:
+            log(f"The App did not restart (HTTP {status}); restart it from its page")
+            ProxyHandler.restarting = False
 
     # ── /fleet/hosts/self/drives ──
 
@@ -2523,7 +2685,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         failed_ids = {str(d.get("id")) for d in payloads if "smart_data" not in d}
 
         rules_ok = self.rules.load()
-        saved = self.options.thresholds() if rules_ok else {}
+        saved, source = self._thresholds_in_force() if rules_ok else ({}, "app")
         items: list[dict[str, Any]] = []
         for drive in payloads:
             drive_id = str(drive.get("id"))
@@ -2531,10 +2693,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 items.append({"type": "drive", "id": drive_id, "drive": drive, "verdict": None,
                               "view": None, "lab": None, "error": "not_answering"})
                 continue
-            overrides = dict(saved.get(card_id(key, drive_card_key(drive, drive_id))) or {})
+            overrides = thresholds_for(saved, source, drive, drive_id)
             verdict, view = judge_drive(self.rules, drive, rules_ok, overrides)
             items.append({"type": "drive", "id": drive_id, "drive": drive, "verdict": verdict,
-                          "view": view, "lab": None, "thresholds_source": "app"})
+                          "view": view, "lab": None, "thresholds_source": source})
 
         endpoints = info.get("endpoints") or []
         pools_status = "none"
@@ -2580,11 +2742,34 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "pools_status": pools_status,
             "filesystems_status": filesystems_status,
             "rules_version": self.rules.version if rules_ok else None,
+            "thresholds_source": source,
             "stale": False,
             "health": info,
         }
         self.cache.update(key, response=response, last_answer=now)
         return response
+
+    def _thresholds_in_force(self) -> tuple[dict[str, dict[str, int]], str]:
+        """The thresholds this read judges by, and where they come from:
+        "integration" when integration 1.0 or later has this box (its entry's
+        thresholds, asked on every read), else "app" (the App's own, kept
+        from 0.3.x). The integration's state is the watch's last lookup, so
+        this asks Core only when the integration has this box."""
+        if integration_thresholds_ready(self.watch.peek() or {}):
+            try:
+                found = parse_integration_thresholds(self.supervisor.ws({"type": THRESHOLDS_COMMAND}))
+            except WebSocketError as err:
+                found = None
+                problem = err.code or "no answer"
+            else:
+                problem = None if found is not None else "an answer it cannot read"
+            if problem != ProxyHandler.thresholds_problem:  # logged once per change
+                ProxyHandler.thresholds_problem = problem
+                log(f"{THRESHOLDS_COMMAND}: {problem}; the App's own thresholds apply" if problem
+                    else "Drives are judged by the integration's thresholds")
+            if found is not None:
+                return found, "integration"
+        return self.options.thresholds(), "app"
 
     def _agent_info(self, info: dict[str, Any], drives: Any, pools: Any) -> dict[str, Any]:
         """The response's agent block, from the agent's health answer."""
@@ -2616,6 +2801,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "pools_status": last.get("pools_status"),
             "filesystems_status": last.get("filesystems_status"),
             "rules_version": last.get("rules_version") or self.rules.version,
+            "thresholds_source": last.get("thresholds_source"),
             "stale": True,
             "health": last.get("health"),
         }
@@ -2814,7 +3000,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # ingress gateway and loopback, so no one else gets the token's
             # access this way.
             if inject_token and self.token and "Authorization" not in headers:
-                headers["Authorization"] = f"Bearer {self.token}"
+                headers["Authorization"] = f"Bearer {self.token}".encode("utf-8")
 
             # Make the proxied request
             conn = http.client.HTTPConnection(host, port, timeout=30)
@@ -2940,6 +3126,8 @@ def main():
                         help="Where the page, its scripts and images are")
     parser.add_argument("--data-dir", type=str, default="/data",
                         help="Where app-state.json is kept (empty: memory only)")
+    parser.add_argument("--restart-delay", type=float, default=1.0,
+                        help="Seconds between a password save's answer and the App's restart")
     args = parser.parse_args()
 
     ProxyHandler.agent_port = args.agent_port
@@ -2947,6 +3135,8 @@ def main():
     # The agent token, from the environment so it never shows on a command line
     ProxyHandler.token = os.environ.get("AGENT_TOKEN", "")
     ProxyHandler.app_version = args.app_version
+    ProxyHandler.started_at = f"{time.time():.3f}"
+    ProxyHandler.restart_delay = args.restart_delay
     ProxyHandler.agent_host = args.agent_host.strip() or DEFAULT_AGENT_HOST
     ProxyHandler.mdns_name = args.mdns_name.strip() or None
     ProxyHandler.rules = Rules(args.rules_dir)
@@ -2961,7 +3151,7 @@ def main():
         os.path.join(args.data_dir, "app-state.json") if args.data_dir else None
     )
     discovery = Discovery(ProxyHandler.supervisor, ProxyHandler.app_state,
-                          ProxyHandler.agent_host, ProxyHandler.agent_port)
+                          ProxyHandler.agent_host, ProxyHandler.agent_port, ProxyHandler.token)
     ProxyHandler.watch = IntegrationWatch(ProxyHandler.supervisor, discovery,
                                           args.ha_cache_seconds)
     ProxyHandler.handover = Handover(ProxyHandler.supervisor, ProxyHandler.app_state,

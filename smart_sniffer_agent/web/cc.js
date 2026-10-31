@@ -50,6 +50,21 @@ const WEAR_NAMES = ['Wear_Leveling_Count', 'Media_Wearout_Indicator', 'SSD_Life_
 const NVME_FIELDS = { critical_warning: 'critical_warning', media_errors: 'media_errors',
   available_spare: 'available_spare', wear: 'percentage_used' };
 const POLL_MS = 30000; // this box's drives, read again while the page is open
+// The agent's password, as Connect by hand shows it while hidden: always the
+// same dots, so its length does not show either.
+const PW_DOTS = '\u2022'.repeat(12);
+const PW_SHORT = 12; // under this, a gentle note that short passwords are easy to guess
+const RESTART_POLL_MS = 3000; // while the App restarts after a password save
+const RESTART_GIVE_UP_MS = 180000;
+// A serial number (or WWN) on a card: the last four characters, after the
+// same eight dots whatever its length. A mask, never a blur (a blur stays
+// readable in a video). Four characters or fewer: all dots.
+const MASK_DOTS = '\u2022'.repeat(8);
+function maskSerial(value) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text) return '';
+  return text.length <= 4 ? MASK_DOTS : MASK_DOTS + text.slice(-4);
+}
 const DOWN_POLL_MS = 8000; // while its agent does not answer
 const enc = encodeURIComponent;
 // Where the integration comes from: its HACS page (through My Home
@@ -76,6 +91,8 @@ const LINK_CARDS = {
   update: { title: GET_MORE, body: 'Update the SMART Sniffer integration to 0.9 to add your other machines and see them all in the Control Center.', close: 'update' },
 };
 
+if (typeof window !== 'undefined') window.maskSerial = maskSerial;
+
 function cc() {
   // Row heights while a card is open, kept off the reactive state: each
   // open card's closed height at the card width it was measured at, and
@@ -99,10 +116,15 @@ function cc() {
     pageErr: '',
     ui: { open: {}, confirm: null, copied: '', copiedText: '', toast: '', note: {}, pop: null },
     popOpenedAt: 0,
+    // The agent's password (the App's token option), for Connect by hand.
+    // draft is the input: Generate fills it, nothing is saved until Save.
+    pw: { loaded: false, set: false, value: '', shown: false, draft: '', busy: false,
+      err: '', note: '', restarting: false, since: 0, run: '', confirmClear: false },
 
     // ── Start and timers ────────────────────────────────────────────
     init() {
       this.loadInfo();
+      this.loadPassword();
       this.loadSelf();
       this.loadHa();
       setInterval(() => this.tick(), 1000);
@@ -164,6 +186,15 @@ function cc() {
     async loadInfo() {
       const r = await this.request('app/info');
       if (r.ok && r.data) this.info = r.data;
+      return r.ok && r.data ? r.data : null;
+    },
+
+    async loadPassword() {
+      const r = await this.request('app/password');
+      if (!r.ok || !r.data) return;
+      this.pw.loaded = true;
+      this.pw.set = !!r.data.set;
+      this.pw.value = typeof r.data.password === 'string' ? r.data.password : '';
     },
 
     // This box's drives every 30 seconds; every 8 while its agent does not
@@ -715,8 +746,9 @@ function cc() {
       const out = [];
       const model = d.model || sd.model_name;
       if (model) out.push({ k: 'Model', v: String(model), t: true });
+      // The serial shows masked; its popover holds the full value and Copy.
       const serial = d.serial || sd.serial_number;
-      if (serial) out.push({ k: 'Serial', v: String(serial), t: true });
+      if (serial) out.push({ k: 'Serial', v: maskSerial(serial), full: String(serial), t: true });
       if (sd.firmware_version) out.push({ k: 'Firmware', v: String(sd.firmware_version), t: true });
       const cap = (sd.user_capacity && sd.user_capacity.bytes) || sd.nvme_total_capacity;
       if (typeof cap === 'number' && cap > 0) out.push({ k: 'Capacity', v: this.bytes(cap), x: `${this.num(cap)} bytes` });
@@ -944,6 +976,97 @@ function cc() {
       if (i.mdns_name) fields.push({ k: 'mDNS', v: i.mdns_name });
       return { fields: fields.filter((f) => f.v), password: false };
     },
+    // The password row under Connect by hand: dots until revealed; the
+    // value opens the shared popover, whose Copy takes the real password.
+    get pwText() {
+      if (!this.pw.set) return 'none';
+      return this.pw.shown ? this.pw.value : PW_DOTS;
+    },
+    pwPop(ev) {
+      if (!this.pw.set) return;
+      this.showExact(ev, this.pwText, this.pw.value);
+    },
+    pwToggle() {
+      this.pw.shown = !this.pw.shown;
+      if (this.ui.pop && this.ui.pop.copy === this.pw.value) this.ui.pop = null;
+    },
+    // Lines under the input: a short password (still saved), a Save that
+    // removes the password.
+    get pwHint() {
+      const draft = this.pw.draft.trim();
+      if (!draft) return this.pw.set ? 'Save with the box empty removes the password.' : '';
+      if (draft.length < PW_SHORT) return 'Short passwords are easy to guess. It still saves.';
+      return '';
+    },
+    get pwCanSave() {
+      const draft = this.pw.draft.trim();
+      return !this.pw.busy && !this.pw.restarting && (draft ? draft !== this.pw.value : this.pw.set);
+    },
+    async pwGenerate() {
+      this.pw.err = '';
+      this.pw.confirmClear = false;
+      const r = await this.request('app/password/suggest', { method: 'POST', body: {} });
+      if (r.ok && r.data && r.data.password) this.pw.draft = r.data.password;
+      else this.pw.err = 'No suggestion came back. Try again.';
+    },
+    async pwSave() {
+      if (!this.pwCanSave) return;
+      // Removing the password takes a second click.
+      if (!this.pw.draft.trim() && !this.pw.confirmClear) {
+        this.pw.confirmClear = true;
+        return;
+      }
+      this.pw.confirmClear = false;
+      this.pw.busy = true;
+      this.pw.err = '';
+      this.pw.note = '';
+      const run = (this.info && this.info.started_at) || '';
+      const r = await this.request('app/password', { method: 'POST', body: { password: this.pw.draft } });
+      this.pw.busy = false;
+      if (r.ok && r.data && r.data.saved) {
+        this.pw.draft = '';
+        this.pw.restarting = true;
+        this.pw.since = Date.now();
+        this.pw.run = run;
+        this.pw.note = 'Saved. The App restarts so the agent uses it; this page comes back by itself.';
+        setTimeout(() => this.pwWait(), RESTART_POLL_MS);
+        return;
+      }
+      if (r.ok && r.data && r.data.unchanged) {
+        this.pw.note = 'That is the password the agent already has.';
+        return;
+      }
+      this.pw.err = (r.data && r.data.message) || 'It was not saved. The App log may say why.';
+    },
+    // After a save: wait for the App's new run, then read everything again.
+    async pwWait() {
+      const info = await this.loadInfo();
+      if (info && info.started_at && info.started_at !== this.pw.run) {
+        this.pw.restarting = false;
+        this.pw.note = '';
+        await this.loadPassword();
+        this.selfNext = 0;
+        this.loadHa();
+        this.showToast(this.pw.set ? 'The agent now has the new password.' : 'The agent has no password now.');
+        return;
+      }
+      if (Date.now() - this.pw.since > RESTART_GIVE_UP_MS) {
+        this.pw.restarting = false;
+        this.pw.note = '';
+        this.pw.err = 'The App has not come back. Check the App log.';
+        return;
+      }
+      setTimeout(() => this.pwWait(), RESTART_POLL_MS);
+    },
+    // The line that says which thresholds judge the drives.
+    get thresholdsLine() {
+      const data = this.self || this.selfLastGood;
+      const source = data && data.thresholds_source;
+      if (source === 'integration') return 'Thresholds: from the SMART Sniffer integration.';
+      if (source === 'app') return "Thresholds: this App's own.";
+      return '';
+    },
+
     // This app's agent, for the line at the top of the page.
     get topAgent() {
       const i = this.info;

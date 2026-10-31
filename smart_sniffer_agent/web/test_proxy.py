@@ -29,6 +29,7 @@ import http.client
 import importlib.util
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -135,6 +136,13 @@ class FakeState:
         self.poll_lost = 0
         self.import_restart = False
         self.import_created: list[str] = []
+        # The App's own restart (POST /addons/self/restart): how many asked,
+        # and the status the Supervisor answers.
+        self.restarts = 0
+        self.restart_status = 200
+        # smart_sniffer/app/thresholds (integration 1.0): None answers
+        # unknown_command, "refused" unauthorized, anything else is the result.
+        self.app_thresholds: Any = None
 
 
 STATE = FakeState()
@@ -183,6 +191,10 @@ class FakeSupervisor(BaseHTTPRequestHandler):
                 return
             STATE.options = body["options"]
             _json_reply(self, 200, {"result": "ok", "data": {}})
+            return
+        if path == "/addons/self/restart" and method == "POST":
+            STATE.restarts += 1
+            _json_reply(self, STATE.restart_status, {"result": "ok", "data": {}})
             return
         if path == "/discovery" and method == "POST":
             if STATE.discovery_status != 200:
@@ -308,6 +320,12 @@ def _ws_result(command: dict[str, Any]) -> dict[str, Any]:
         return ok(STATE.info)
     if kind == "smart_sniffer/app/import":
         return _fake_import(command)
+    if kind == "smart_sniffer/app/thresholds":
+        if STATE.app_thresholds is None:
+            return error("unknown_command", "Unknown command.")
+        if STATE.app_thresholds == "refused":
+            return error("unauthorized", "Unauthorized")
+        return ok(STATE.app_thresholds)
     if kind == "smart_sniffer/app/import/result":
         if STATE.import_restart or command.get("job_id") not in STATE.import_jobs:
             return error("not_found", "no such job")
@@ -355,8 +373,8 @@ def _fake_import(command: dict[str, Any]) -> dict[str, Any] | None:
 def _fake_core_websocket(handler: BaseHTTPRequestHandler) -> None:
     try:
         _fake_core_websocket_run(handler)
-    except (BrokenPipeError, ConnectionResetError):
-        pass  # the proxy stopped mid-command
+    except (BrokenPipeError, ConnectionResetError, ValueError):
+        pass  # the proxy stopped mid-command (ValueError: the frame ended early)
 
 
 def _fake_core_websocket_run(handler: BaseHTTPRequestHandler) -> None:
@@ -483,7 +501,10 @@ def agent_handler(state: AgentState):
                     health["hostname"] = state.hostname
                 _json_reply(self, 200, health)
                 return
-            if state.token and self.headers.get("Authorization") != f"Bearer {state.token}":
+            # Compared as bytes, as the Go agent does (http.server decodes
+            # header bytes as Latin-1).
+            sent = (self.headers.get("Authorization") or "").encode("latin-1", "replace")
+            if state.token and sent != f"Bearer {state.token}".encode("utf-8"):
                 _json_reply(self, 401, {"error": "unauthorized"})
                 return
             if self.path == "/api/drives":
@@ -996,7 +1017,9 @@ def test_app_info(proxy):
         "ha_version": HA_VERSION,
         "ha_api": True,
         "supervisor": True,
+        "started_at": info["started_at"],  # this run of the proxy
     }
+    assert float(info["started_at"]) > 0
 
 
 def test_app_info_slug_is_cached(proxy):
@@ -1704,16 +1727,23 @@ def test_discovery_only_for_v09(backends, tmp_path, case, posted):
     assert TOKEN not in output
 
 
-def test_discovery_never_carries_the_token(backends, tmp_path):
+@pytest.mark.parametrize("agent_token", [APP_TOKEN, "", "p\u00e4ss w\"rd"])
+def test_discovery_carries_the_password_when_one_is_set(backends, tmp_path, agent_token):
+    """Supervisor discovery reaches Home Assistant Core only, so the
+    integration's entry for this box gets the password with it (1.0). With
+    none set the message is what 0.4 sent. The log never shows it."""
     _loaded()
     proc, client = _fresh(backends[0], "--agent-port=9099", "--ha-cache-seconds=0",
-                          data_dir=str(tmp_path), agent_token=APP_TOKEN)
+                          data_dir=str(tmp_path), agent_token=agent_token)
     try:
         _wait_for(lambda: _posts())
     finally:
         output = _stop_proxy(proc)
-    assert _posts() == [{"service": "smart_sniffer", "config": {"host": AGENT_HOST, "port": 9099}}]
-    assert APP_TOKEN not in json.dumps(STATE.calls) and APP_TOKEN not in output
+    config = {"host": AGENT_HOST, "port": 9099}
+    if agent_token:
+        config["token"] = agent_token
+    assert _posts() == [{"service": "smart_sniffer", "config": config}]
+    assert not agent_token or agent_token not in output
 
 
 def test_discovery_replaced_at_every_start(backends, tmp_path):
@@ -2266,3 +2296,247 @@ def test_no_handover_without_the_integration(backends, tmp_path):
     finally:
         _stop_proxy(proc)
     assert _imports() == [] and STATE.options["hosts"] == HANDOVER_OPTIONS["hosts"]
+
+
+# ── The agent's password (App 1.0) ──────────────────────────────────────────
+
+SUGGESTION = re.compile(r"^(?:\d{4}-)?[a-z]+-(?:\d{4}-)?[a-z]+-(?:\d{4}-)?[a-z]+(?:-\d{4})?$")
+
+
+def _password_proxy(backends, tmp_path, agent_token: str = APP_TOKEN):
+    supervisor, agent = backends
+    return _start_proxy(_proxy_args(supervisor, agent.server_address[1], str(tmp_path),
+                                    "--restart-delay=0.05"), TOKEN, agent_token)
+
+
+def test_password_shows_the_one_the_agent_runs_with(proxy):
+    status, body = proxy.get("/app/password")
+    assert status == 200
+    assert body == {"set": True, "password": APP_TOKEN, "restarting": False, "short_below": 12}
+
+
+def test_password_suggestions_save_nothing(proxy):
+    seen = set()
+    for _ in range(5):
+        status, body = proxy.post("/app/password/suggest")
+        assert status == 200 and SUGGESTION.fullmatch(body["password"])
+        seen.add(body["password"])
+    assert len(seen) == 5
+    assert _option_writes() == [] and STATE.restarts == 0
+
+
+def test_password_save_writes_the_option_and_restarts_the_app(backends, tmp_path):
+    STATE.options = {**STATE.options, "thresholds": [{"card": "self|S1", "label": "x", "value": 1}]}
+    before = copy.deepcopy(STATE.options)
+    proc, client = _password_proxy(backends, tmp_path)
+    try:
+        status, body = client.post("/app/password", {"password": "  sneaky-0042-cipher-otter \t"})
+        assert status == 200 and body == {"set": True, "saved": True, "restarting": True}
+        assert STATE.options == {**before, "token": "sneaky-0042-cipher-otter"}
+        _wait_for(lambda: STATE.restarts == 1)
+        # Until the App goes down, the page hears that it is restarting, and
+        # no second save is taken.
+        assert client.get("/app/password")[1]["restarting"] is True
+        status, body = client.post("/app/password", {"password": "another"})
+        assert status == 409 and body["error"] == "restarting"
+        assert STATE.options["token"] == "sneaky-0042-cipher-otter"
+    finally:
+        output = _stop_proxy(proc)
+    assert len(_option_writes()) == 1
+    assert "sneaky-0042-cipher-otter" not in output and APP_TOKEN not in output
+    assert "Password saved" in output
+
+
+@pytest.mark.parametrize("typed", ["short", "päss w\"rd \\ {}: #", "x" * 1024])
+def test_any_typed_password_is_saved_as_it_is(backends, tmp_path, typed):
+    proc, client = _password_proxy(backends, tmp_path)
+    try:
+        status, body = client.post("/app/password", {"password": typed})
+    finally:
+        _stop_proxy(proc)
+    assert status == 200 and body["saved"] is True
+    assert STATE.options["token"] == typed
+
+
+def test_clearing_the_password_saves_none(backends, tmp_path):
+    proc, client = _password_proxy(backends, tmp_path)
+    try:
+        status, body = client.post("/app/password", {"password": "   "})
+        assert status == 200 and body == {"set": False, "saved": True, "restarting": True}
+        _wait_for(lambda: STATE.restarts == 1)
+    finally:
+        output = _stop_proxy(proc)
+    assert STATE.options["token"] == ""
+    assert "Password cleared" in output
+
+
+def test_the_same_password_again_changes_nothing(backends, tmp_path):
+    proc, client = _password_proxy(backends, tmp_path)
+    try:
+        status, body = client.post("/app/password", {"password": APP_TOKEN})
+        time.sleep(0.2)
+    finally:
+        _stop_proxy(proc)
+    assert status == 200 and body["saved"] is False and body["unchanged"] is True
+    assert _option_writes() == [] and STATE.restarts == 0
+
+
+@pytest.mark.parametrize("body,code", [
+    ({"password": "line\nbreak"}, "password_control"),
+    ({"password": "tab\there"}, "password_control"),
+    ({"password": "nul\x00"}, "password_control"),
+    ({"password": "x" * 1025}, "password_too_long"),
+    ({"password": 12345}, "bad_request"),
+    ({}, "bad_request"),
+    (["not", "a", "dict"], "bad_request"),
+])
+def test_a_password_that_cannot_work_is_refused(proxy, body, code):
+    status, reply = proxy.post("/app/password", body)
+    assert status == 400 and reply["error"] == code
+    assert _option_writes() == [] and STATE.restarts == 0
+
+
+def test_a_save_the_supervisor_refuses_keeps_the_app_running(backends, tmp_path):
+    STATE.options_status = 400
+    proc, client = _password_proxy(backends, tmp_path)
+    try:
+        status, body = client.post("/app/password", {"password": "new-password-1"})
+        assert status == 502 and body["error"] == "supervisor_failed"
+        time.sleep(0.2)
+        assert STATE.restarts == 0 and client.get("/app/password")[1]["restarting"] is False
+    finally:
+        _stop_proxy(proc)
+
+
+def test_a_restart_the_supervisor_refuses_lets_the_page_try_again(backends, tmp_path):
+    STATE.restart_status = 500
+    proc, client = _password_proxy(backends, tmp_path)
+    try:
+        assert client.post("/app/password", {"password": "first-password"})[0] == 200
+        _wait_for(lambda: STATE.restarts == 1)
+        _wait_for(lambda: client.get("/app/password")[1]["restarting"] is False)
+        assert client.post("/app/password", {"password": "second-password"})[0] == 200
+    finally:
+        output = _stop_proxy(proc)
+    assert "did not restart" in output
+
+
+def test_clean_password_unit(mod):
+    assert mod.clean_password("  a b  ") == "a b"
+    assert mod.clean_password("") == ""
+    assert mod.clean_password("☂é中") == "☂é中"
+    for bad in ("a\rb", "a\x7fb", "a\x1bb", None, 5):
+        with pytest.raises(mod.ApiError):
+            mod.clean_password(bad)
+
+
+def test_a_password_beyond_latin1_reaches_the_agent(backends):
+    """The proxy sends the token as UTF-8, as the integration does, so a
+    typed password with any character still reads the agent."""
+    supervisor, _ = backends
+    token = "päss-☂-中"
+    own = AgentState(token=token)
+    server = _serve(agent_handler(own))
+    proc, client = _start_proxy(_proxy_args(supervisor, server.server_address[1], ""), TOKEN, token)
+    try:
+        _, body = client.get("/fleet/hosts/self/drives")
+        status, _raw = client.get("/api/drives")
+    finally:
+        _stop_proxy(proc)
+        server.shutdown()
+    assert body["status"] == "ok" and status == 200
+
+
+# ── Thresholds from the integration (#11, App 1.0) ──────────────────────────
+
+def _thresholds_read(backends, version: str = "1.0.0", haos_entry: bool = True) -> dict[str, Any]:
+    supervisor, agent = backends
+    SELF_AGENT.drives = [simple_drive("sda", "SELF-1", {"Reallocated_Sector_Ct": 4})]
+    _loaded(version=version, haos_entry=haos_entry)
+    proc, client = _start_proxy(_proxy_args(supervisor, agent.server_address[1], "",
+                                            "--ha-cache-seconds=0"), TOKEN, APP_TOKEN)
+    try:
+        client.get("/ha/integration")  # the watch's lookup the read goes by
+        _, body = client.get("/fleet/hosts/self/drives")
+    finally:
+        _stop_proxy(proc)
+    return body
+
+
+def _reallocated(body: dict[str, Any]) -> dict[str, Any]:
+    item = body["items"][0]
+    return {"state": item["verdict"]["state"], "source": item["thresholds_source"],
+            "limit": {lim["label"]: lim for lim in item["verdict"]["limits"]}
+            ["Reallocated Sector Count"]["value"]}
+
+
+def _thresholds_asked() -> int:
+    return sum(1 for c in STATE.ws_commands if c.get("type") == "smart_sniffer/app/thresholds")
+
+
+@needs_rules
+@pytest.mark.parametrize("answer", [
+    {"sda": {"Reallocated Sector Count": 10}},  # by the agent's drive id
+    {"SELF-1": {"Reallocated Sector Count": 10}},  # by the card key
+    {"self|SELF-1": {"Reallocated Sector Count": 10}},  # by the card id
+    {"thresholds": {"sda": {"Reallocated Sector Count": 10}}},
+    [{"card": "self|SELF-1", "label": "Reallocated Sector Count", "value": 10}],
+])
+def test_integration_thresholds_judge_the_drives(backends, answer):
+    """Integration 1.0 with this box: its thresholds judge the page's drives,
+    and the App's own (here a stricter limit) are not used."""
+    STATE.options = {**STATE.options, "thresholds": [
+        {"card": "self|SELF-1", "label": "Reallocated Sector Count", "value": 1}]}
+    STATE.app_thresholds = answer
+    body = _thresholds_read(backends)
+    assert _reallocated(body) == {"state": "NO", "source": "integration", "limit": 10}
+    assert body["thresholds_source"] == "integration"
+    assert _thresholds_asked() >= 1
+
+
+@needs_rules
+def test_integration_without_overrides_judges_by_its_defaults(backends):
+    STATE.options = {**STATE.options, "thresholds": [
+        {"card": "self|SELF-1", "label": "Reallocated Sector Count", "value": 10}]}
+    STATE.app_thresholds = {}
+    body = _thresholds_read(backends)
+    assert _reallocated(body)["source"] == "integration"
+    assert _reallocated(body)["limit"] != 10
+
+
+@needs_rules
+@pytest.mark.parametrize("case", ["older", "no_haos_entry", "unknown_command", "refused", "garbage"])
+def test_the_apps_own_thresholds_otherwise(backends, case):
+    """0.9.x, 1.0 without this box, or an answer that does not come: the
+    App's own saved thresholds, as before."""
+    STATE.options = {**STATE.options, "thresholds": [
+        {"card": "self|SELF-1", "label": "Reallocated Sector Count", "value": 10}]}
+    STATE.app_thresholds = {"unknown_command": None, "refused": "refused", "garbage": "nope"}.get(
+        case, {"sda": {"Reallocated Sector Count": 2}})
+    body = _thresholds_read(backends, version="0.9.2" if case == "older" else "1.0.0",
+                            haos_entry=case != "no_haos_entry")
+    assert _reallocated(body) == {"state": "NO", "source": "app", "limit": 10}
+    assert body["thresholds_source"] == "app"
+    if case in ("older", "no_haos_entry"):
+        assert _thresholds_asked() == 0
+
+
+def test_parse_integration_thresholds_unit(mod):
+    parse = mod.parse_integration_thresholds
+    assert parse({"a": {"X": 3, "Y": True, "Z": -1, "": 2}, "b": "no", "": {"X": 1}}) == {"a": {"X": 3}}
+    assert parse({"thresholds": [{"card": "self|S", "label": "X", "value": 2}]}) == {"self|S": {"X": 2}}
+    assert parse({}) == {} and parse([]) == {}
+    assert parse(None) is None and parse("x") is None and parse(3) is None
+    drive = {"serial": "S"}
+    table = {"d1": {"X": 1}, "S": {"X": 2}, "self|S": {"X": 3}}
+    assert mod.thresholds_for(table, "integration", drive, "d1") == {"X": 1}
+    assert mod.thresholds_for({"S": {"X": 2}}, "integration", drive, "d9") == {"X": 2}
+    assert mod.thresholds_for(table, "app", drive, "d1") == {"X": 3}
+    assert mod.thresholds_for({}, "integration", {}, "d1") == {}
+    ready = mod.integration_thresholds_ready
+    assert ready({"state": "loaded", "version": "1.0.0", "haos_entry": True})
+    assert ready({"state": "loaded", "version": "1.2.0-beta.1", "haos_entry": True})
+    assert not ready({"state": "loaded", "version": "0.9.9", "haos_entry": True})
+    assert not ready({"state": "loaded", "version": "1.0.0", "haos_entry": None})
+    assert not ready({"state": "loaded", "version": "1.0.0", "haos_entry": True, "stale": True})
+    assert not ready({"state": "restart", "version": "1.0.0", "haos_entry": True})

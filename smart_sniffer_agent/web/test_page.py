@@ -66,7 +66,8 @@ def server():
         port = s.getsockname()[1]
     env = dict(os.environ, QUIET="1", LATENCY="0.01")
     for key in ("AGENT", "DRIVES", "VDISK", "POOL", "RULES", "INTEGRATION", "HAOS_ENTRY", "PANEL_PATH",
-                "HACS", "ADD", "HOSTNAME", "SLUG", "HA_VERSION", "MDNS", "SELF_DELAY"):
+                "HACS", "ADD", "HOSTNAME", "SLUG", "HA_VERSION", "MDNS", "SELF_DELAY",
+                "PASSWORD", "THRESHOLDS", "RESTART"):
         env.pop(key, None)
     proc = subprocess.Popen([sys.executable, str(WEB_DIR / "devserver.py"), "--port", str(port)], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -372,12 +373,12 @@ def test_health_box_and_details(open_page):
     assert det.locator("thead th").all_inner_texts() == ["ID", "Name", "Value", "Worst", "Thresh", "Raw"]
     flagged = sorted(t.split()[0] for t in det.locator("tbody tr.crit").all_inner_texts())
     assert flagged == ["187", "197", "198", "5"], flagged
-    # Raw values are text, never inputs.
-    assert det.locator("input").count() == 0
+    # Raw values are text, never inputs (the one input is the password's).
+    assert det.locator("input:not(.pass-input)").count() == 0
     heads = dict(det.locator("thead th").evaluate_all("els => els.map((e) => [e.textContent, e.title])"))
     assert heads["Raw"] == "The real count or reading. Alerts use this"
     # Connect by hand stays in Details, with this box's address.
-    rows = det.locator(".conn .cp").evaluate_all(
+    rows = det.locator(".conn > .cp").evaluate_all(
         "els => els.map((e) => [e.querySelector('.cp-k').textContent, e.querySelector('.cp-v').textContent])")
     assert rows == [["Host", "local-smart-sniffer-agent"], ["Port", "9099"], ["mDNS", "smartha-homeassistant"]]
     # The NVMe health log is its table.
@@ -489,7 +490,7 @@ def test_page_polls_every_30_seconds(open_page):
     p.page.wait_for_timeout(2000)
     paths = {unquote(re.sub(r"\?.*", "", u[len(p.base):])) for _, u, _ in p.requests
              if not u.endswith((".js", ".css", ".png"))}
-    assert paths <= {"/", "/app/info", "/fleet/hosts/self/drives", "/ha/integration"}, paths
+    assert paths <= {"/", "/app/info", "/app/password", "/fleet/hosts/self/drives", "/ha/integration"}, paths
     assert len(p.api("GET", r"/fleet/hosts/self/drives$")) == 1
 
 
@@ -924,7 +925,9 @@ def test_details_top_names_the_drive(open_page, width):
     ident = bc.locator("dl.kv.ident")
     assert ident.locator("dt").all_inner_texts() == ["Model", "Serial", "Firmware", "Capacity", "Interface"]
     values = ident.locator("dd").all_inner_texts()
-    assert values == ["Seagate BarraCuda 2TB ST2000DM008", "ZFL0K7Q2", "0001", "2.00 TB", "SATA 6.0 Gb/s"], values
+    # The serial shows masked: eight dots and its last four characters.
+    assert values == ["Seagate BarraCuda 2TB ST2000DM008", "\u2022" * 8 + "K7Q2", "0001", "2.00 TB",
+                      "SATA 6.0 Gb/s"], values
     # No copy glyph at rest: model, serial and firmware open the popover;
     # capacity keeps its exact bytes behind it; every value lines up right.
     assert bc.locator(".details button.copy, .details .copied").count() == 0
@@ -944,6 +947,7 @@ def test_details_top_names_the_drive(open_page, width):
     nv = by_id(p, NVME)
     _open(nv)
     assert nv.locator("dl.kv.ident dd").all_inner_texts()[2:] == ["5B2QGXA7", "1.00 TB", "NVMe"]
+    assert nv.locator("dl.kv.ident dd").all_inner_texts()[1] == "\u2022" * 8 + nv.get_attribute("data-card")[-4:]
     assert nv.locator(".devstat").count() == 0
     assert_no_scroll(p)
     assert_inside_cards(p)
@@ -971,7 +975,7 @@ def test_device_statistics_table_takes_the_stand_in_rows(open_page):
     assert vals[names.index("Time above the operating maximum")] == "0 min"
     assert ds.locator("tr", has_text="Reported uncorrectable").locator("td.c-raw").inner_text() == "0"
     # Read only: no inputs, no editor.
-    assert c.locator(".details input, .details .tune, .details .thr").count() == 0
+    assert c.locator(".details input:not(.pass-input), .details .tune, .details .thr").count() == 0
 
 
 def test_one_number_rule_everywhere(open_page):
@@ -1017,15 +1021,20 @@ def test_a_phone_gets_no_underline_and_a_tap_opens_the_number(open_page):
 
 
 def _text_fields(c):
-    """(label, value, trigger) for Model, Serial and Firmware in Details and
-    Host, Port and mDNS under Connect by hand."""
+    """(label, value, trigger, shown) for Model, Serial and Firmware in
+    Details and Host, Port and mDNS under Connect by hand. value is the full
+    value the popover holds; shown is what the card shows (the serial
+    masked: the card id carries it whole)."""
     out = []
+    serial = c.get_attribute("data-card").split("|", 1)[1]
     for row in c.locator("dl.kv.ident > div").all():
         label = row.locator("dt").inner_text()
         if label in ("Model", "Serial", "Firmware"):
-            out.append((label, row.locator("dd").text_content().strip(), row.locator(".bign.txt")))
-    for cp in c.locator(".conn .cp").all():
-        out.append((cp.locator(".cp-k").inner_text(), cp.locator(".cp-v").text_content(), cp.locator(".bign.txt")))
+            shown = row.locator("dd").text_content().strip()
+            out.append((label, serial if label == "Serial" else shown, row.locator(".bign.txt"), shown))
+    for cp in c.locator(".conn > .cp").all():
+        value = cp.locator(".cp-v").text_content()
+        out.append((cp.locator(".cp-k").inner_text(), value, cp.locator(".bign.txt"), value))
     return out
 
 
@@ -1043,7 +1052,7 @@ def test_details_text_values_open_the_popover_and_copy_the_value(open_page, widt
     p, c, fields = _text_card(open_page, width)
     p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
     pop = p.page.locator(".numpop")
-    for label, value, trigger in fields:
+    for label, value, trigger, _shown in fields:
         trigger.click()
         pop.wait_for()
         # The exact value, whole: letters, dots and spaces kept.
@@ -1072,7 +1081,7 @@ def test_copy_leaves_nothing_selected(open_page):
     p, c, fields = _text_card(open_page, 390, touch=True)
     p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
     pop = p.page.locator(".numpop")
-    label, value, trigger = fields[1]  # the serial
+    label, value, trigger, _shown = fields[1]  # the serial
     trigger.tap()
     pop.wait_for()
     p.page.evaluate("""() => { const r = document.createRange();
@@ -1112,13 +1121,13 @@ def test_no_copy_glyph_at_rest_in_details(open_page, touch):
     p, c, fields = _text_card(open_page, 390 if touch else 1280, touch)
     assert c.locator(".details button.copy, .details .copied").count() == 0
     assert p.page.locator(".numpop").count() == 0
-    for label, _value, trigger in fields:
+    for label, _value, trigger, _shown in fields:
         assert trigger.evaluate("e => e.parentElement.querySelectorAll('button, svg').length") == 0, label
 
 
 def test_text_values_underline_only_on_hover(open_page):
     p, c, fields = _text_card(open_page)
-    for label, _value, trigger in fields:
+    for label, _value, trigger, _shown in fields:
         style = lambda t=trigger: t.evaluate(  # noqa: E731
             "e => { const s = getComputedStyle(e); return [s.textDecorationLine, s.textDecorationStyle, s.cursor]; }")
         p.page.mouse.move(0, 0)
@@ -1132,7 +1141,7 @@ def test_text_values_underline_only_on_hover(open_page):
 def test_a_phone_gets_no_underline_on_text_values_and_a_tap_opens_them(open_page):
     p, c, fields = _text_card(open_page, 390, touch=True)
     pop = p.page.locator(".numpop")
-    for label, value, trigger in fields:
+    for label, value, trigger, _shown in fields:
         trigger.tap()
         pop.wait_for()
         assert pop.locator(".cp-v").text_content() == value, label
@@ -1144,9 +1153,9 @@ def test_a_phone_gets_no_underline_on_text_values_and_a_tap_opens_them(open_page
 def test_text_values_open_and_close_from_the_keyboard(open_page):
     p, c, fields = _text_card(open_page)
     pop = p.page.locator(".numpop")
-    for label, value, trigger in fields:
+    for label, value, trigger, shown in fields:
         assert trigger.get_attribute("role") == "button" and trigger.get_attribute("tabindex") == "0", label
-        assert trigger.get_attribute("aria-label") == f"{label} {value}"
+        assert trigger.get_attribute("aria-label") == f"{label} {shown}"
         trigger.focus()
         for key in ("Enter", " "):
             p.page.keyboard.press(key)
@@ -1317,3 +1326,191 @@ def test_details_open_on_a_page_that_just_fits(browser, server):
         p.close()
     finally:
         scrollbars.close()
+
+
+# ── Serial numbers masked (App 1.0) ─────────────────────────────────────────
+
+def test_mask_serial_function(open_page):
+    p = open_page()
+    dots = "•" * 8
+    cases = {"S12R4ABCDE042A": dots + "042A", "ZFL0K7Q2": dots + "K7Q2", "ABCDE": dots + "BCDE",
+             "ABCD": dots, "AB": dots, "  WD-1234  ": dots + "1234", "": ""}
+    for value, masked in cases.items():
+        assert p.page.evaluate("v => window.maskSerial(v)", value) == masked, value
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_the_serial_shows_masked_and_its_popover_holds_it_whole(open_page, width):
+    p = open_page("DRIVES=mixed", width)
+    p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    for cid in (BARRACUDA, NVME, RED):
+        c = by_id(p, cid)
+        _open(c)
+        serial = cid.split("|", 1)[1]
+        row = c.locator("dl.kv.ident > div", has_text="Serial")
+        shown = row.locator("dd").inner_text().strip()
+        assert shown == "•" * 8 + serial[-4:], shown
+        # Nowhere on the card is the serial whole, not even as a hint or a
+        # blur over the real text.
+        assert serial not in c.inner_text()
+        trigger = row.locator(".bign.txt")
+        assert serial not in (trigger.get_attribute("aria-label") or "")
+        assert trigger.get_attribute("title") is None
+        assert "blur" not in trigger.evaluate("e => getComputedStyle(e).filter")
+        # Hover does not reveal it; a click opens the popover with it whole.
+        trigger.hover()
+        p.page.wait_for_timeout(150)
+        assert p.page.locator(".numpop").count() == 0 and serial not in c.inner_text()
+        trigger.click()
+        pop = p.page.locator(".numpop")
+        pop.wait_for()
+        assert pop.locator(".cp-v").text_content() == serial
+        pop.locator("button.copy").click()
+        assert p.wait(lambda: pop.locator(".copied").is_visible())
+        assert p.page.evaluate("navigator.clipboard.readText()") == serial
+        trigger.click()
+        assert p.wait(lambda: pop.count() == 0)
+
+
+# ── The agent's password under Connect by hand (App 1.0) ────────────────────
+
+DOTS12 = "•" * 12
+
+
+def _pass(p: Page, cid: str = NVME):
+    c = by_id(p, cid)
+    c.locator("button.chev").first.wait_for()
+    if c.locator(".details").count() == 0:
+        _open(c)
+    box = c.locator(".pass-edit")
+    box.wait_for()
+    return c, box
+
+
+def _dev_password(p: Page) -> dict:
+    with urllib.request.urlopen(f"{p.base}/dev/password?{p.flags}", timeout=5) as resp:
+        return json.loads(resp.read())
+
+
+def test_password_row_shows_dots_reveals_and_copies(open_page):
+    p = open_page()
+    p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    c, box = _pass(p)
+    # Under Connect by hand, after host and port.
+    order = c.locator(".conn > *").evaluate_all("els => els.map(e => e.className)")
+    assert order.index("pass-edit") > max(i for i, cls in enumerate(order) if cls == "cp")
+    value = box.locator(".pass-val")
+    assert box.locator(".pass-row .cp-k").inner_text() == "Password"
+    assert value.inner_text() == DOTS12
+    assert "sneaky" not in c.inner_text()
+    assert box.locator(".pass-warn").count() == 0
+    # The shared popover, as for host and port: Copy takes the real password.
+    value.click()
+    pop = p.page.locator(".numpop")
+    pop.wait_for()
+    assert pop.locator(".cp-v").text_content() == DOTS12
+    pop.locator("button.copy").click()
+    assert p.wait(lambda: pop.locator(".copied").is_visible())
+    assert p.page.evaluate("navigator.clipboard.readText()") == "sneaky-4821-trenchcoat-falcon"
+    value.click()
+    assert p.wait(lambda: pop.count() == 0)
+    # Show and Hide.
+    box.locator(".pass-reveal").click()
+    assert value.inner_text() == "sneaky-4821-trenchcoat-falcon"
+    assert box.locator(".pass-reveal").inner_text() == "Hide"
+    box.locator(".pass-reveal").click()
+    assert value.inner_text() == DOTS12
+    assert_no_scroll(p)
+
+
+def test_generate_fills_the_input_and_saves_nothing(open_page):
+    p = open_page()
+    c, box = _pass(p)
+    save = box.locator(".pass-save")
+    seen = set()
+    for _ in range(3):
+        box.locator(".pass-gen").click()
+        assert p.wait(lambda: box.locator(".pass-input").input_value() not in ("", *seen))
+        seen.add(box.locator(".pass-input").input_value())
+    for value in seen:
+        assert re.fullmatch(r"(\d{4}-)?[a-z]+-(\d{4}-)?[a-z]+-(\d{4}-)?[a-z]+(-\d{4})?", value), value
+    assert not save.is_disabled()
+    assert _dev_password(p)["saves"] == []
+    assert p.api("POST", r"/app/password$") == []
+
+
+def test_save_restarts_and_the_page_comes_back_by_itself(open_page):
+    p = open_page("RESTART=2")
+    c, box = _pass(p)
+    box.locator(".pass-gen").click()
+    assert p.wait(lambda: box.locator(".pass-input").input_value() != "")
+    new = box.locator(".pass-input").input_value()
+    box.locator(".pass-save").click()
+    # Said at the top of the page, which stays while the cards show the
+    # App not answering.
+    note = p.page.locator(".page-note")
+    assert p.wait(lambda: note.is_visible())
+    assert "restarts" in note.inner_text() and "comes back by itself" in note.inner_text()
+    assert _dev_password(p)["saves"] == [new]
+    # The App comes back on its own; the page reads the new password.
+    assert p.wait(lambda: not note.is_visible(), timeout=15)
+    c, box = _pass(p)
+    assert p.wait(lambda: p.page.locator(".toast").inner_text() == "The agent now has the new password.")
+    box.locator(".pass-reveal").click()
+    assert box.locator(".pass-val").inner_text() == new
+    assert not box.locator(".pass-input").is_disabled()
+
+
+def test_a_typed_short_password_gets_a_gentle_note_and_still_saves(open_page):
+    p = open_page("RESTART=0.2")
+    c, box = _pass(p)
+    box.locator(".pass-input").fill("abc")
+    assert "easy to guess" in box.locator(".pass-hint").inner_text()
+    box.locator(".pass-save").click()
+    assert p.wait(lambda: _dev_password(p)["saves"] == ["abc"])
+    box.locator(".pass-input").fill("a-much-longer-password")
+    assert box.locator(".pass-hint").count() == 0
+
+
+def test_no_password_shows_the_warning_and_clearing_goes_back_to_it(open_page):
+    p = open_page("PASSWORD=none")
+    c, box = _pass(p)
+    warn = box.locator(".pass-warn")
+    assert warn.inner_text() == ("No password set: anyone on your network can read this box's drive data. "
+                                 "Generate one or type your own.")
+    assert box.locator(".pass-none").inner_text() == "none"
+    assert box.locator(".pass-reveal").count() == 0
+    assert box.locator(".pass-save").is_disabled()  # nothing to clear
+    p2 = open_page("RESTART=0.2")
+    c2, box2 = _pass(p2)
+    assert box2.locator(".pass-warn").count() == 0
+    assert "removes the password" in box2.locator(".pass-hint").inner_text()
+    # A second click removes it: the first asks.
+    box2.locator(".pass-save").click()
+    assert box2.locator(".pass-save").inner_text() == "Remove password?"
+    p2.page.wait_for_timeout(200)
+    assert _dev_password(p2)["saves"] == []
+    box2.locator(".pass-save").click()
+    assert p2.wait(lambda: _dev_password(p2)["saves"] == [""])
+    assert p2.wait(lambda: by_id(p2, NVME).locator(".pass-warn").count() == 1, timeout=10)
+    assert p2.wait(lambda: p2.page.locator(".toast").inner_text() == "The agent has no password now.")
+
+
+def test_a_refused_password_says_why(open_page):
+    p = open_page()
+    c, box = _pass(p)
+    box.locator(".pass-input").evaluate("e => { e.value = 'a\\ttab'; e.dispatchEvent(new Event('input')); }")
+    box.locator(".pass-save").click()
+    assert p.wait(lambda: box.locator(".pass-err").count() == 1)
+    assert "control characters" in box.locator(".pass-err").inner_text()
+    assert _dev_password(p)["saves"] == []
+
+
+@pytest.mark.parametrize("source,line", [
+    ("app", "Thresholds: this App's own."),
+    ("integration", "Thresholds: from the SMART Sniffer integration."),
+])
+def test_one_line_says_which_thresholds_judge_the_drives(open_page, source, line):
+    p = open_page(f"THRESHOLDS={source}")
+    assert p.wait(lambda: p.page.locator(".thr-line").is_visible())
+    assert p.page.locator(".thr-line").inner_text() == line
