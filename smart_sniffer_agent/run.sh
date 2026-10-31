@@ -137,6 +137,19 @@ else
     bashio::log.warning "Supervisor API not available — mDNS will use container hostname"
 fi
 
+# ── A password on a new install ─────────────────────────────────────────────
+# On the App's first start ever (nothing in /data but the Supervisor's
+# options.json) with no token set, passwords.py makes one, saves it as the
+# token option through the Supervisor and prints it here. Upgrades keep the
+# token they have, empty or not. The password never goes on a command line
+# or in the log; the App page shows it under Connect by hand.
+GENERATED="$(python3 /opt/web/passwords.py --first-start /data)" || GENERATED=""
+if [ -n "${GENERATED}" ]; then
+    TOKEN="${GENERATED}"
+    bashio::log.info "New install: the agent has a password. See it on the App page, under Connect by hand."
+fi
+unset GENERATED
+
 # ── Find the mounts to measure for disk space ────────────────────────────────
 # The agent measures disk space only for the filesystems its config lists.
 # mounts.py writes that config from the mounts Home Assistant gives the app:

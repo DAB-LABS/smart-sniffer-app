@@ -242,3 +242,13 @@ def test_run_sh_quotes_its_argument_arrays():
     assert 'python3 /opt/web/proxy.py "${PROXY_ARGS[@]}" &' in RUN_SH
     assert not re.search(r"\$\{?(AGENT|PROXY)_ARGS\}?(?!\[@\])", RUN_SH.replace('"${AGENT_ARGS[@]}"', "")
                          .replace('"${PROXY_ARGS[@]}"', ""))
+
+
+def test_run_sh_makes_the_first_start_password_before_the_agent_config():
+    """A new install's password reaches mounts.py (and so the agent) on the
+    same start, from passwords.py's stdout, never from a command line."""
+    first = RUN_SH.index("python3 /opt/web/passwords.py --first-start /data")
+    assert first < RUN_SH.index("python3 /opt/mounts.py")
+    assert 'GENERATED="$(python3 /opt/web/passwords.py --first-start /data)" || GENERATED=""' in RUN_SH
+    assert '    TOKEN="${GENERATED}"' in RUN_SH
+    assert "${GENERATED}" not in RUN_SH.split("bashio::log.info \"New install", 1)[1].split("\n", 1)[0]

@@ -8,3 +8,4 @@ web/test_page.py
 web/test_page_proxy.py
 web/conftest.py
 test_mounts.py
+web/test_passwords.py
