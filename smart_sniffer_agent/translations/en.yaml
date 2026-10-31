@@ -4,7 +4,7 @@ configuration:
     description: Port for the real SMART Sniffer agent API
   token:
     name: Bearer Token
-    description: Optional authentication token. Must match the token in the SMART Sniffer integration config.
+    description: The agent's password. New installs get one. Change it on the App's page (Details, Connect by hand); the SMART Sniffer integration on this Home Assistant follows it. Empty means no password.
   scan_interval:
     name: Scan Interval
     description: How often to refresh SMART data from drives (in seconds)

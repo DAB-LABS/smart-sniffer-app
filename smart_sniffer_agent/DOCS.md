@@ -29,7 +29,7 @@ If a drive shows **Health not known** and the log says **DRIVE ACCESS BLOCKED**,
 The page shows this box only, read only, in the same design as the Control Center: one card per drive, per ZFS pool, and per filesystem that belongs to no drive or pool, each labelled `HAOS`.
 
 - **At a glance**: temperature, days powered on, data written and read, and wear. A value the drive does not report is left out.
-- **Disk space** of each mount, including USB drives under `/media` and the data disk (`/data`, also after **Move data disk**). From 80% full the text says how much is free. Restart the App after plugging in a USB drive.
+- **Disk space** of each mount, including USB drives under `/media` and the data disk (`/data`, also after **Move data disk**). From 80% full the text says how much is free. Drives added in Home Assistant under **Settings > System > Storage > Add storage > Local disk** show their disk space when added for **Media**. Added for **Backup** or **Share**, they show their SMART health but no disk space: backup storage is not visible to Apps, and the App does not map `/share`. Restart the App after plugging in or adding a drive.
 - **Health**, one of four words, with every row that caused it underneath:
 
 | Word | Meaning |
@@ -39,12 +39,12 @@ The page shows this box only, read only, in the same design as the Control Cente
 | **Health OK** (green) | Nothing to report. |
 | **Health not known** (grey) | The drive gives no usable SMART data (virtual disks and some USB bridges), or the agent is not answering. |
 
-- **Details** (the chevron): model, serial, firmware, capacity and interface, every SMART attribute or NVMe log field, the drive's Device Statistics, and **Connect by hand** with this agent's host and port. Click a number or a value for the exact figure and a copy button.
+- **Details** (the chevron): model, serial, firmware, capacity and interface, every SMART attribute or NVMe log field, the drive's Device Statistics, and **Connect by hand** with this agent's host, port and [password](#the-agents-password). Click a number or a value for the exact figure and a copy button. The serial number shows only its last four characters, so a screenshot does not carry it; click it for the whole number.
 - **Download**: the arrow at the foot of a card saves it as a JSON file.
 
 The line at the top gives this agent's address and mDNS name, with copy buttons. The header shows the App version, whether the agent is answering, and the integration release its rules come from (**rules**). The page refreshes itself every 30 seconds.
 
-Arranging, hiding, renaming, removing cards and editing thresholds happen in the Control Center. This page judges with the integration's default limits, plus any thresholds you saved for this box in App 0.3.x.
+Arranging, hiding, renaming, removing cards and editing thresholds happen in the Control Center. With integration 1.0 or later holding this box, this page judges with the thresholds set there, so the page and Home Assistant agree. Otherwise it judges with the integration's default limits, plus any thresholds you saved for this box in App 0.3.x. A line under the cards says which.
 
 ### The card under the drives
 
@@ -58,12 +58,24 @@ Arranging, hiding, renaming, removing cards and editing thresholds happen in the
 
 You can close the last two with the x; they stay closed for every browser. The Control Center is for admins only.
 
+## The agent's password
+
+Without a password, anyone on your network can read this box's drive data from its agent.
+
+- **New installs get one**: three words and a number, such as `sneaky-trenchcoat-falcon-4821`. An App updated from 0.4.x keeps the setting it had, which is no password until you set one.
+- **See it and change it** on the App's page: open a card's **Details**. Under **Connect by hand**, **Password** shows it as dots; **Show** reveals it, and clicking it gives a copy button. Type your own, or press **Generate** for a new suggestion, then **Save**. Short passwords are allowed, with a note that they are easy to guess. Saving restarts the App, and the page comes back by itself. To remove the password, empty the box and press **Save** twice.
+- **This Home Assistant follows it.** The App hands the password to the SMART Sniffer integration on this Home Assistant through the Supervisor's discovery, which only Home Assistant itself can read (the Mosquitto broker App hands over its login the same way). The entry for this box keeps working after every change, with nothing to type.
+
+### Adding this box to another Home Assistant
+
+Another Home Assistant on your network finds this box's agent by itself (mDNS) and offers it under **Settings > Devices & services > Discovered**. It asks for the password: copy it from the App's page (**Details**, **Connect by hand**, **Password**). After you change the password, that Home Assistant asks for it again.
+
 ## Configuration
 
 | Option | Default | What it does |
 |---|---|---|
 | Agent Port | `9099` | The port this box's agent listens on |
-| Bearer Token | _(empty)_ | Optional password for this box's agent. Set the same one in the integration's entry for this box. |
+| Bearer Token | _(a generated one on new installs)_ | [The agent's password](#the-agents-password). Change it on the App's page; the integration on this Home Assistant follows it. |
 | Scan Interval | `60` | How often the drives are read, in seconds |
 
 Changing these needs an App restart.
@@ -93,12 +105,12 @@ Reading SMART data needs direct hardware access. Every SMART tool on Linux needs
 | `SYS_RAWIO` | SCSI commands to SATA and SAS drives |
 | `SYS_ADMIN` | Admin commands to NVMe drives |
 | `full_access` | Opening drive device nodes (`/dev/sda`, `/dev/nvme0`) |
-| `hassio_api` | The App's own options, and the discovery message that tells the integration where this box's agent is (host and port only) |
+| `hassio_api` | The App's own options, and the discovery message that tells the integration where this box's agent is (host, port and the agent's password) |
 | `homeassistant_api` | Seeing which SMART Sniffer integration is installed, adding this box to it, and handing over the machines App 0.3.x kept |
 | `discovery` | The `smart_sniffer` discovery service, posted only while integration v0.9 or later is installed |
-| `media` | The disk space of USB drives under `/media`, read only |
+| `media` | The disk space of USB drives and Local disk drives (Media) under `/media`, read only |
 
-The App does not write to your drives, and does not contact other machines on your network or anything outside it. Its page answers only Home Assistant's ingress, and the Bearer Token is never put on a command line.
+The App does not write to your drives, and does not contact other machines on your network or anything outside it. Its page answers only Home Assistant's ingress, so only Home Assistant admins see the password, and the password is never put on a command line or in the log.
 
 ## Protection Mode
 

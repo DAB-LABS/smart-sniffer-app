@@ -29,8 +29,9 @@ Install both, and this box shows up in the Control Center next to your NAS, your
 **SMART Sniffer App** in the sidebar shows this box only, read only, in the same design as the Control Center.
 
 - **One card per drive**, ZFS pool and filesystem, with its health (**Attention**, **Maybe**, **Health OK** or **Health not known**) and the rows that caused it.
-- **At a glance**: temperature, days powered on, data written and read, and wear, plus the disk space of every mount, including USB drives under `/media` and the data disk after **Move data disk**.
-- **Details** with the model, serial, firmware, capacity and interface, every SMART attribute and the drive's Device Statistics. Click a number or a value for the exact figure and a copy button.
+- **At a glance**: temperature, days powered on, data written and read, and wear, plus the disk space of every mount, including USB drives under `/media` and the data disk after **Move data disk**. Drives added in Home Assistant under **Settings > System > Storage > Add storage > Local disk** show their disk space when added for **Media**. Added for **Backup** or **Share**, they show their SMART health but no disk space: backup storage is not visible to Apps, and the App does not map `/share`. Restart the App after plugging in or adding a drive.
+- **Details** with the model, serial, firmware, capacity and interface, every SMART attribute and the drive's Device Statistics, and **Connect by hand** with the agent's host, port and [password](#the-agents-password). Click a number or a value for the exact figure and a copy button. Serial numbers show only their last four characters until clicked, so screenshots do not carry them.
+- **Thresholds**: with integration 1.0 or later holding this box, the page judges with the thresholds set there. A line under the cards says which are in use.
 - **A card under the drives** opens the Control Center, or tells you how to install or update the integration.
 
 The page refreshes every 30 seconds. Each card downloads as a JSON file.
@@ -85,12 +86,26 @@ To add it by hand instead, go to **Settings > Devices & services > Add integrati
 
 <br>
 
+## The agent's password
+
+Without a password, anyone on your network can read this box's drive data from its agent.
+
+- **New installs get one**: three words and a number, such as `sneaky-trenchcoat-falcon-4821`. An App updated from 0.4.x keeps the setting it had, which is no password until you set one.
+- **See it and change it** on the App's page: open a card's **Details**. Under **Connect by hand**, **Password** shows it as dots; **Show** reveals it, and clicking it gives a copy button. Type your own, or press **Generate** for a new suggestion, then **Save**. Short passwords are allowed, with a note that they are easy to guess. Saving restarts the App, and the page comes back by itself. To remove the password, empty the box and press **Save** twice.
+- **This Home Assistant follows it.** The App hands the password to the SMART Sniffer integration on this Home Assistant through the Supervisor's discovery, which only Home Assistant itself can read (the Mosquitto broker App hands over its login the same way). The entry for this box keeps working after every change, with nothing to type.
+
+### Adding this box to another Home Assistant
+
+Another Home Assistant on your network finds this box's agent by itself (mDNS) and offers it under **Settings > Devices & services > Discovered**. It asks for the password: copy it from the App's page (**Details**, **Connect by hand**, **Password**). After you change the password, that Home Assistant asks for it again.
+
+<br>
+
 ## Configuration
 
 | Option | Default | What it does |
 |---|---|---|
 | Agent Port | `9099` | The port this box's agent listens on |
-| Bearer Token | _(empty)_ | Optional password for this box's agent. Set the same one in the integration's entry for this box. |
+| Bearer Token | _(a generated one on new installs)_ | [The agent's password](#the-agents-password). Change it on the App's page; the integration on this Home Assistant follows it. |
 | Scan Interval | `60` | How often the drives are read, in seconds |
 
 App 0.3.x also had options for field agents, card order, hidden cards, names and thresholds. These are kept for the upgrade: a field machine's entries move to the integration with it, and this box's thresholds still judge its cards on the App's page.
@@ -117,7 +132,7 @@ If the integration is still on 0.8.x, the App shows an update card and keeps you
 
 The App runs the same SMART Sniffer agent you install on other machines, inside its container, with `smartctl` reading the host's drives. It ships the agent of the integration release it is built against (v0.9.0 for App 0.4.x), and its page judges every drive with that release's rules.
 
-With integration v0.9 or later installed, the App tells Home Assistant where its agent is (host and port only). The integration polls the agent and creates the entities. The agent also advertises itself over mDNS.
+With integration v0.9 or later installed, the App tells Home Assistant where its agent is: host, port and the agent's password, through the Supervisor's discovery, which only Home Assistant itself reads. The integration polls the agent and creates the entities. The agent also advertises itself over mDNS.
 
 The App's log starts with a summary:
 
@@ -144,16 +159,16 @@ Reading SMART data needs direct hardware access. Every SMART tool on Linux (`sma
 | `SYS_RAWIO` | SCSI commands to SATA and SAS drives |
 | `SYS_ADMIN` | Admin commands to NVMe drives |
 | `full_access` | Opening drive device nodes (`/dev/sda`, `/dev/nvme0`) |
-| `hassio_api` | The App's own options, and the discovery message that tells the integration where this box's agent is (host and port only) |
+| `hassio_api` | The App's own options, and the discovery message that tells the integration where this box's agent is (host, port and the agent's password) |
 | `homeassistant_api` | Seeing which SMART Sniffer integration is installed, adding this box to it, and handing over the machines App 0.3.x kept |
 | `discovery` | The `smart_sniffer` discovery service, posted only while integration v0.9 or later is installed |
-| `media` | The disk space of USB drives Home Assistant mounts under `/media`, read only |
+| `media` | The disk space of USB drives and Local disk drives (Media) Home Assistant mounts under `/media`, read only |
 
 What the App does not do:
 
 - It does not write to your drives.
 - It does not contact other machines on your network, or anything outside it.
-- Its page answers only Home Assistant's ingress, and the Bearer Token is never put on a command line.
+- Its page answers only Home Assistant's ingress, so only Home Assistant admins see the password, and the password is never put on a command line or in the log.
 
 Everything is open source: the Go agent, the startup scripts, the AppArmor profile and the integration are all published for anyone to audit.
 
