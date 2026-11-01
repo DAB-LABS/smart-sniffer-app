@@ -2449,8 +2449,12 @@ def test_a_password_beyond_latin1_reaches_the_agent(backends):
 
 # ── Thresholds from the integration (#11, App 1.0) ──────────────────────────
 
+SELF_AGENT_PORT = [0]
+
+
 def _thresholds_read(backends, version: str = "1.0.0", haos_entry: bool = True) -> dict[str, Any]:
     supervisor, agent = backends
+    SELF_AGENT_PORT[0] = agent.server_address[1]
     SELF_AGENT.drives = [simple_drive("sda", "SELF-1", {"Reallocated_Sector_Ct": 4})]
     _loaded(version=version, haos_entry=haos_entry)
     proc, client = _start_proxy(_proxy_args(supervisor, agent.server_address[1], "",
@@ -2481,6 +2485,10 @@ def _thresholds_asked() -> int:
     {"self|SELF-1": {"Reallocated Sector Count": 10}},  # by the card id
     {"thresholds": {"sda": {"Reallocated Sector Count": 10}}},
     [{"card": "self|SELF-1", "label": "Reallocated Sector Count", "value": 10}],
+    # Integration 1.0's own answer: by card id, and by drive id beside it.
+    {"entry_id": "e1", "thresholds": {"self|SELF-1": {"Reallocated Sector Count": 10}},
+     "drives": {"sda": {"Reallocated Sector Count": 10}}},
+    {"entry_id": "e1", "thresholds": {}, "drives": {"sda": {"Reallocated Sector Count": 10}}},
 ])
 def test_integration_thresholds_judge_the_drives(backends, answer):
     """Integration 1.0 with this box: its thresholds judge the page's drives,
@@ -2492,6 +2500,9 @@ def test_integration_thresholds_judge_the_drives(backends, answer):
     assert _reallocated(body) == {"state": "NO", "source": "integration", "limit": 10}
     assert body["thresholds_source"] == "integration"
     assert _thresholds_asked() >= 1
+    # The App names its own agent, so the integration picks this App's entry.
+    asked = [c for c in STATE.ws_commands if c.get("type") == "smart_sniffer/app/thresholds"][-1]
+    assert asked["host"] == AGENT_HOST and asked["port"] == SELF_AGENT_PORT[0]
 
 
 @needs_rules
@@ -2505,14 +2516,16 @@ def test_integration_without_overrides_judges_by_its_defaults(backends):
 
 
 @needs_rules
-@pytest.mark.parametrize("case", ["older", "no_haos_entry", "unknown_command", "refused", "garbage"])
+@pytest.mark.parametrize("case", ["older", "no_haos_entry", "unknown_command", "refused", "garbage",
+                                  "no_entry_for_this_app"])
 def test_the_apps_own_thresholds_otherwise(backends, case):
     """0.9.x, 1.0 without this box, or an answer that does not come: the
     App's own saved thresholds, as before."""
     STATE.options = {**STATE.options, "thresholds": [
         {"card": "self|SELF-1", "label": "Reallocated Sector Count", "value": 10}]}
-    STATE.app_thresholds = {"unknown_command": None, "refused": "refused", "garbage": "nope"}.get(
-        case, {"sda": {"Reallocated Sector Count": 2}})
+    STATE.app_thresholds = {"unknown_command": None, "refused": "refused", "garbage": "nope",
+                            "no_entry_for_this_app": {"entry_id": None, "thresholds": {}, "drives": {}},
+                            }.get(case, {"sda": {"Reallocated Sector Count": 2}})
     body = _thresholds_read(backends, version="0.9.2" if case == "older" else "1.0.0",
                             haos_entry=case != "no_haos_entry")
     assert _reallocated(body) == {"state": "NO", "source": "app", "limit": 10}
@@ -2526,6 +2539,9 @@ def test_parse_integration_thresholds_unit(mod):
     assert parse({"a": {"X": 3, "Y": True, "Z": -1, "": 2}, "b": "no", "": {"X": 1}}) == {"a": {"X": 3}}
     assert parse({"thresholds": [{"card": "self|S", "label": "X", "value": 2}]}) == {"self|S": {"X": 2}}
     assert parse({}) == {} and parse([]) == {}
+    assert parse({"entry_id": None, "thresholds": {}, "drives": {}}) is None
+    assert parse({"entry_id": "e", "thresholds": {"self|S": {"X": 1}}, "drives": {"d": {"X": 2}}}) == \
+        {"self|S": {"X": 1}, "d": {"X": 2}}
     assert parse(None) is None and parse("x") is None and parse(3) is None
     drive = {"serial": "S"}
     table = {"d1": {"X": 1}, "S": {"X": 2}, "self|S": {"X": 3}}

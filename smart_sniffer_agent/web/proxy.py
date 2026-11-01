@@ -1416,15 +1416,23 @@ def integration_thresholds_ready(integration: dict[str, Any]) -> bool:
 
 
 def parse_integration_thresholds(result: Any) -> dict[str, dict[str, int]] | None:
-    """smart_sniffer/app/thresholds' answer as {key: {label: int}}: the
-    App's own shape, a mapping of drive to its overrides, or the options'
-    list of {card, label, value}; either may come wrapped in
-    {"thresholds": ...}. A key is the agent's drive id, the card key (serial,
+    """smart_sniffer/app/thresholds' answer as {key: {label: int}}.
+
+    Integration 1.0 answers {"entry_id", "thresholds": {card id: {label:
+    int}}, "drives": {drive id: {label: int}}}; both maps are taken.
+    entry_id None (no entry is this App's) is None here: the App's own
+    thresholds apply. A bare mapping or the options' list of {card, label,
+    value} is read too. A key is the agent's drive id, the card key (serial,
     or id:<drive id>) or the card id (self|<key>); thresholds_for() tries
-    each. None when the answer is neither."""
-    if isinstance(result, dict) and set(result) >= {"thresholds"} and \
+    each. None when the answer is none of these."""
+    if isinstance(result, dict) and "thresholds" in result and \
             isinstance(result["thresholds"], (dict, list)):
-        result = result["thresholds"]
+        if "entry_id" in result and not result["entry_id"]:
+            return None
+        cards = parse_integration_thresholds(result["thresholds"])
+        drives = parse_integration_thresholds(result.get("drives")) \
+            if isinstance(result.get("drives"), dict) else {}
+        return None if cards is None else {**(drives or {}), **cards}
     if isinstance(result, list):
         return _normalize_thresholds(result)
     if not isinstance(result, dict):
@@ -2685,7 +2693,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         failed_ids = {str(d.get("id")) for d in payloads if "smart_data" not in d}
 
         rules_ok = self.rules.load()
-        saved, source = self._thresholds_in_force() if rules_ok else ({}, "app")
+        saved, source = self._thresholds_in_force(info.get("agent_id")) if rules_ok else ({}, "app")
         items: list[dict[str, Any]] = []
         for drive in payloads:
             drive_id = str(drive.get("id"))
@@ -2749,15 +2757,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.cache.update(key, response=response, last_answer=now)
         return response
 
-    def _thresholds_in_force(self) -> tuple[dict[str, dict[str, int]], str]:
+    def _thresholds_in_force(self, agent_id: Any = None) -> tuple[dict[str, dict[str, int]], str]:
         """The thresholds this read judges by, and where they come from:
         "integration" when integration 1.0 or later has this box (its entry's
         thresholds, asked on every read), else "app" (the App's own, kept
         from 0.3.x). The integration's state is the watch's last lookup, so
-        this asks Core only when the integration has this box."""
+        this asks Core only when the integration has this box. The agent's
+        id, host and port pick this App's own entry."""
         if integration_thresholds_ready(self.watch.peek() or {}):
+            command: dict[str, Any] = {"type": THRESHOLDS_COMMAND, "host": self.agent_host,
+                                       "port": self.agent_port}
+            if isinstance(agent_id, str) and 0 < len(agent_id) <= 64:
+                command["agent_id"] = agent_id
             try:
-                found = parse_integration_thresholds(self.supervisor.ws({"type": THRESHOLDS_COMMAND}))
+                found = parse_integration_thresholds(self.supervisor.ws(command))
             except WebSocketError as err:
                 found = None
                 problem = err.code or "no answer"
