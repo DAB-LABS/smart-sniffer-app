@@ -124,6 +124,9 @@ DEFAULT_PANEL_PATH = "/smart-sniffer"
 # follows an install or an update of the integration within this time.
 WATCH_SECONDS = 300.0
 WATCH_RETRY_SECONDS = 30.0  # sooner while Home Assistant does not answer
+# While the discovery waits for this App's own agent to answer (it starts
+# with the App), the watch looks this often.
+DISCOVERY_WAIT_SECONDS = 2.0
 
 INTEGRATION_URL = "/config/integrations/integration/smart_sniffer"
 
@@ -1536,17 +1539,24 @@ class Discovery:
     Assistant Core, the same channel apps such as Mosquitto use for their
     credentials, so the integration's entry for this box keeps the password
     without anyone typing it. A new password reaches it on the App's next
-    start, which a Save on the page makes happen at once."""
+    start, which a Save on the page makes happen at once.
+
+    It is posted only once this App's agent answers its health
+    (agent_ready): Home Assistant checks the agent as soon as the message
+    arrives, and an agent still starting would be taken as not there, with
+    no Discovered card until the App's next start."""
 
     def __init__(self, sv: Supervisor, state: AppState, host: str, port: int,
-                 token: str = "") -> None:
+                 token: str = "", agent_ready: Any = None) -> None:
         self.sv = sv
         self.state = state
         self.host = host
         self.port = port
         self.token = token
+        self.agent_ready = agent_ready
         self.lock = threading.Lock()
         self.started = False
+        self.waiting = False  # a post waits for the agent to answer
 
     def config(self) -> dict[str, Any]:
         config: dict[str, Any] = {"host": self.host, "port": self.port}
@@ -1575,6 +1585,12 @@ class Discovery:
                 return
             if integration_state in PANEL_STATES:
                 if not self.state.get(DISCOVERY_UUID):
+                    if self.agent_ready is not None and not self.agent_ready():
+                        if not self.waiting:
+                            log("Discovery waits for this App's agent to answer")
+                        self.waiting = True
+                        return
+                    self.waiting = False
                     uuid = self.sv.discovery_post(self.config())
                     if uuid:
                         self.state.set(DISCOVERY_UUID, uuid)
@@ -1635,6 +1651,8 @@ class IntegrationWatch:
             try:
                 result = self.get(fresh=True)
                 wait = WATCH_RETRY_SECONDS if result.get("state") is None else WATCH_SECONDS
+                if self.discovery is not None and self.discovery.waiting:
+                    wait = DISCOVERY_WAIT_SECONDS
             except Exception as err:  # noqa: BLE001 -- the watch never stops
                 log(f"Integration lookup failed: {type(err).__name__}: {err}")
                 wait = WATCH_RETRY_SECONDS
@@ -3163,8 +3181,15 @@ def main():
     ProxyHandler.app_state = AppState(
         os.path.join(args.data_dir, "app-state.json") if args.data_dir else None
     )
+    agent_port = ProxyHandler.agent_port
+
+    def agent_ready() -> bool:
+        return _is_agent_health(agent_call("127.0.0.1", agent_port, "GET", "/api/health",
+                                           connect_timeout=1.0, read_timeout=2.0))
+
     discovery = Discovery(ProxyHandler.supervisor, ProxyHandler.app_state,
-                          ProxyHandler.agent_host, ProxyHandler.agent_port, ProxyHandler.token)
+                          ProxyHandler.agent_host, ProxyHandler.agent_port, ProxyHandler.token,
+                          agent_ready)
     ProxyHandler.watch = IntegrationWatch(ProxyHandler.supervisor, discovery,
                                           args.ha_cache_seconds)
     ProxyHandler.handover = Handover(ProxyHandler.supervisor, ProxyHandler.app_state,

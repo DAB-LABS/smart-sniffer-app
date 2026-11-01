@@ -1631,7 +1631,7 @@ def test_integration_keeps_its_last_state_while_core_restarts(backends):
     # Core answers its REST API but not the websocket for a moment: the
     # page keeps the last state it had, and the discovery stays.
     _loaded()
-    proc, client = _fresh(backends[0], "--ha-cache-seconds=0")
+    proc, client = _fresh(backends[0], _own_agent(backends), "--ha-cache-seconds=0")
     try:
         assert client.get("/ha/integration")[1]["state"] == "loaded"
         STATE.ws_mode = "drop"
@@ -1709,7 +1709,7 @@ def _deletes() -> list[str]:
 ])
 def test_discovery_only_for_v09(backends, tmp_path, case, posted):
     INTEGRATION_CASES[case][0]()
-    proc, client = _fresh(backends[0], "--agent-port=9099", "--ha-cache-seconds=0",
+    proc, client = _fresh(backends[0], _own_agent(backends), "--ha-cache-seconds=0",
                           data_dir=str(tmp_path))
     try:
         _wait_for(lambda: any(c[0] == "WS" for c in STATE.calls))
@@ -1719,7 +1719,7 @@ def test_discovery_only_for_v09(backends, tmp_path, case, posted):
         output = _stop_proxy(proc)
     if posted:
         assert _discovery() == [{"service": "smart_sniffer",
-                                 "config": {"host": AGENT_HOST, "port": 9099}}]
+                                 "config": {"host": AGENT_HOST, "port": backends[1].server_address[1]}}]
         assert len(_posts()) == 1  # once, not on every lookup
         assert json.loads((tmp_path / "app-state.json").read_text())["discovery_uuid"] == "uuid-1"
     else:
@@ -1733,13 +1733,13 @@ def test_discovery_carries_the_password_when_one_is_set(backends, tmp_path, agen
     integration's entry for this box gets the password with it (1.0). With
     none set the message is what 0.4 sent. The log never shows it."""
     _loaded()
-    proc, client = _fresh(backends[0], "--agent-port=9099", "--ha-cache-seconds=0",
+    proc, client = _fresh(backends[0], _own_agent(backends), "--ha-cache-seconds=0",
                           data_dir=str(tmp_path), agent_token=agent_token)
     try:
         _wait_for(lambda: _posts())
     finally:
         output = _stop_proxy(proc)
-    config = {"host": AGENT_HOST, "port": 9099}
+    config = {"host": AGENT_HOST, "port": backends[1].server_address[1]}
     if agent_token:
         config["token"] = agent_token
     assert _posts() == [{"service": "smart_sniffer", "config": config}]
@@ -1751,7 +1751,7 @@ def test_discovery_replaced_at_every_start(backends, tmp_path):
     # a new uuid always reaches Core.
     _loaded()
     for run in (1, 2, 3):
-        proc, _ = _fresh(backends[0], "--agent-port=9099", "--ha-cache-seconds=0",
+        proc, _ = _fresh(backends[0], _own_agent(backends), "--ha-cache-seconds=0",
                          data_dir=str(tmp_path))
         try:
             _wait_for(lambda: len(_posts()) == run)
@@ -1770,7 +1770,7 @@ def test_discovery_old_one_gone_already(backends, tmp_path):
     # that counts as deleted, and a new one is posted.
     (tmp_path / "app-state.json").write_text(json.dumps({"discovery_uuid": "uuid-old"}))
     _loaded()
-    proc, _ = _fresh(backends[0], "--agent-port=9099", data_dir=str(tmp_path))
+    proc, _ = _fresh(backends[0], _own_agent(backends), data_dir=str(tmp_path))
     try:
         _wait_for(lambda: _posts())
     finally:
@@ -1782,7 +1782,7 @@ def test_discovery_withdrawn_when_the_integration_goes(backends, tmp_path):
     # v0.9 installed, then removed (or rolled back to 0.8.x): the message
     # goes; installed again: a new one.
     _loaded()
-    proc, client = _fresh(backends[0], "--agent-port=9099", "--ha-cache-seconds=0",
+    proc, client = _fresh(backends[0], _own_agent(backends), "--ha-cache-seconds=0",
                           data_dir=str(tmp_path))
     try:
         _wait_for(lambda: _posts())
@@ -1807,7 +1807,7 @@ def test_discovery_waits_while_home_assistant_is_down(backends, tmp_path):
     STATE.discovery["uuid-old"] = {"service": "smart_sniffer", "config": {}}
     STATE.core_status = 401
     _loaded()
-    proc, client = _fresh(backends[0], "--agent-port=9099", "--ha-cache-seconds=0",
+    proc, client = _fresh(backends[0], _own_agent(backends), "--ha-cache-seconds=0",
                           data_dir=str(tmp_path))
     try:
         _wait_for(lambda: _deletes())
@@ -1826,7 +1826,7 @@ def test_discovery_waits_while_home_assistant_is_down(backends, tmp_path):
 def test_discovery_refused_is_tried_again(backends, tmp_path):
     _loaded()
     STATE.discovery_status = 400
-    proc, client = _fresh(backends[0], "--agent-port=9099", "--ha-cache-seconds=0",
+    proc, client = _fresh(backends[0], _own_agent(backends), "--ha-cache-seconds=0",
                           data_dir=str(tmp_path))
     try:
         _wait_for(lambda: any(c[1] == "/discovery" for c in STATE.calls))
@@ -1837,6 +1837,34 @@ def test_discovery_refused_is_tried_again(backends, tmp_path):
     finally:
         output = _stop_proxy(proc)
     assert "did not take the discovery" in output
+
+
+def _own_agent(backends) -> str:
+    """This App's agent for a fresh proxy: the fake agent, which answers,
+    since the discovery is posted only once the App's agent does."""
+    return f"--agent-port={backends[1].server_address[1]}"
+
+
+def test_discovery_waits_for_the_apps_own_agent(backends, tmp_path):
+    """At the App's start its agent may not answer yet: Home Assistant would
+    check it at once and offer nothing. The message is posted once it does."""
+    _loaded()
+    port = _free_port()
+    proc, client = _fresh(backends[0], f"--agent-port={port}", "--ha-cache-seconds=0",
+                          data_dir=str(tmp_path))
+    server = None
+    try:
+        _wait_for(lambda: any(c[0] == "WS" for c in STATE.calls))
+        time.sleep(0.5)
+        assert _posts() == []
+        server = _serve(agent_handler(AgentState()), port=port)
+        _wait_for(lambda: _posts(), timeout=8)
+        assert _posts() == [{"service": "smart_sniffer", "config": {"host": AGENT_HOST, "port": port}}]
+    finally:
+        output = _stop_proxy(proc)
+        if server is not None:
+            server.shutdown()
+    assert output.count("Discovery waits for this App's agent to answer") == 1
 
 
 def test_discovery_unit(mod, tmp_path):
