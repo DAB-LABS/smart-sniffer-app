@@ -1719,7 +1719,7 @@ def test_discovery_only_for_v09(backends, tmp_path, case, posted):
         output = _stop_proxy(proc)
     if posted:
         assert _discovery() == [{"service": "smart_sniffer",
-                                 "config": {"host": AGENT_HOST, "port": backends[1].server_address[1]}}]
+                                 "config": {"host": AGENT_HOST, "port": backends[1].server_address[1], "token": ""}}]
         assert len(_posts()) == 1  # once, not on every lookup
         assert json.loads((tmp_path / "app-state.json").read_text())["discovery_uuid"] == "uuid-1"
     else:
@@ -1728,10 +1728,10 @@ def test_discovery_only_for_v09(backends, tmp_path, case, posted):
 
 
 @pytest.mark.parametrize("agent_token", [APP_TOKEN, "", "p\u00e4ss w\"rd"])
-def test_discovery_carries_the_password_when_one_is_set(backends, tmp_path, agent_token):
+def test_discovery_carries_the_password(backends, tmp_path, agent_token):
     """Supervisor discovery reaches Home Assistant Core only, so the
     integration's entry for this box gets the password with it (1.0). With
-    none set the message is what 0.4 sent. The log never shows it."""
+    none set it carries an empty one. The log never shows it."""
     _loaded()
     proc, client = _fresh(backends[0], _own_agent(backends), "--ha-cache-seconds=0",
                           data_dir=str(tmp_path), agent_token=agent_token)
@@ -1739,9 +1739,8 @@ def test_discovery_carries_the_password_when_one_is_set(backends, tmp_path, agen
         _wait_for(lambda: _posts())
     finally:
         output = _stop_proxy(proc)
-    config = {"host": AGENT_HOST, "port": backends[1].server_address[1]}
-    if agent_token:
-        config["token"] = agent_token
+    # Empty when none is set, so the integration clears its copy too.
+    config = {"host": AGENT_HOST, "port": backends[1].server_address[1], "token": agent_token}
     assert _posts() == [{"service": "smart_sniffer", "config": config}]
     assert not agent_token or agent_token not in output
 
@@ -1859,7 +1858,7 @@ def test_discovery_waits_for_the_apps_own_agent(backends, tmp_path):
         assert _posts() == []
         server = _serve(agent_handler(AgentState()), port=port)
         _wait_for(lambda: _posts(), timeout=8)
-        assert _posts() == [{"service": "smart_sniffer", "config": {"host": AGENT_HOST, "port": port}}]
+        assert _posts() == [{"service": "smart_sniffer", "config": {"host": AGENT_HOST, "port": port, "token": ""}}]
     finally:
         output = _stop_proxy(proc)
         if server is not None:
@@ -1890,7 +1889,7 @@ def test_discovery_unit(mod, tmp_path):
     assert len(calls) == 1
     d.sync("restart")
     d.sync("loaded")
-    assert calls[1:] == [("post", {"host": "local-smart-sniffer-agent", "port": 9099})]
+    assert calls[1:] == [("post", {"host": "local-smart-sniffer-agent", "port": 9099, "token": ""})]
     d.sync(None)
     d.sync("missing")
     assert calls[2] == ("delete", "u2") and state.get("discovery_uuid") is None

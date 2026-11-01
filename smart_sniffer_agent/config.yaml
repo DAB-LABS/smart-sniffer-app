@@ -38,7 +38,7 @@ hassio_api: true
 homeassistant_api: true
 
 # Supervisor discovery: tells integration 0.9 and later where this box's agent
-# is (host and port), and its password when one is set, so the integration's
+# is (host and port), and its password ("" when none is set), so the integration's
 # entry for this box keeps it. Only Home Assistant Core reads discovery, the
 # same channel Mosquitto uses for its credentials. Posted only while that
 # integration is installed.

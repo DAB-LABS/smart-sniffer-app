@@ -24,7 +24,7 @@ Key behaviors:
   0449a086-smart-sniffer-agent) and advertises itself with mDNS under a name unique
   per Home Assistant instance (smartha-<ha-hostname>).
 - With integration v0.9+ installed, posts a Supervisor discovery (service
-  smart_sniffer: host, port and the agent's password when one is set; only Home
+  smart_sniffer: host, port and the agent's password, empty when none is set; only Home
   Assistant Core reads it), so Home Assistant offers this box as "SMART
   Sniffer (HAOS)". The App's page also has "Create sensors and alerts for HAOS". The box
   is never added twice. Manual fallback: the host and port from the App's log line

@@ -29,7 +29,7 @@ integration. The proxy answers the page's own routes:
 
 It also tells the integration where this box's agent is, through the
 Supervisor's discovery (service smart_sniffer: host, port and the agent's
-password when one is set), but only while integration v0.9 or later is
+password, "" when none is set), but only while integration v0.9 or later is
 installed. The previous message is
 deleted on every start and a new one posted, so Home Assistant always hears
 of it once per run.
@@ -1535,7 +1535,7 @@ class Discovery:
     previous run, whose uuid the app keeps, and posts a new one: the new uuid
     always reaches Core, so the integration hears of the agent once per run.
     The message names the agent's host and port, and its password (the
-    token option) when one is set. Supervisor discovery is read only by Home
+    token option; "" when none is set). Supervisor discovery is read only by Home
     Assistant Core, the same channel apps such as Mosquitto use for their
     credentials, so the integration's entry for this box keeps the password
     without anyone typing it. A new password reaches it on the App's next
@@ -1559,10 +1559,10 @@ class Discovery:
         self.waiting = False  # a post waits for the agent to answer
 
     def config(self) -> dict[str, Any]:
-        config: dict[str, Any] = {"host": self.host, "port": self.port}
-        if self.token:
-            config["token"] = self.token
-        return config
+        # The token always, "" when there is none, so a cleared password is
+        # cleared in the integration's entry too (integration 1.0). An older
+        # integration takes a token only when it is not empty.
+        return {"host": self.host, "port": self.port, "token": self.token}
 
     def _delete(self) -> None:
         uuid = self.state.get(DISCOVERY_UUID)
