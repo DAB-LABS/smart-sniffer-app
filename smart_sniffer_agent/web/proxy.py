@@ -1408,6 +1408,13 @@ def panel_capable(version: Any) -> bool:
 # drives too, so the page and Home Assistant agree.
 THRESHOLDS_VERSION = (1, 0)
 THRESHOLDS_COMMAND = f"{INTEGRATION_DOMAIN}/app/thresholds"
+# Right after the App starts, Home Assistant may not answer yet. For this
+# long after start, until a first answer, an ask that gets none is tried
+# again at once (after each of these pauses), and a read that still has none
+# says "pending" rather than "app", so the page does not show the App's own
+# thresholds for a moment and then switch.
+THRESHOLDS_START_SECONDS = 30.0
+THRESHOLDS_RETRY_DELAYS = (0.5, 1.0, 2.0)
 
 
 def integration_thresholds_ready(integration: dict[str, Any]) -> bool:
@@ -2459,6 +2466,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
     restart_delay: float = 1.0  # seconds between a Save's answer and the App's restart
     restarting: bool = False
     thresholds_problem: str | None = "not asked"  # the last smart_sniffer/app/thresholds failure logged
+    start_monotonic: float = 0.0  # when this run of the proxy started (time.monotonic)
+    thresholds_start_seconds: float = THRESHOLDS_START_SECONDS
+    thresholds_decided: bool = False  # a first answer, or a lookup that settles it, came
 
     # The routes answered by the proxy itself: (method, path pattern, handler
     # name). Path parameters are named groups, percent-decoded before use.
@@ -2775,31 +2785,61 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.cache.update(key, response=response, last_answer=now)
         return response
 
+    def _thresholds_starting(self) -> bool:
+        """Still in the App's first THRESHOLDS_START_SECONDS, with no answer
+        that settles where the thresholds come from."""
+        return (not ProxyHandler.thresholds_decided and
+                time.monotonic() - ProxyHandler.start_monotonic < ProxyHandler.thresholds_start_seconds)
+
+    def _ask_thresholds(self, command: dict[str, Any]) -> tuple[dict[str, dict[str, int]] | None, str | None]:
+        """One smart_sniffer/app/thresholds: (the thresholds, None) or
+        (None, what went wrong)."""
+        try:
+            found = parse_integration_thresholds(self.supervisor.ws(command))
+        except WebSocketError as err:
+            return None, err.code or "no answer"
+        return (found, None) if found is not None else (None, "an answer it cannot read")
+
     def _thresholds_in_force(self, agent_id: Any = None) -> tuple[dict[str, dict[str, int]], str]:
         """The thresholds this read judges by, and where they come from:
         "integration" when integration 1.0 or later has this box (its entry's
         thresholds, asked on every read), else "app" (the App's own, kept
         from 0.3.x). The integration's state is the watch's last lookup, so
         this asks Core only when the integration has this box. The agent's
-        id, host and port pick this App's own entry."""
-        if integration_thresholds_ready(self.watch.peek() or {}):
+        id, host and port pick this App's own entry.
+
+        Right after start (_thresholds_starting) an ask that gets no answer
+        is tried again a few times, and a read with no answer yet, or before
+        the watch's first lookup, is "pending": judged by the App's own
+        thresholds, but the page names no source yet."""
+        integration = self.watch.peek()
+        starting = self._thresholds_starting()
+        if integration is None or integration.get("state") is None or integration.get("stale"):
+            if starting:
+                return self.options.thresholds(), "pending"
+        if integration_thresholds_ready(integration or {}):
             command: dict[str, Any] = {"type": THRESHOLDS_COMMAND, "host": self.agent_host,
                                        "port": self.agent_port}
             if isinstance(agent_id, str) and 0 < len(agent_id) <= 64:
                 command["agent_id"] = agent_id
-            try:
-                found = parse_integration_thresholds(self.supervisor.ws(command))
-            except WebSocketError as err:
-                found = None
-                problem = err.code or "no answer"
-            else:
-                problem = None if found is not None else "an answer it cannot read"
+            found, problem = self._ask_thresholds(command)
+            for delay in THRESHOLDS_RETRY_DELAYS if starting else ():
+                if found is not None:
+                    break
+                time.sleep(delay)
+                found, problem = self._ask_thresholds(command)
+            if found is None and self._thresholds_starting():
+                return self.options.thresholds(), "pending"
             if problem != ProxyHandler.thresholds_problem:  # logged once per change
                 ProxyHandler.thresholds_problem = problem
                 log(f"{THRESHOLDS_COMMAND}: {problem}; the App's own thresholds apply" if problem
                     else "Drives are judged by the integration's thresholds")
+            ProxyHandler.thresholds_decided = True
             if found is not None:
                 return found, "integration"
+            return self.options.thresholds(), "app"
+        if integration is not None and integration.get("state") is not None:
+            ProxyHandler.thresholds_decided = True
         return self.options.thresholds(), "app"
 
     def _agent_info(self, info: dict[str, Any], drives: Any, pools: Any) -> dict[str, Any]:
@@ -3157,6 +3197,9 @@ def main():
                         help="Where the page, its scripts and images are")
     parser.add_argument("--data-dir", type=str, default="/data",
                         help="Where app-state.json is kept (empty: memory only)")
+    parser.add_argument("--thresholds-start-seconds", type=float, default=THRESHOLDS_START_SECONDS,
+                        help="After start, how long a missing thresholds answer is retried and "
+                             "shown as pending")
     parser.add_argument("--restart-delay", type=float, default=1.0,
                         help="Seconds between a password save's answer and the App's restart")
     args = parser.parse_args()
@@ -3167,6 +3210,8 @@ def main():
     ProxyHandler.token = os.environ.get("AGENT_TOKEN", "")
     ProxyHandler.app_version = args.app_version
     ProxyHandler.started_at = f"{time.time():.3f}"
+    ProxyHandler.start_monotonic = time.monotonic()
+    ProxyHandler.thresholds_start_seconds = args.thresholds_start_seconds
     ProxyHandler.restart_delay = args.restart_delay
     ProxyHandler.agent_host = args.agent_host.strip() or DEFAULT_AGENT_HOST
     ProxyHandler.mdns_name = args.mdns_name.strip() or None

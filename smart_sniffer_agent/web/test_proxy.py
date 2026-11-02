@@ -143,6 +143,7 @@ class FakeState:
         # smart_sniffer/app/thresholds (integration 1.0): None answers
         # unknown_command, "refused" unauthorized, anything else is the result.
         self.app_thresholds: Any = None
+        self.thresholds_lost = 0  # that many thresholds asks get no answer (the connection closes)
 
 
 STATE = FakeState()
@@ -321,6 +322,9 @@ def _ws_result(command: dict[str, Any]) -> dict[str, Any]:
     if kind == "smart_sniffer/app/import":
         return _fake_import(command)
     if kind == "smart_sniffer/app/thresholds":
+        if STATE.thresholds_lost > 0:
+            STATE.thresholds_lost -= 1
+            return None
         if STATE.app_thresholds is None:
             return error("unknown_command", "Unknown command.")
         if STATE.app_thresholds == "refused":
@@ -1384,6 +1388,7 @@ def test_drives_self_with_saved_thresholds(backends, data_dir):
         {"card": "nas.lan:9099|S1", "label": "Command Timeout", "value": 5}]}
     proc, client = _start_proxy(_proxy_args(supervisor, agent.server_address[1], ""), TOKEN, APP_TOKEN)
     try:
+        client.get("/ha/integration")  # the lookup that settles it: no integration
         _, body = client.get("/fleet/hosts/self/drives")
     finally:
         _stop_proxy(proc)
@@ -2479,13 +2484,16 @@ def test_a_password_beyond_latin1_reaches_the_agent(backends):
 SELF_AGENT_PORT = [0]
 
 
-def _thresholds_read(backends, version: str = "1.0.0", haos_entry: bool = True) -> dict[str, Any]:
+def _thresholds_read(backends, version: str = "1.0.0", haos_entry: bool = True,
+                     start_seconds: float = 30.0) -> dict[str, Any]:
     supervisor, agent = backends
     SELF_AGENT_PORT[0] = agent.server_address[1]
     SELF_AGENT.drives = [simple_drive("sda", "SELF-1", {"Reallocated_Sector_Ct": 4})]
     _loaded(version=version, haos_entry=haos_entry)
     proc, client = _start_proxy(_proxy_args(supervisor, agent.server_address[1], "",
-                                            "--ha-cache-seconds=0"), TOKEN, APP_TOKEN)
+                                            "--ha-cache-seconds=0",
+                                            f"--thresholds-start-seconds={start_seconds}"),
+                                TOKEN, APP_TOKEN)
     try:
         client.get("/ha/integration")  # the watch's lookup the read goes by
         _, body = client.get("/fleet/hosts/self/drives")
@@ -2553,8 +2561,9 @@ def test_the_apps_own_thresholds_otherwise(backends, case):
     STATE.app_thresholds = {"unknown_command": None, "refused": "refused", "garbage": "nope",
                             "no_entry_for_this_app": {"entry_id": None, "thresholds": {}, "drives": {}},
                             }.get(case, {"sda": {"Reallocated Sector Count": 2}})
+    # After the start-up grace: an answer that does not come falls back.
     body = _thresholds_read(backends, version="0.9.2" if case == "older" else "1.0.0",
-                            haos_entry=case != "no_haos_entry")
+                            haos_entry=case != "no_haos_entry", start_seconds=0)
     assert _reallocated(body) == {"state": "NO", "source": "app", "limit": 10}
     assert body["thresholds_source"] == "app"
     if case in ("older", "no_haos_entry"):
@@ -2583,3 +2592,93 @@ def test_parse_integration_thresholds_unit(mod):
     assert not ready({"state": "loaded", "version": "1.0.0", "haos_entry": None})
     assert not ready({"state": "loaded", "version": "1.0.0", "haos_entry": True, "stale": True})
     assert not ready({"state": "restart", "version": "1.0.0", "haos_entry": True})
+
+
+# ── Thresholds at the App's start: retried, never "app" for a moment ────────
+
+@needs_rules
+def test_a_first_thresholds_ask_that_gets_no_answer_is_retried_at_start(backends):
+    """Right after start Home Assistant may not answer the first asks; they
+    are tried again at once, so the first read already has the integration's
+    thresholds."""
+    STATE.app_thresholds = {"entry_id": "e1", "thresholds": {}, "drives": {"sda": {"Reallocated Sector Count": 10}}}
+    STATE.thresholds_lost = 2
+    body = _thresholds_read(backends)
+    assert _reallocated(body) == {"state": "NO", "source": "integration", "limit": 10}
+    assert _thresholds_asked() == 3
+
+
+@needs_rules
+def test_no_answer_yet_at_start_is_pending_then_the_apps_own(backends):
+    """Still no answer during the first seconds: "pending" (the page names
+    no source), judged meanwhile by the App's own; once the grace is over,
+    "app"."""
+    supervisor, agent = backends
+    SELF_AGENT_PORT[0] = agent.server_address[1]
+    SELF_AGENT.drives = [simple_drive("sda", "SELF-1", {"Reallocated_Sector_Ct": 4})]
+    STATE.options = {**STATE.options, "thresholds": [
+        {"card": "self|SELF-1", "label": "Reallocated Sector Count", "value": 10}]}
+    _loaded(version="1.0.0")
+    STATE.app_thresholds = {"entry_id": "e1", "thresholds": {}, "drives": {}}
+    STATE.thresholds_lost = 1000
+    proc, client = _start_proxy(_proxy_args(supervisor, agent.server_address[1], "",
+                                            "--ha-cache-seconds=0", "--thresholds-start-seconds=6"),
+                                TOKEN, APP_TOKEN)
+    try:
+        client.get("/ha/integration")
+        _, first = client.get("/fleet/hosts/self/drives")
+        assert first["thresholds_source"] == "pending"
+        assert first["items"][0]["thresholds_source"] == "pending"
+        assert first["items"][0]["verdict"]["state"] == "NO"  # judged by the App's own meanwhile
+        time.sleep(6)
+        _, later = client.get("/fleet/hosts/self/drives")
+        assert later["thresholds_source"] == "app"
+    finally:
+        output = _stop_proxy(proc)
+    assert output.count("the App's own thresholds apply") == 1
+
+
+@needs_rules
+def test_an_answer_after_a_pending_start_shows_the_integration(backends):
+    supervisor, agent = backends
+    SELF_AGENT_PORT[0] = agent.server_address[1]
+    SELF_AGENT.drives = [simple_drive("sda", "SELF-1", {"Reallocated_Sector_Ct": 4})]
+    _loaded(version="1.0.0")
+    STATE.app_thresholds = {"entry_id": "e1", "thresholds": {}, "drives": {}}
+    STATE.thresholds_lost = 4  # the first read's ask and its three retries
+    proc, client = _start_proxy(_proxy_args(supervisor, agent.server_address[1], "",
+                                            "--ha-cache-seconds=0"), TOKEN, APP_TOKEN)
+    try:
+        client.get("/ha/integration")
+        assert client.get("/fleet/hosts/self/drives")[1]["thresholds_source"] == "pending"
+        assert client.get("/fleet/hosts/self/drives")[1]["thresholds_source"] == "integration"
+    finally:
+        _stop_proxy(proc)
+
+
+def test_before_home_assistant_answers_at_start_the_source_is_pending(backends):
+    """Home Assistant not answering at all at start: the integration's state
+    is not known yet, so no source is named (not "app")."""
+    supervisor, agent = backends
+    _loaded(version="1.0.0")
+    STATE.ws_mode = "down"
+    proc, client = _start_proxy(_proxy_args(supervisor, agent.server_address[1], ""), TOKEN, APP_TOKEN)
+    try:
+        _, body = client.get("/fleet/hosts/self/drives")
+    finally:
+        _stop_proxy(proc)
+    assert body["thresholds_source"] == "pending"
+
+
+def test_without_the_integration_the_source_is_app_at_once(backends):
+    """A lookup that settles it (no integration) needs no waiting."""
+    supervisor, agent = backends
+    STATE.info, STATE.manifest_version, STATE.handler_known = None, None, False
+    proc, client = _start_proxy(_proxy_args(supervisor, agent.server_address[1], "",
+                                            "--ha-cache-seconds=0"), TOKEN, APP_TOKEN)
+    try:
+        assert client.get("/ha/integration")[1]["state"] == "missing"
+        _, body = client.get("/fleet/hosts/self/drives")
+    finally:
+        _stop_proxy(proc)
+    assert body["thresholds_source"] == "app"
