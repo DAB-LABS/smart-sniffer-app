@@ -55,6 +55,12 @@ const POLL_MS = 30000; // this box's drives, read again while the page is open
 const PW_DOTS = '\u2022'.repeat(12);
 const PW_SHORT = 12; // under this, a gentle note that short passwords are easy to guess
 const RESTART_POLL_MS = 3000; // while the App restarts after a password save
+const PENDING_POLL_MS = 3000; // while the App waits for the integration's first thresholds answer
+// The footer's thresholds label, by where the proxy says they came from.
+const THRESHOLD_SOURCES = {
+  integration: { short: 'Thresholds: integration', long: "Judged by the SMART Sniffer integration's thresholds." },
+  app: { short: 'Thresholds: this App', long: "Judged by this App's own thresholds." },
+};
 const RESTART_GIVE_UP_MS = 180000;
 // A serial number (or WWN) on a card: the last four characters, after the
 // same eight dots whatever its length. A mask, never a blur (a blur stays
@@ -217,7 +223,8 @@ function cc() {
       } else {
         this.selfFailed = true;
       }
-      this.selfNext = Date.now() + (this.agentDown ? DOWN_POLL_MS : POLL_MS);
+      const pending = !!(r.ok && r.data && r.data.thresholds_source === 'pending');
+      this.selfNext = Date.now() + (this.agentDown ? DOWN_POLL_MS : pending ? PENDING_POLL_MS : POLL_MS);
     },
 
     // The integration's state, with the page's own poll.
@@ -1058,13 +1065,14 @@ function cc() {
       }
       setTimeout(() => this.pwWait(), RESTART_POLL_MS);
     },
-    // The line that says which thresholds judge the drives.
-    get thresholdsLine() {
-      const data = this.self || this.selfLastGood;
-      const source = data && data.thresholds_source;
-      if (source === 'integration') return 'Thresholds: from the SMART Sniffer integration.';
-      if (source === 'app') return "Thresholds: this App's own.";
-      return '';
+    // Which thresholds judged a drive, for its card's footer: a short
+    // label, and the whole sentence (the tooltip, and the text a screen
+    // reader reads). Nothing while the App's first answer is pending, and
+    // nothing on cards thresholds do not judge (pools, filesystems).
+    thresholds(c) {
+      if (c.kind !== 'drive') return null;
+      const source = c.it && c.it.thresholds_source;
+      return THRESHOLD_SOURCES[source] || null;
     },
 
     // This app's agent, for the line at the top of the page.

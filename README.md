@@ -31,7 +31,7 @@ Install both, and this box shows up in the Control Center next to your NAS, your
 - **One card per drive**, ZFS pool and filesystem, with its health (**Attention**, **Maybe**, **Health OK** or **Health not known**) and the rows that caused it.
 - **At a glance**: temperature, days powered on, data written and read, and wear, plus the disk space of every mount, including USB drives under `/media` and the data disk after **Move data disk**. Drives added in Home Assistant under **Settings > System > Storage > Add storage > Local disk** show their disk space when added for **Media**. Added for **Backup** or **Share**, they show their SMART health but no disk space: backup storage is not visible to Apps, and the App does not map `/share`. Restart the App after plugging in or adding a drive.
 - **Details** with the model, serial, firmware, capacity and interface, every SMART attribute and the drive's Device Statistics, and **Connect by hand** with the agent's host, port and [password](#the-agents-password). Click a number or a value for the exact figure and a copy button. Serial numbers show only their last four characters until clicked, so screenshots do not carry them.
-- **Thresholds**: with integration 1.0 or later holding this box, the page judges with the thresholds set there. A line under the cards says which are in use.
+- **Thresholds**: with integration 1.0 or later holding this box, the page judges with the thresholds set there. Each drive card's footer says which are in use (Thresholds: integration, or Thresholds: this App).
 - **A card under the drives** opens the Control Center, or tells you how to install or update the integration.
 
 The page refreshes every 30 seconds. Each card downloads as a JSON file.

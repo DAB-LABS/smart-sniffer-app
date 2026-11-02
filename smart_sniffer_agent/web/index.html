@@ -291,6 +291,9 @@
         <div class="c-foot">
           <span class="seen" x-text="lastSeen(c)"></span>
           <span class="act-note" x-show="footNote(c)" x-text="footNote(c)"></span>
+          <!-- Which thresholds judged this drive: the short label shown, the
+               whole sentence as its tooltip and for screen readers -->
+          <template x-if="thresholds(c)"><span class="thr-src" :title="thresholds(c).long"><span aria-hidden="true" x-text="thresholds(c).short"></span><span class="sr-only" x-text="thresholds(c).long"></span></span></template>
           <span class="icons">
             <template x-if="canDownload(c)"><button class="icon" type="button" aria-label="Download this card as a file" title="Download as a file" @click="download(c)"><svg aria-hidden="true"><use href="#download"/></svg></button></template>
           </span>
@@ -314,8 +317,6 @@
       </section>
     </template>
   </div>
-
-  <p class="thr-line" x-show="thresholdsLine" x-text="thresholdsLine"></p>
 
   <footer class="app-foot">
     <a :href="appPage('logs')" target="_top" title="The app's log in Home Assistant, from the agent and this page">App log</a>

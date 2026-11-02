@@ -39,7 +39,8 @@ Referer.
     MDNS            on | off                  the agent's mDNS name in /app/info, or none
     PASSWORD        text | none               the agent's password (the token option) at
                                               start (default sneaky-4821-trenchcoat-falcon)
-    THRESHOLDS      app | integration         which thresholds the drives say judged them
+    THRESHOLDS      app | integration |       which thresholds the drives say judged them;
+                    pending                   pending: the App's first answer not in yet
     RESTART         seconds                   how long the App is down after a password
                                               Save (default 1.5); its run id then changes
     LATENCY         seconds                   added to every route (default 0.02)
@@ -712,7 +713,7 @@ def drive_item(drive: dict, flags) -> dict:
 
 
 def thresholds_source(flags) -> str:
-    return "integration" if flags["THRESHOLDS"] == "integration" else "app"
+    return flags["THRESHOLDS"] if flags["THRESHOLDS"] in ("integration", "pending") else "app"
 
 
 def pool_item(p: dict, flags) -> dict:

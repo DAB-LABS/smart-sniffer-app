@@ -44,7 +44,7 @@ Key behaviors:
   the integration on the same Home Assistant gets it through discovery. Another Home
   Assistant finds the agent by mDNS and asks for the password.
 - With integration 1.0+ holding this box, the page judges drives with the integration's
-  thresholds for it; otherwise with the App's own. A line on the page says which.
+  thresholds for it; otherwise with the App's own. Each drive card's footer says which.
 - The page answers only Home Assistant's ingress, so only Home Assistant admins see the
   password. It is never put on a command line or in the log.
 - App 0.4.0 hands the machines App 0.3.x kept (address, port, password, names, hidden

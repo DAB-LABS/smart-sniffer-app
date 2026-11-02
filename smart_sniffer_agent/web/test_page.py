@@ -1506,11 +1506,46 @@ def test_a_refused_password_says_why(open_page):
     assert _dev_password(p)["saves"] == []
 
 
-@pytest.mark.parametrize("source,line", [
-    ("app", "Thresholds: this App's own."),
-    ("integration", "Thresholds: from the SMART Sniffer integration."),
+@pytest.mark.parametrize("source,short,long", [
+    ("app", "Thresholds: this App", "Judged by this App's own thresholds."),
+    ("integration", "Thresholds: integration", "Judged by the SMART Sniffer integration's thresholds."),
 ])
-def test_one_line_says_which_thresholds_judge_the_drives(open_page, source, line):
-    p = open_page(f"THRESHOLDS={source}")
-    assert p.wait(lambda: p.page.locator(".thr-line").is_visible())
-    assert p.page.locator(".thr-line").inner_text() == line
+@pytest.mark.parametrize("width", [1280, 390])
+def test_each_drive_card_footer_says_which_thresholds_judged_it(open_page, source, short, long, width):
+    """In the footer, right of Last seen and muted like it, with the whole
+    sentence as its tooltip and as text a screen reader reads. Pools and
+    filesystems, which thresholds do not judge, have none; the page has no
+    line of its own."""
+    p = open_page(f"THRESHOLDS={source}&DRIVES=mixed&POOL=online", width)
+    assert p.page.locator(".thr-line").count() == 0
+    for cid in (BARRACUDA, NVME, RED):
+        foot = by_id(p, cid).locator(".c-foot")
+        thr = foot.locator(".thr-src")
+        assert thr.count() == 1, cid
+        assert thr.locator("[aria-hidden=true]").inner_text() == short
+        assert thr.get_attribute("title") == long
+        assert thr.locator(".sr-only").text_content() == long
+        # Right of Last seen, on its line (or the next, on a narrow card), and
+        # muted the same.
+        seen = foot.locator(".seen")
+        sbox, tbox = seen.bounding_box(), thr.bounding_box()
+        assert tbox["x"] > sbox["x"]
+        styles = [e.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).fontSize]") for e in (seen, thr)]
+        assert styles[0] == styles[1], styles
+    pool = p.page.locator("article.card", has_text="tank").first
+    assert pool.locator(".c-foot .thr-src").count() == 0
+    fs_cards = p.page.locator("article.card:not(:has(.chev))")
+    assert all(c.locator(".thr-src").count() == 0 for c in fs_cards.all())
+    assert_no_scroll(p)
+    assert_inside_cards(p)
+
+
+def test_no_thresholds_label_while_the_first_answer_is_pending(open_page):
+    """At the App's start, until the integration's first answer: no label
+    (never "this App" for a moment), and the page asks again soon."""
+    p = open_page("THRESHOLDS=pending")
+    c = by_id(p, NVME)
+    c.locator(".c-foot .seen").wait_for()
+    assert c.locator(".c-foot .thr-src").count() == 0
+    wait = p.page.evaluate("Alpine.$data(document.body).selfNext - Date.now()")
+    assert 0 < wait <= 3000, wait

@@ -44,7 +44,7 @@ The page shows this box only, read only, in the same design as the Control Cente
 
 The line at the top gives this agent's address and mDNS name, with copy buttons. The header shows the App version, whether the agent is answering, and the integration release its rules come from (**rules**). The page refreshes itself every 30 seconds.
 
-Arranging, hiding, renaming, removing cards and editing thresholds happen in the Control Center. With integration 1.0 or later holding this box, this page judges with the thresholds set there, so the page and Home Assistant agree. Otherwise it judges with the integration's default limits, plus any thresholds you saved for this box in App 0.3.x. A line under the cards says which.
+Arranging, hiding, renaming, removing cards and editing thresholds happen in the Control Center. With integration 1.0 or later holding this box, this page judges with the thresholds set there, so the page and Home Assistant agree. Otherwise it judges with the integration's default limits, plus any thresholds you saved for this box in App 0.3.x. Each drive card's footer says which: **Thresholds: integration** or **Thresholds: this App**.
 
 ### The card under the drives
 

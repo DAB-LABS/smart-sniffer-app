@@ -653,4 +653,10 @@ table.attrs .thr-in.pending { color: var(--paper); font-weight: 700; }
 .pass-input:focus { outline: none; border-color: var(--grey); }
 .pass-warn { color: var(--grey); }
 .pass-err { color: var(--paper); }
-.thr-line { margin: 14px 0 0; font-size: 0.74rem; color: var(--dim); }
+/* App 1.0: which thresholds judged a drive, in its footer on the right,
+   muted like Last seen */
+.thr-src { position: relative; margin-left: auto; font-family: var(--mono); font-size: 0.7rem; color: var(--dim); white-space: nowrap; }
+.thr-src + .icons { margin-left: 0; }
+.c-foot { flex-wrap: wrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
