@@ -22,6 +22,7 @@ Referer.
                                               none; 1: the NVMe; 2: the NVMe and a WDC with
                                               Device Statistics
     VDISK           0 | 1                     1: add a QEMU virtual disk
+    VDISK_SERIAL    text                      that disk's serial (default QM00005)
     POOL            0 | online | degraded     a ZFS pool on this box, or none
     RULES           ok | missing              missing: no verdicts, the rules line says so
     INTEGRATION     loaded | no_entries | restart | panel_failed | update | missing |
@@ -100,6 +101,7 @@ DEFAULTS = {
     "SELF_DELAY": "0",
     "DRIVES": "board",
     "VDISK": "0",
+    "VDISK_SERIAL": "QM00005",
     "POOL": "0",
     "RULES": "ok",
     "INTEGRATION": "loaded",
@@ -642,7 +644,7 @@ def self_drives(flags) -> list:
                                  devstat_unc_count=0, firmware="LDGNW400", capacity=14_000_519_643_136,
                                  link=("6.0 Gb/s", "6.0 Gb/s")))
     if flags["VDISK"] == "1":
-        out.append(unsupported_drive("sdc", "QEMU HARDDISK", "QM00005", "/dev/sdc"))
+        out.append(unsupported_drive("sdc", "QEMU HARDDISK", flags["VDISK_SERIAL"] or "QM00005", "/dev/sdc"))
     return out
 
 

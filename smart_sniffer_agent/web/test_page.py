@@ -67,7 +67,7 @@ def server():
     env = dict(os.environ, QUIET="1", LATENCY="0.01")
     for key in ("AGENT", "DRIVES", "VDISK", "POOL", "RULES", "INTEGRATION", "HAOS_ENTRY", "PANEL_PATH",
                 "HACS", "ADD", "HOSTNAME", "SLUG", "HA_VERSION", "MDNS", "SELF_DELAY",
-                "PASSWORD", "THRESHOLDS", "RESTART"):
+                "PASSWORD", "THRESHOLDS", "RESTART", "VDISK_SERIAL"):
         env.pop(key, None)
     proc = subprocess.Popen([sys.executable, str(WEB_DIR / "devserver.py"), "--port", str(port)], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1020,6 +1020,27 @@ def test_a_phone_gets_no_underline_and_a_tap_opens_the_number(open_page):
     assert big.evaluate("e => getComputedStyle(e).textDecorationLine") == "none"
 
 
+def _assert_pop_placed(p, pop, trigger, width, label=""):
+    """The popover's right edge sits on the value's right edge, unless that
+    would put it past either side of the window (8 px kept free)."""
+    box = pop.evaluate("e => e.getBoundingClientRect().toJSON()")
+    right = trigger.evaluate("e => e.getBoundingClientRect().right")
+    assert box["left"] >= 8 - 0.5 and box["right"] <= width - 8 + 0.5, (label, box)
+    want_right = min(right, width - 8)
+    if want_right - box["width"] >= 8:
+        assert abs(box["right"] - want_right) <= 1, (label, right, box)
+    else:
+        assert abs(box["left"] - 8) <= 1, (label, box)
+    return box
+
+
+def _one_line(locator) -> bool:
+    """The text in the element takes one line."""
+    return locator.evaluate("""e => { const r = document.createRange(); r.selectNodeContents(e);
+      const tops = new Set([...r.getClientRects()].map((x) => Math.round(x.top)));
+      return tops.size === 1; }""")
+
+
 def _text_fields(c):
     """(label, value, trigger, shown) for Model, Serial and Firmware in
     Details and Host, Port and mDNS under Connect by hand. value is the full
@@ -1060,12 +1081,9 @@ def test_details_text_values_open_the_popover_and_copy_the_value(open_page, widt
         assert pop.locator("button.copy svg use").get_attribute("href") == "#copy"
         box = pop.evaluate("e => e.getBoundingClientRect().toJSON()")
         assert box["left"] >= 0 and box["right"] <= width, (label, box)
-        # Under the value where it fits, else pulled in from the right edge.
-        left = trigger.evaluate("e => e.getBoundingClientRect().left")
-        if left + box["width"] <= width - 8:
-            assert abs(box["left"] - left) <= 1, (label, left, box)
-        else:
-            assert abs(box["right"] - (width - 8)) <= 1, (label, box)
+        # Under the value, its right edge on the value's right edge, growing
+        # to the left; pushed in where that would leave the window.
+        _assert_pop_placed(p, pop, trigger, width, label)
         pop.locator("button.copy").click()
         assert p.wait(lambda: pop.locator(".copied").is_visible() and pop.locator(".copied").inner_text() == "copied")
         assert p.page.evaluate("navigator.clipboard.readText()") == value, label
@@ -1549,3 +1567,71 @@ def test_no_thresholds_label_while_the_first_answer_is_pending(open_page):
     assert c.locator(".c-foot .thr-src").count() == 0
     wait = p.page.evaluate("Alpine.$data(document.body).selfNext - Date.now()")
     assert 0 < wait <= 3000, wait
+
+
+
+# ── The copy popover: one line where it fits, inside the window ─────────────
+
+SERIAL20 = "WD-WX12D3456789ABCDE"
+LONG_PASSWORD = "4821-unflappable-safehouse-hummingbird"
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_the_popover_keeps_a_value_on_one_line_and_inside_the_window(open_page, width):
+    """A 20-character serial, the HAOS agent host and a generated password
+    open the popover on one line, right-aligned to the value and growing
+    left, inside the window; Copy copies the whole value."""
+    p = open_page(f"DRIVES=mixed&VDISK=1&VDISK_SERIAL={SERIAL20}&PASSWORD={LONG_PASSWORD}", width)
+    p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    assert len(SERIAL20) == 20
+    pop = p.page.locator(".numpop")
+    vd = by_id(p, f"self|{SERIAL20}")
+    _open(vd)
+    serial = vd.locator("dl.kv.ident > div", has_text="Serial").locator(".bign.txt")
+    host = vd.locator(".conn > .cp", has_text="Host").locator(".bign.txt")
+    vd.locator(".pass-reveal").click()
+    password = vd.locator(".pass-val")
+    for label, trigger, value in (("serial", serial, SERIAL20), ("host", host, "local-smart-sniffer-agent"),
+                                  ("password", password, LONG_PASSWORD)):
+        trigger.click()
+        pop.wait_for()
+        assert pop.locator(".cp-v").text_content() == value, label
+        if width == 1280:
+            assert _one_line(pop.locator(".cp-v")), label
+        _assert_pop_placed(p, pop, trigger, width, label)
+        pop.locator("button.copy").click()
+        assert p.wait(lambda: pop.locator(".copied").is_visible())
+        assert p.page.evaluate("navigator.clipboard.readText()") == value, label
+        # The note that came with Copy keeps it inside the window too.
+        _assert_pop_placed(p, pop, trigger, width, label)
+        trigger.click()
+        assert p.wait(lambda: pop.count() == 0), label
+    # At 390 px the host and the serial still fit on one line.
+    if width == 390:
+        for trigger in (serial, host):
+            trigger.click()
+            pop.wait_for()
+            assert _one_line(pop.locator(".cp-v"))
+            trigger.click()
+            assert p.wait(lambda: pop.count() == 0)
+    assert_no_scroll(p)
+
+
+def test_a_value_wider_than_the_window_wraps_at_the_widest_that_fits(open_page):
+    """Only a value wider than the window wraps; the popover is then as wide
+    as the window allows, and Copy still copies all of it."""
+    long_value = "spy-" * 30 + "falcon"
+    p = open_page(f"PASSWORD={long_value}", 390)
+    p.ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    c = by_id(p, NVME)
+    _open(c)
+    c.locator(".pass-reveal").click()
+    trigger = c.locator(".pass-val")
+    trigger.click()
+    pop = p.page.locator(".numpop")
+    pop.wait_for()
+    box = _assert_pop_placed(p, pop, trigger, 390)
+    assert abs(box["width"] - (390 - 16)) <= 1, box
+    assert not _one_line(pop.locator(".cp-v"))
+    pop.locator("button.copy").click()
+    assert p.wait(lambda: p.page.evaluate("navigator.clipboard.readText()") == long_value)

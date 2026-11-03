@@ -104,6 +104,8 @@ function cc() {
   // open card's closed height at the card width it was measured at, and
   // each closed card's content height when its row was last pinned.
   const rows = { closedH: {}, sig: {}, busy: false, queued: false, full: false, check: new Set() };
+  // Watches the open copy popover's size, kept off the reactive state.
+  let popSize = null;
   return {
     info: null,
     self: null,
@@ -913,15 +915,28 @@ function cc() {
       const left = Math.max(8, Math.min(r.left, window.innerWidth - 240));
       const copy = copyText === undefined ? String(text).replace(/[^0-9]/g, '') : String(copyText);
       this.popOpenedAt = Date.now();
-      this.ui.pop = { el, text, copy, x: left, y: r.bottom + 4 };
-      // Then by its real width: under the value where it fits, else as far
-      // right as the window allows (a long value never runs off the edge).
+      this.ui.pop = { el, text, copy, x: left, y: r.bottom + 4, right: r.right };
       this.$nextTick(() => {
+        this.placeExact(el);
+        // Placed again whenever its size changes (Copy's "copied" note).
         const box = document.querySelector('.numpop');
-        if (!box || !this.ui.pop || this.ui.pop.el !== el) return;
-        const x = Math.max(8, Math.min(r.left, window.innerWidth - box.getBoundingClientRect().width - 8));
-        if (x !== this.ui.pop.x) this.ui.pop.x = x;
+        if (popSize) popSize.disconnect();
+        popSize = box && window.ResizeObserver ? new ResizeObserver(() => this.placeExact()) : null;
+        if (popSize) popSize.observe(box);
       });
+    },
+    // The popover sits under the value with its right edge on the value's
+    // right edge and grows to the left, as wide as its content (the value on
+    // one line), never past either side of the window (8 px kept free). Only
+    // a value wider than the window wraps. Placed again when its width
+    // changes (Copy's "copied" note).
+    placeExact(el) {
+      const box = document.querySelector('.numpop');
+      const pop = this.ui.pop;
+      if (!box || !pop || (el && pop.el !== el)) return;
+      const width = box.getBoundingClientRect().width;
+      const x = Math.max(8, Math.min(pop.right, window.innerWidth - 8) - width);
+      if (Math.abs(x - pop.x) > 0.5) pop.x = x;
     },
     closeExact() {
       this.ui.pop = null;
@@ -1113,7 +1128,9 @@ function cc() {
       this.ui.copied = key;
       this.ui.copiedText = ok ? 'copied' : 'selected';
       clearTimeout(this.copyTimer);
-      this.copyTimer = setTimeout(() => { if (this.ui.copied === key) this.ui.copied = ''; }, 1600);
+      this.copyTimer = setTimeout(() => {
+        if (this.ui.copied === key) this.ui.copied = '';
+      }, 1600);
     },
 
     // Pools
