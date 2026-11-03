@@ -9,12 +9,13 @@
 ## App Store
 - [x] **AppArmor profile** -- `apparmor.txt` since v0.2.7, with S6 init access and targeted drive device access (`/dev/sd*`, `/dev/nvme*`, `/dev/sg*`).
 - [ ] Publish container images to `ghcr.io/dab-labs/` (uncomment `image:` in `config.yaml`), so installs stop building locally.
-- [ ] Move from `stage: experimental` to `stage: stable`.
+- [x] **Stable** -- done in v1.0.0. The `stage: experimental` line is gone, so the App is `stable`, the Supervisor's default.
 - [ ] Review the App Store submission requirements and guidelines.
 
 ## Discovery and multi-instance
 - [x] **Unique mDNS name** -- `run.sh` passes `--mdns-name=smartha-<ha-hostname>`.
 - [x] **Found for you** -- since v0.4.0 the App posts a Supervisor discovery and Home Assistant offers this box as "SMART Sniffer (HAOS)"; its devices carry the `HAOS` label instead of an internal address.
+- [x] **The password goes with it** -- v1.0.0. The discovery carries the agent's password (empty when none is set), so the integration's entry for this box follows every change; it is posted once the App's agent answers.
 
 ## The App's page
 - [x] This box only, read only, in the Control Center's design -- v0.4.0. Field agents, replicas, the network scan and Agentic access moved to the integration.

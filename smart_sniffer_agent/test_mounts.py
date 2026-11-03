@@ -384,3 +384,9 @@ def test_main_wakes_an_automount_and_logs_only_mounts(tmp_path, monkeypatch, cap
     captured = capsys.readouterr()
     assert captured.out.splitlines() == ["/data on /dev/sda8 (ext4)", "/media/usbdisk on /dev/sdb1 (ext4)"]
     assert captured.err == ""
+
+
+def test_the_app_is_stable():
+    """1.0: no stage key, so the Supervisor takes its default, stable
+    (developers.home-assistant.io, docs/apps/configuration.md: stage)."""
+    assert not re.search(r"^\s*stage\s*:", CONFIG_YAML, re.M)

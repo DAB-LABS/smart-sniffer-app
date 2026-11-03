@@ -12,6 +12,7 @@ SMART Sniffer 1.0. This box's agent now has a password: new installs get one, an
 
 ### Changed
 - **Serial numbers are masked on the cards**: only the last four characters show, so screenshots and videos do not carry them. Click one for the whole number and Copy.
+- **The App is no longer marked experimental** in the App store.
 - Ships agent v1.0.0.
 
 ### Upgrade notes

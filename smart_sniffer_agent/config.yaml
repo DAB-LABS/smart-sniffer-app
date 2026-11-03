@@ -113,5 +113,5 @@ schema:
 # Container image (uncomment for published releases, must be removed for local builds)
 # image: "ghcr.io/dab-labs/{arch}-smart-sniffer-agent"
 
-# Mark as experimental during development
-stage: experimental
+# No stage key: the App is stable, the Supervisor's default (1.0; it was
+# experimental before).
