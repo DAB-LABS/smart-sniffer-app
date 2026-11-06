@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.0.0] -- draft
+## [1.0.0] -- 2026-11-06
 
 SMART Sniffer 1.0. This box's agent now has a password: new installs get one, and you can see, generate or change it on the App's page. The SMART Sniffer integration on this Home Assistant follows it by itself. Update the integration to 1.0 first, then this App.
 
@@ -13,6 +13,7 @@ SMART Sniffer 1.0. This box's agent now has a password: new installs get one, an
 ### Changed
 - **Serial numbers are masked on the cards**: only the last four characters show, so screenshots and videos do not carry them. Click one for the whole number and Copy.
 - **The App is no longer marked experimental** in the App store.
+- The copy popover fits values on one line, anchored to the value you clicked.
 - Ships agent v1.0.0.
 
 ### Upgrade notes
